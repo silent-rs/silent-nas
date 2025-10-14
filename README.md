@@ -9,24 +9,24 @@ Silent-NAS 是 Silent Odyssey 第六阶段的实验项目，旨在构建一个�
 > **注意**：本项目仅实现服务端功能，客户端使用现有成熟产品（如 Nextcloud、FolderSync、rclone 等），不在当前项目范围内开发。
 
 ### 核心传输与控制
-- ✅ 基于 QUIC/WebTransport 的高速文件传输
+- ✅ 基于 QUIC 的高速文件传输
 - ✅ 基于 gRPC 的文件控制与元数据接口
 - ✅ 使用 NATS 进行文件变更事件推送
+- ✅ 用户鉴权与访问控制（基础实现）
 - 🚧 基于 CRDT 的多客户端文件同步与冲突合并
-- 🚧 用户鉴权与访问控制
 
 ### 服务端协议兼容层
-- 🚧 WebDAV 服务端实现（支持 `PUT`、`PROPFIND`、`PATCH` 等标准操作）
-- 🚧 S3 兼容 API 实现（支持基本的对象存储操作）
-- 🚧 HTTP/HTTPS 文件访问接口
+- ✅ HTTP/HTTPS 文件访问接口（REST API）
+- 🚧 WebDAV 服务端实现（规划中）
+- 🚧 S3 兼容 API 实现（规划中）
 - ❌ NFS/SMB 协议支持（后续阶段）
 - ❌ 多协议统一访问网关（后续阶段）
 
 ### 服务端自动化与同步能力
-- 🚧 文件变更自动检测与事件推送
-- 🚧 跨节点文件同步支持
-- 🚧 断点续传与分块上传支持
-- 🚧 文件版本管理与冲突处理
+- ✅ 文件变更自动检测与事件推送
+- 🚧 跨节点文件同步支持（规划中）
+- 🚧 断点续传与分块上传支持（规划中）
+- 🚧 文件版本管理与冲突处理（规划中）
 - ❌ 元数据索引与全文检索（后续阶段）
 
 ### 分布式与高级特性
@@ -35,27 +35,85 @@ Silent-NAS 是 Silent Odyssey 第六阶段的实验项目，旨在构建一个�
 - ❌ 全局命名空间与分布式锁（后续阶段）
 
 ## 架构设计
-建议的项目目录结构如下：
+
+### 项目目录结构
 ```
 src/
 ├── main.rs          # 启动入口
-├── storage.rs       # 文件系统与分块管理
-├── transfer.rs      # QUIC/WebTransport 文件传输逻辑
-├── rpc.rs           # gRPC 控制接口
-├── notify.rs        # NATS 文件事件推送
-├── sync.rs          # CRDT 文件同步逻辑
-└── auth.rs          # 用户鉴权与访问控制
+├── config.rs        # 配置管理
+├── error.rs         # 错误定义
+├── models.rs        # 数据模型
+├── storage.rs       # 文件存储管理
+├── transfer.rs      # QUIC 文件传输
+├── rpc.rs           # gRPC 接口
+├── notify.rs        # NATS 事件推送
+└── auth.rs          # 用户认证（基础版本）
+
+proto/
+└── file_service.proto  # gRPC 协议定义
+
+docs/
+└── 需求整理.md      # 需求文档
 ```
 
-## 使用示例
-运行服务器：
+### 已实现的模块
+- **storage.rs**: 文件上传/下载/删除、元数据管理、SHA-256 校验
+- **transfer.rs**: QUIC 服务端、自签名证书、双向流通信
+- **rpc.rs**: gRPC 文件服务（GetFile/ListFiles/DeleteFile）
+- **notify.rs**: NATS 事件发布（created/modified/deleted）
+- **auth.rs**: 基于角色的访问控制（Admin/User/ReadOnly）
+
+## 快速开始
+
+### 1. 启动 NATS 服务器
+```bash
+# 使用 Docker
+docker run -d --name nats -p 4222:4222 nats:latest
+
+# 或使用本地安装
+nats-server
+```
+
+### 2. 配置服务
+编辑 `config.toml`：
+```toml
+[server]
+host = "127.0.0.1"
+http_port = 8080
+grpc_port = 50051
+quic_port = 4433
+webdav_port = 8081
+
+[storage]
+root_path = "./storage"
+chunk_size = 4194304  # 4MB
+
+[nats]
+url = "nats://127.0.0.1:4222"
+topic_prefix = "silent.nas.files"
+```
+
+### 3. 运行服务
 ```bash
 cargo run
 ```
-上传或下载文件（示例）：
+
+### 4. 测试 HTTP API
 ```bash
-curl -F "file=@example.txt" http://127.0.0.1:8080/upload
-curl -O http://127.0.0.1:8080/download/example.txt
+# 上传文件
+curl -X POST -d @example.txt http://127.0.0.1:8080/api/files
+
+# 下载文件
+curl http://127.0.0.1:8080/api/files/<file_id> -o downloaded.txt
+
+# 列出文件
+curl http://127.0.0.1:8080/api/files
+
+# 删除文件
+curl -X DELETE http://127.0.0.1:8080/api/files/<file_id>
+
+# 健康检查
+curl http://127.0.0.1:8080/api/health
 ```
 
 

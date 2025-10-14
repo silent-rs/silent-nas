@@ -14,6 +14,7 @@ pub struct ServerConfig {
     pub http_port: u16,
     pub grpc_port: u16,
     pub quic_port: u16,
+    pub webdav_port: u16,
     pub host: String,
 }
 
@@ -36,6 +37,7 @@ impl Default for Config {
                 http_port: 8080,
                 grpc_port: 50051,
                 quic_port: 4433,
+                webdav_port: 8081,
                 host: "127.0.0.1".to_string(),
             },
             storage: StorageConfig {

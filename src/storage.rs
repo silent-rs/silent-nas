@@ -29,16 +29,23 @@ impl StorageManager {
         Ok(())
     }
 
-    /// 获取文件的完整路径
-    fn get_full_path(&self, file_id: &str) -> PathBuf {
+    /// 获取文件的完整路径（基于 file_id）
+    fn get_file_path(&self, file_id: &str) -> PathBuf {
         // 使用前2个字符作为子目录，避免单目录文件过多
         let prefix = &file_id[..2.min(file_id.len())];
         self.root_path.join(prefix).join(file_id)
     }
 
+    /// 获取文件的完整路径（基于相对路径，用于 WebDAV）
+    #[allow(dead_code)]
+    pub fn get_full_path(&self, relative_path: &str) -> PathBuf {
+        let path = relative_path.trim_start_matches('/');
+        self.root_path.join(path)
+    }
+
     /// 保存文件
     pub async fn save_file(&self, file_id: &str, data: &[u8]) -> Result<FileMetadata> {
-        let file_path = self.get_full_path(file_id);
+        let file_path = self.get_file_path(file_id);
 
         // 创建父目录
         if let Some(parent) = file_path.parent() {
@@ -72,7 +79,7 @@ impl StorageManager {
 
     /// 读取文件
     pub async fn read_file(&self, file_id: &str) -> Result<Vec<u8>> {
-        let file_path = self.get_full_path(file_id);
+        let file_path = self.get_file_path(file_id);
 
         if !file_path.exists() {
             return Err(NasError::FileNotFound(file_id.to_string()));
@@ -85,7 +92,7 @@ impl StorageManager {
 
     /// 删除文件
     pub async fn delete_file(&self, file_id: &str) -> Result<()> {
-        let file_path = self.get_full_path(file_id);
+        let file_path = self.get_file_path(file_id);
 
         if !file_path.exists() {
             return Err(NasError::FileNotFound(file_id.to_string()));
@@ -99,13 +106,13 @@ impl StorageManager {
     /// 检查文件是否存在
     #[allow(dead_code)]
     pub async fn file_exists(&self, file_id: &str) -> bool {
-        let file_path = self.get_full_path(file_id);
+        let file_path = self.get_file_path(file_id);
         file_path.exists()
     }
 
     /// 获取文件元数据
     pub async fn get_metadata(&self, file_id: &str) -> Result<FileMetadata> {
-        let file_path = self.get_full_path(file_id);
+        let file_path = self.get_file_path(file_id);
 
         if !file_path.exists() {
             return Err(NasError::FileNotFound(file_id.to_string()));

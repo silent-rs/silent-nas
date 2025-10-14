@@ -1,3 +1,4 @@
+mod auth;
 mod config;
 mod error;
 mod models;
@@ -5,6 +6,7 @@ mod notify;
 mod rpc;
 mod storage;
 mod transfer;
+// mod webdav;  // 将在后续版本实现
 
 use config::Config;
 use error::Result;
@@ -68,6 +70,11 @@ async fn main() -> Result<()> {
         }
     });
 
+    // WebDAV 将在后续版本实现
+    // 暂时注释掉
+    // let webdav_addr = format!("{}:{}", config.server.host, config.server.webdav_port);
+    info!("WebDAV 服务器将在后续版本实现");
+
     // 启动 QUIC 服务器
     let quic_addr: SocketAddr = format!("{}:{}", config.server.host, config.server.quic_port)
         .parse()
@@ -77,9 +84,9 @@ async fn main() -> Result<()> {
     quic_server.start(quic_addr).await?;
 
     info!("所有服务已启动");
-    info!("  HTTP:  http://{}", http_addr);
-    info!("  gRPC:  {}", grpc_addr);
-    info!("  QUIC:  {}", quic_addr);
+    info!("  HTTP:    http://{}", http_addr);
+    info!("  gRPC:    {}", grpc_addr);
+    info!("  QUIC:    {}", quic_addr);
 
     // 保持运行
     tokio::signal::ctrl_c().await.expect("监听 Ctrl+C 失败");

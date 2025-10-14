@@ -1,34 +1,45 @@
 # Silent-NAS 运行指南
 
-## 前置要求
+## 系统要求
 
-### 1. 安装 NATS 服务器
+- Rust 1.83+ (edition 2024)
+- NATS 服务器
+- 足够的磁盘空间用于文件存储
 
-Silent-NAS 依赖 NATS 进行事件推送，需要先安装并启动 NATS 服务器。
+## 已实现的功能
 
-**macOS 安装：**
+✅ **核心功能**
+- HTTP REST API（文件上传/下载/删除/列表）
+- gRPC 接口（高性能文件操作）
+- QUIC 文件传输（高速传输协议）
+- NATS 事件推送（文件变更通知）
+- 基础用户认证（角色权限管理）
+
+## 依赖安装
+
+### 1. 安装 Rust
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```
+
+### 2. 安装 NATS
+
+#### macOS
 ```bash
 brew install nats-server
 ```
 
-**启动 NATS：**
+#### Linux
 ```bash
-nats-server
+# 下载最新版本
+curl -L https://github.com/nats-io/nats-server/releases/download/v2.10.5/nats-server-v2.10.5-linux-amd64.tar.gz | tar xz
+sudo mv nats-server-v2.10.5-linux-amd64/nats-server /usr/local/bin/
 ```
 
-NATS 默认运行在 `nats://127.0.0.1:4222`
-
-### 2. Rust 环境
-
-确保已安装 Rust 1.83+ (edition 2024)：
+#### Docker
 ```bash
-rustc --version
-```
-
-## 构建项目
-
-```bash
-cargo build
+docker pull nats:latest
 ```
 
 ## 运行服务器

@@ -31,5 +31,10 @@ rcgen = "0.13"
 tonic = "0.12"
 prost = "0.13"
 
+# WebDAV support
+quick-xml = { version = "0.36", features = ["serialize"] }
+mime_guess = "2"
+urlencoding = "2"
+
 [build-dependencies]
 tonic-build = "0.12"

@@ -6,7 +6,7 @@ mod notify;
 mod rpc;
 mod storage;
 mod transfer;
-// mod webdav;  // 将在后续版本实现
+mod webdav;
 
 use config::Config;
 use error::Result;
@@ -70,10 +70,7 @@ async fn main() -> Result<()> {
         }
     });
 
-    // WebDAV 将在后续版本实现
-    // 暂时注释掉
-    // let webdav_addr = format!("{}:{}", config.server.host, config.server.webdav_port);
-    info!("WebDAV 服务器将在后续版本实现");
+    // WebDAV 现已集成到 HTTP 服务器中
 
     // 启动 QUIC 服务器
     let quic_addr: SocketAddr = format!("{}:{}", config.server.host, config.server.quic_port)
@@ -217,12 +214,40 @@ async fn start_http_server(
         }
     };
 
+    // WebDAV 处理器
+    let webdav_handler =
+        webdav::WebDavHandler::new(storage.clone(), notifier.clone(), "/webdav".to_string());
+
+    // WebDAV 路由 - 处理所有方法
+    let webdav_all = move |req: Request| {
+        let handler = webdav_handler.clone();
+        async move { handler.handle(req).await }
+    };
+
     let route = Route::new("api")
         .append(Route::new("files").post(upload).get(list))
         .append(Route::new("files/<id>").get(download).delete(delete))
-        .append(Route::new("health").get(health));
+        .append(Route::new("health").get(health))
+        .append(
+            Route::new("webdav")
+                .get(webdav_all.clone())
+                .post(webdav_all.clone())
+                .put(webdav_all.clone())
+                .delete(webdav_all.clone())
+                .options(webdav_all.clone()),
+        )
+        .append(
+            Route::new("webdav/*path")
+                .get(webdav_all.clone())
+                .post(webdav_all.clone())
+                .put(webdav_all.clone())
+                .delete(webdav_all.clone())
+                .options(webdav_all),
+        );
 
     info!("HTTP 服务器启动: {}", addr);
+    info!("  - REST API: http://{}/api", addr);
+    info!("  - WebDAV:   http://{}/webdav", addr);
     Server::new().run(route);
 
     Ok(())

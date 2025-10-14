@@ -17,7 +17,7 @@ Silent-NAS 是 Silent Odyssey 第六阶段的实验项目，旨在构建一个�
 
 ### 服务端协议兼容层
 - ✅ HTTP/HTTPS 文件访问接口（REST API）
-- 🚧 WebDAV 服务端实现（规划中）
+- ✅ WebDAV 服务端实现（完整支持）
 - 🚧 S3 兼容 API 实现（规划中）
 - ❌ NFS/SMB 协议支持（后续阶段）
 - ❌ 多协议统一访问网关（后续阶段）
@@ -62,6 +62,7 @@ docs/
 - **rpc.rs**: gRPC 文件服务（GetFile/ListFiles/DeleteFile）
 - **notify.rs**: NATS 事件发布（created/modified/deleted）
 - **auth.rs**: 基于角色的访问控制（Admin/User/ReadOnly）
+- **webdav.rs**: WebDAV 协议服务器（PROPFIND/GET/PUT/DELETE/MKCOL/MOVE/COPY）
 
 ## 快速开始
 
@@ -114,6 +115,33 @@ curl -X DELETE http://127.0.0.1:8080/api/files/<file_id>
 
 # 健康检查
 curl http://127.0.0.1:8080/api/health
+```
+
+### 5. 测试 WebDAV
+使用任意 WebDAV 客户端连接：
+```
+WebDAV URL: http://127.0.0.1:8080/webdav
+```
+
+**推荐的客户端：**
+- **macOS**: Finder → 前往 → 连接服务器
+- **Windows**: 网络位置 → 添加一个网络位置
+- **Linux**: Nautilus/Dolphin 文件管理器
+- **跨平台**: Cyberduck, WinSCP, rclone
+
+**命令行测试：**
+```bash
+# 上传文件
+curl -X PUT -T example.txt http://127.0.0.1:8080/webdav/example.txt
+
+# 列出文件
+curl -X PROPFIND http://127.0.0.1:8080/webdav/ -H "Depth: 1"
+
+# 下载文件
+curl http://127.0.0.1:8080/webdav/example.txt -o downloaded.txt
+
+# 删除文件
+curl -X DELETE http://127.0.0.1:8080/webdav/example.txt
 ```
 
 

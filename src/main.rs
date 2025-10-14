@@ -248,7 +248,11 @@ async fn start_http_server(
     info!("HTTP 服务器启动: {}", addr);
     info!("  - REST API: http://{}/api", addr);
     info!("  - WebDAV:   http://{}/webdav", addr);
-    Server::new().run(route);
+
+    Server::new()
+        .bind(addr.parse().expect("无效的 HTTP 地址"))
+        .serve(route)
+        .await;
 
     Ok(())
 }

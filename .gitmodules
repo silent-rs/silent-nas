@@ -1,0 +1,6 @@
+[submodule "odyssey"]
+	path = odyssey
+	url = git@github.com:silent-rs/silent-odyssey.git
+[submodule "silent"]
+	path = silent
+	url = git@github.com:silent-rs/silent.git

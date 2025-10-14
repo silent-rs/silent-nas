@@ -1,0 +1,63 @@
+syntax = "proto3";
+
+package silent.nas;
+
+service FileService {
+  rpc UploadFile(UploadFileRequest) returns (UploadFileResponse);
+  rpc DownloadFile(DownloadFileRequest) returns (DownloadFileResponse);
+  rpc DeleteFile(DeleteFileRequest) returns (DeleteFileResponse);
+  rpc GetMetadata(GetMetadataRequest) returns (GetMetadataResponse);
+  rpc ListFiles(ListFilesRequest) returns (ListFilesResponse);
+}
+
+message FileMetadata {
+  string id = 1;
+  string name = 2;
+  string path = 3;
+  uint64 size = 4;
+  string hash = 5;
+  string created_at = 6;
+  string modified_at = 7;
+}
+
+message UploadFileRequest {
+  string file_id = 1;
+  bytes data = 2;
+}
+
+message UploadFileResponse {
+  FileMetadata metadata = 1;
+}
+
+message DownloadFileRequest {
+  string file_id = 1;
+}
+
+message DownloadFileResponse {
+  bytes data = 1;
+  FileMetadata metadata = 2;
+}
+
+message DeleteFileRequest {
+  string file_id = 1;
+}
+
+message DeleteFileResponse {
+  bool success = 1;
+}
+
+message GetMetadataRequest {
+  string file_id = 1;
+}
+
+message GetMetadataResponse {
+  FileMetadata metadata = 1;
+}
+
+message ListFilesRequest {
+  // 可扩展：添加分页、过滤等参数
+}
+
+message ListFilesResponse {
+  repeated FileMetadata files = 1;
+}

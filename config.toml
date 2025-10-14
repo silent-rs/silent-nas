@@ -1,0 +1,13 @@
+[server]
+http_port = 8080
+grpc_port = 50051
+quic_port = 4433
+host = "127.0.0.1"
+
+[storage]
+root_path = "./storage"
+chunk_size = 4194304  # 4MB
+
+[nats]
+url = "nats://127.0.0.1:4222"
+topic_prefix = "silent.nas.files"

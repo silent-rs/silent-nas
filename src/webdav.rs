@@ -72,7 +72,9 @@ impl WebDavHandler {
         xml.push_str(r#"<D:multistatus xmlns:D="DAV:">"#);
 
         if metadata.is_dir() {
-            Self::add_prop_response(&mut xml, &path, &storage_path, true).await;
+            // 添加目录本身的响应，href 需要包含 /webdav 前缀
+            let full_href = format!("{}{}", &self.base_path, &path);
+            Self::add_prop_response(&mut xml, &full_href, &storage_path, true).await;
 
             if depth != "0" {
                 let mut entries = fs::read_dir(&storage_path).await.map_err(|e| {
@@ -94,12 +96,15 @@ impl WebDavHandler {
                     } else {
                         format!("{}/{}", path, entry.file_name().to_string_lossy())
                     };
+                    // href 需要包含 /webdav 前缀
+                    let full_href = format!("{}{}", &self.base_path, &relative_path);
                     let is_dir = entry_path.is_dir();
-                    Self::add_prop_response(&mut xml, &relative_path, &entry_path, is_dir).await;
+                    Self::add_prop_response(&mut xml, &full_href, &entry_path, is_dir).await;
                 }
             }
         } else {
-            Self::add_prop_response(&mut xml, &path, &storage_path, false).await;
+            let full_href = format!("{}{}", &self.base_path, &path);
+            Self::add_prop_response(&mut xml, &full_href, &storage_path, false).await;
         }
 
         xml.push_str("</D:multistatus>");

@@ -260,36 +260,38 @@ impl S3Service {
             bucket, prefix, max_keys
         );
 
-        // 获取所有文件
-        let all_files = self.storage.list_files().await.map_err(|e| {
-            SilentError::business_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("列出文件失败: {}", e),
-            )
-        })?;
+        // 检查bucket是否存在
+        if !self.storage.bucket_exists(&bucket).await {
+            return self.error_response(
+                StatusCode::NOT_FOUND,
+                "NoSuchBucket",
+                "The specified bucket does not exist",
+            );
+        }
 
-        // 过滤bucket和前缀
-        let bucket_prefix = format!("{}/", bucket);
-        let full_prefix = if prefix.is_empty() {
-            bucket_prefix.clone()
-        } else {
-            format!("{}{}", bucket_prefix, prefix)
-        };
+        // 使用新的list_bucket_objects API
+        let object_keys = self
+            .storage
+            .list_bucket_objects(&bucket, prefix)
+            .await
+            .map_err(|e| {
+                SilentError::business_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("列出对象失败: {}", e),
+                )
+            })?;
 
+        // 构建对象列表
         let mut contents = Vec::new();
-        for file in all_files {
-            if file.id.starts_with(&full_prefix) {
-                let key = file.id.strip_prefix(&bucket_prefix).unwrap_or(&file.id);
+        for key in object_keys.iter().take(max_keys) {
+            let file_id = format!("{}/{}", bucket, key);
+            if let Ok(metadata) = self.storage.get_metadata(&file_id).await {
                 contents.push(S3Object {
-                    key: key.to_string(),
-                    last_modified: file.modified_at.and_utc(),
-                    etag: file.hash,
-                    size: file.size,
+                    key: key.clone(),
+                    last_modified: metadata.modified_at.and_utc(),
+                    etag: metadata.hash,
+                    size: metadata.size,
                 });
-
-                if contents.len() >= max_keys {
-                    break;
-                }
             }
         }
 
@@ -333,34 +335,38 @@ impl S3Service {
             bucket, prefix, max_keys
         );
 
-        let all_files = self.storage.list_files().await.map_err(|e| {
-            SilentError::business_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("列出文件失败: {}", e),
-            )
-        })?;
+        // 检查bucket是否存在
+        if !self.storage.bucket_exists(&bucket).await {
+            return self.error_response(
+                StatusCode::NOT_FOUND,
+                "NoSuchBucket",
+                "The specified bucket does not exist",
+            );
+        }
 
-        let bucket_prefix = format!("{}/", bucket);
-        let full_prefix = if prefix.is_empty() {
-            bucket_prefix.clone()
-        } else {
-            format!("{}{}", bucket_prefix, prefix)
-        };
+        // 使用新的list_bucket_objects API
+        let object_keys = self
+            .storage
+            .list_bucket_objects(&bucket, prefix)
+            .await
+            .map_err(|e| {
+                SilentError::business_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("列出对象失败: {}", e),
+                )
+            })?;
 
+        // 构建对象列表
         let mut contents = Vec::new();
-        for file in all_files {
-            if file.id.starts_with(&full_prefix) {
-                let key = file.id.strip_prefix(&bucket_prefix).unwrap_or(&file.id);
+        for key in object_keys.iter().take(max_keys) {
+            let file_id = format!("{}/{}", bucket, key);
+            if let Ok(metadata) = self.storage.get_metadata(&file_id).await {
                 contents.push(S3Object {
-                    key: key.to_string(),
-                    last_modified: file.modified_at.and_utc(),
-                    etag: file.hash,
-                    size: file.size,
+                    key: key.clone(),
+                    last_modified: metadata.modified_at.and_utc(),
+                    etag: metadata.hash,
+                    size: metadata.size,
                 });
-
-                if contents.len() >= max_keys {
-                    break;
-                }
             }
         }
 
@@ -383,7 +389,7 @@ impl S3Service {
         Ok(resp)
     }
 
-    /// 创建Bucket（伪实现，总是成功）
+    /// 创建Bucket
     pub async fn put_bucket(&self, req: Request) -> silent::Result<Response> {
         if !self.verify_request(&req) {
             return self.error_response(StatusCode::FORBIDDEN, "AccessDenied", "Access Denied");
@@ -392,18 +398,26 @@ impl S3Service {
         let bucket: String = req.get_path_params("bucket")?;
         debug!("PutBucket: bucket={}", bucket);
 
-        // 不实际创建bucket，仅返回成功
-        let mut resp = Response::empty();
-        resp.headers_mut().insert(
-            "x-amz-request-id",
-            http::HeaderValue::from_static("silent-nas-007"),
-        );
-        resp.set_status(StatusCode::OK);
-
-        Ok(resp)
+        // 创建bucket
+        match self.storage.create_bucket(&bucket).await {
+            Ok(_) => {
+                let mut resp = Response::empty();
+                resp.headers_mut().insert(
+                    "x-amz-request-id",
+                    http::HeaderValue::from_static("silent-nas-007"),
+                );
+                resp.set_status(StatusCode::OK);
+                Ok(resp)
+            }
+            Err(_) => self.error_response(
+                StatusCode::CONFLICT,
+                "BucketAlreadyExists",
+                "The requested bucket name already exists",
+            ),
+        }
     }
 
-    /// 删除Bucket（伪实现）
+    /// 删除Bucket
     pub async fn delete_bucket(&self, req: Request) -> silent::Result<Response> {
         if !self.verify_request(&req) {
             return self.error_response(StatusCode::FORBIDDEN, "AccessDenied", "Access Denied");
@@ -412,14 +426,36 @@ impl S3Service {
         let bucket: String = req.get_path_params("bucket")?;
         debug!("DeleteBucket: bucket={}", bucket);
 
-        let mut resp = Response::empty();
-        resp.headers_mut().insert(
-            "x-amz-request-id",
-            http::HeaderValue::from_static("silent-nas-008"),
-        );
-        resp.set_status(StatusCode::NO_CONTENT);
-
-        Ok(resp)
+        // 删除bucket
+        match self.storage.delete_bucket(&bucket).await {
+            Ok(_) => {
+                let mut resp = Response::empty();
+                resp.headers_mut().insert(
+                    "x-amz-request-id",
+                    http::HeaderValue::from_static("silent-nas-008"),
+                );
+                resp.set_status(StatusCode::NO_CONTENT);
+                Ok(resp)
+            }
+            Err(e) => {
+                let msg = format!("{}", e);
+                if msg.contains("不存在") {
+                    self.error_response(
+                        StatusCode::NOT_FOUND,
+                        "NoSuchBucket",
+                        "The specified bucket does not exist",
+                    )
+                } else if msg.contains("不为空") {
+                    self.error_response(
+                        StatusCode::CONFLICT,
+                        "BucketNotEmpty",
+                        "The bucket you tried to delete is not empty",
+                    )
+                } else {
+                    self.error_response(StatusCode::INTERNAL_SERVER_ERROR, "InternalError", &msg)
+                }
+            }
+        }
     }
 
     /// 检查Bucket是否存在
@@ -431,12 +467,76 @@ impl S3Service {
         let bucket: String = req.get_path_params("bucket")?;
         debug!("HeadBucket: bucket={}", bucket);
 
-        // 总是返回成功（因为我们不实际管理bucket）
+        // 检查bucket是否存在
+        if self.storage.bucket_exists(&bucket).await {
+            let mut resp = Response::empty();
+            resp.headers_mut().insert(
+                "x-amz-request-id",
+                http::HeaderValue::from_static("silent-nas-009"),
+            );
+            resp.set_status(StatusCode::OK);
+            Ok(resp)
+        } else {
+            self.error_response(
+                StatusCode::NOT_FOUND,
+                "NoSuchBucket",
+                "The specified bucket does not exist",
+            )
+        }
+    }
+
+    /// ListBuckets - 列出所有bucket
+    pub async fn list_buckets(&self, req: Request) -> silent::Result<Response> {
+        if !self.verify_request(&req) {
+            return self.error_response(StatusCode::FORBIDDEN, "AccessDenied", "Access Denied");
+        }
+
+        debug!("ListBuckets");
+
+        let buckets = self.storage.list_buckets().await.map_err(|e| {
+            SilentError::business_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("列出buckets失败: {}", e),
+            )
+        })?;
+
+        // 生成XML响应
+        let mut xml = String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
+        xml.push_str(
+            "<ListAllMyBucketsResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\n",
+        );
+        xml.push_str("  <Owner>\n");
+        xml.push_str("    <ID>silent-nas</ID>\n");
+        xml.push_str("    <DisplayName>silent-nas</DisplayName>\n");
+        xml.push_str("  </Owner>\n");
+        xml.push_str("  <Buckets>\n");
+
+        for bucket in buckets {
+            xml.push_str("    <Bucket>\n");
+            xml.push_str(&format!(
+                "      <Name>{}</Name>\n",
+                Self::xml_escape(&bucket)
+            ));
+            xml.push_str(&format!(
+                "      <CreationDate>{}</CreationDate>\n",
+                chrono::Utc::now().to_rfc3339()
+            ));
+            xml.push_str("    </Bucket>\n");
+        }
+
+        xml.push_str("  </Buckets>\n");
+        xml.push_str("</ListAllMyBucketsResult>");
+
         let mut resp = Response::empty();
         resp.headers_mut().insert(
-            "x-amz-request-id",
-            http::HeaderValue::from_static("silent-nas-009"),
+            http::header::CONTENT_TYPE,
+            http::HeaderValue::from_static("application/xml"),
         );
+        resp.headers_mut().insert(
+            "x-amz-request-id",
+            http::HeaderValue::from_static("silent-nas-010"),
+        );
+        resp.set_body(full(xml.into_bytes()));
         resp.set_status(StatusCode::OK);
 
         Ok(resp)
@@ -677,7 +777,23 @@ pub fn create_s3_routes(
         async move { service.delete_object(req).await }
     };
 
-    Route::new_root().append(
+    // 根路径处理ListBuckets
+    let service_root = service.clone();
+    let root_handler = move |req: Request| {
+        let service = service_root.clone();
+        async move {
+            match *req.method() {
+                Method::GET => service.list_buckets(req).await,
+                _ => service.error_response(
+                    StatusCode::METHOD_NOT_ALLOWED,
+                    "MethodNotAllowed",
+                    "Method not allowed",
+                ),
+            }
+        }
+    };
+
+    Route::new_root().get(root_handler).append(
         Route::new("<bucket>")
             // Bucket级别操作
             .get(bucket_handler)

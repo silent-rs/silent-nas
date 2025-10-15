@@ -31,9 +31,14 @@ impl StorageManager {
 
     /// 获取文件的完整路径（基于 file_id）
     fn get_file_path(&self, file_id: &str) -> PathBuf {
-        // 使用前2个字符作为子目录，避免单目录文件过多
-        let prefix = &file_id[..2.min(file_id.len())];
-        self.root_path.join(prefix).join(file_id)
+        // 如果file_id包含斜杠，说明是bucket/key格式，直接使用
+        if file_id.contains('/') {
+            self.root_path.join(file_id)
+        } else {
+            // 使用前2个字符作为子目录，避免单目录文件过多
+            let prefix = &file_id[..2.min(file_id.len())];
+            self.root_path.join(prefix).join(file_id)
+        }
     }
 
     /// 获取文件的完整路径（基于相对路径，用于 WebDAV）
@@ -108,6 +113,113 @@ impl StorageManager {
     pub async fn file_exists(&self, file_id: &str) -> bool {
         let file_path = self.get_file_path(file_id);
         file_path.exists()
+    }
+
+    /// 创建bucket目录
+    pub async fn create_bucket(&self, bucket_name: &str) -> Result<()> {
+        let bucket_path = self.root_path.join(bucket_name);
+        if bucket_path.exists() {
+            return Err(NasError::Storage("Bucket已存在".to_string()));
+        }
+        fs::create_dir_all(&bucket_path).await?;
+        debug!("创建bucket: {}", bucket_name);
+        Ok(())
+    }
+
+    /// 删除bucket目录
+    pub async fn delete_bucket(&self, bucket_name: &str) -> Result<()> {
+        let bucket_path = self.root_path.join(bucket_name);
+        if !bucket_path.exists() {
+            return Err(NasError::Storage("Bucket不存在".to_string()));
+        }
+
+        // 检查bucket是否为空
+        let mut entries = fs::read_dir(&bucket_path).await?;
+        if entries.next_entry().await?.is_some() {
+            return Err(NasError::Storage("Bucket不为空，无法删除".to_string()));
+        }
+
+        fs::remove_dir(&bucket_path).await?;
+        debug!("删除bucket: {}", bucket_name);
+        Ok(())
+    }
+
+    /// 检查bucket是否存在
+    pub async fn bucket_exists(&self, bucket_name: &str) -> bool {
+        let bucket_path = self.root_path.join(bucket_name);
+        bucket_path.exists() && bucket_path.is_dir()
+    }
+
+    /// 列出所有buckets
+    pub async fn list_buckets(&self) -> Result<Vec<String>> {
+        let mut buckets = Vec::new();
+        let mut entries = fs::read_dir(&self.root_path).await?;
+
+        while let Some(entry) = entries.next_entry().await? {
+            if let Ok(metadata) = entry.metadata().await
+                && metadata.is_dir()
+                && let Some(name) = entry.file_name().to_str()
+            {
+                buckets.push(name.to_string());
+            }
+        }
+
+        buckets.sort();
+        Ok(buckets)
+    }
+
+    /// 列出bucket中的所有对象
+    pub async fn list_bucket_objects(
+        &self,
+        bucket_name: &str,
+        prefix: &str,
+    ) -> Result<Vec<String>> {
+        let bucket_path = self.root_path.join(bucket_name);
+        if !bucket_path.exists() {
+            return Ok(Vec::new());
+        }
+
+        let mut objects = Vec::new();
+        self.scan_bucket_directory(&bucket_path, &bucket_path, prefix, &mut objects)
+            .await?;
+        objects.sort();
+        Ok(objects)
+    }
+
+    /// 递归扫描bucket目录
+    #[allow(clippy::only_used_in_recursion)]
+    fn scan_bucket_directory<'a>(
+        &'a self,
+        current_path: &'a Path,
+        base_path: &'a Path,
+        prefix: &'a str,
+        objects: &'a mut Vec<String>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> {
+        Box::pin(async move {
+            let mut entries = fs::read_dir(current_path).await?;
+
+            while let Some(entry) = entries.next_entry().await? {
+                let path = entry.path();
+                if let Ok(metadata) = entry.metadata().await {
+                    if metadata.is_file() {
+                        // 获取相对路径
+                        if let Ok(relative_path) = path.strip_prefix(base_path)
+                            && let Some(key) = relative_path.to_str()
+                        {
+                            let key = key.replace('\\', "/");
+                            if prefix.is_empty() || key.starts_with(prefix) {
+                                objects.push(key);
+                            }
+                        }
+                    } else if metadata.is_dir() {
+                        // 递归扫描子目录
+                        self.scan_bucket_directory(&path, base_path, prefix, objects)
+                            .await?;
+                    }
+                }
+            }
+            Ok(())
+        })
     }
 
     /// 获取文件元数据

@@ -110,7 +110,7 @@ impl S3Service {
         Ok(resp)
     }
 
-    /// GetObject - 下载对象
+    /// GetObject - 获取对象
     pub async fn get_object(&self, req: Request) -> silent::Result<Response> {
         if !self.verify_request(&req) {
             return self.error_response(StatusCode::FORBIDDEN, "AccessDenied", "Access Denied");
@@ -123,7 +123,7 @@ impl S3Service {
 
         let file_id = format!("{}/{}", bucket, key);
 
-        // 读取文件
+        // 读取完整文件
         let data = self
             .storage
             .read_file(&file_id)
@@ -132,21 +132,25 @@ impl S3Service {
 
         // 获取元数据以获取ETag
         let metadata = self.storage.get_metadata(&file_id).await.ok();
+        let file_size = data.len() as u64;
+
+        // 检查Range请求
+        let range_header = req.headers().get("range").and_then(|v| v.to_str().ok());
 
         let mut resp = Response::empty();
         resp.headers_mut().insert(
             http::header::CONTENT_TYPE,
             http::HeaderValue::from_static("binary/octet-stream"),
         );
-        resp.headers_mut().insert(
-            http::header::CONTENT_LENGTH,
-            http::HeaderValue::from_str(&data.len().to_string()).unwrap(),
-        );
 
-        if let Some(meta) = metadata {
+        if let Some(meta) = &metadata {
             resp.headers_mut().insert(
                 "ETag",
                 http::HeaderValue::from_str(&format!("\"{}\"", meta.hash)).unwrap(),
+            );
+            resp.headers_mut().insert(
+                "Last-Modified",
+                http::HeaderValue::from_str(&meta.modified_at.and_utc().to_rfc2822()).unwrap(),
             );
         }
 
@@ -154,7 +158,187 @@ impl S3Service {
             "x-amz-request-id",
             http::HeaderValue::from_static("silent-nas-002"),
         );
-        resp.set_body(full(data));
+        resp.headers_mut()
+            .insert("Accept-Ranges", http::HeaderValue::from_static("bytes"));
+
+        // 添加用户元数据支持（示例）
+        Self::add_user_metadata(&mut resp);
+
+        // 处理Range请求
+        if let Some(range_str) = range_header {
+            if let Some((start, end)) = Self::parse_range(range_str, file_size) {
+                let range_data = data[start..=end].to_vec();
+                let range_len = range_data.len();
+
+                resp.headers_mut().insert(
+                    http::header::CONTENT_LENGTH,
+                    http::HeaderValue::from_str(&range_len.to_string()).unwrap(),
+                );
+                resp.headers_mut().insert(
+                    "Content-Range",
+                    http::HeaderValue::from_str(&format!("bytes {}-{}/{}", start, end, file_size))
+                        .unwrap(),
+                );
+                resp.set_body(full(range_data));
+                resp.set_status(StatusCode::PARTIAL_CONTENT);
+
+                debug!("Range request: {}-{}/{}", start, end, file_size);
+            } else {
+                // Range格式无效，返回416
+                resp.headers_mut().insert(
+                    "Content-Range",
+                    http::HeaderValue::from_str(&format!("bytes */{}", file_size)).unwrap(),
+                );
+                resp.set_status(StatusCode::RANGE_NOT_SATISFIABLE);
+                return Ok(resp);
+            }
+        } else {
+            // 正常完整响应
+            resp.headers_mut().insert(
+                http::header::CONTENT_LENGTH,
+                http::HeaderValue::from_str(&data.len().to_string()).unwrap(),
+            );
+            resp.set_body(full(data));
+            resp.set_status(StatusCode::OK);
+        }
+
+        Ok(resp)
+    }
+
+    /// 解析Range头，返回(start, end)，都是包含的
+    fn parse_range(range_str: &str, file_size: u64) -> Option<(usize, usize)> {
+        // 格式: "bytes=start-end" 或 "bytes=start-" 或 "bytes=-count"
+        let range_str = range_str.trim();
+        if !range_str.starts_with("bytes=") {
+            return None;
+        }
+
+        let range = range_str.strip_prefix("bytes=")?;
+        let parts: Vec<&str> = range.split('-').collect();
+
+        if parts.len() != 2 {
+            return None;
+        }
+
+        match (parts[0].trim(), parts[1].trim()) {
+            ("", end_str) => {
+                // bytes=-count: 最后count字节
+                let count: u64 = end_str.parse().ok()?;
+                let start = file_size.saturating_sub(count);
+                Some((start as usize, (file_size - 1) as usize))
+            }
+            (start_str, "") => {
+                // bytes=start-: 从start到结束
+                let start: u64 = start_str.parse().ok()?;
+                if start >= file_size {
+                    return None;
+                }
+                Some((start as usize, (file_size - 1) as usize))
+            }
+            (start_str, end_str) => {
+                // bytes=start-end: 指定范围
+                let start: u64 = start_str.parse().ok()?;
+                let mut end: u64 = end_str.parse().ok()?;
+
+                if start >= file_size {
+                    return None;
+                }
+
+                // end不能超过文件大小
+                if end >= file_size {
+                    end = file_size - 1;
+                }
+
+                if start > end {
+                    return None;
+                }
+
+                Some((start as usize, end as usize))
+            }
+        }
+    }
+
+    /// CopyObject - 复制对象
+    pub async fn copy_object(&self, req: Request) -> silent::Result<Response> {
+        if !self.verify_request(&req) {
+            return self.error_response(StatusCode::FORBIDDEN, "AccessDenied", "Access Denied");
+        }
+
+        let dest_bucket: String = req.get_path_params("bucket")?;
+        let dest_key: String = req.get_path_params("key")?;
+
+        // 获取源对象路径 from x-amz-copy-source header
+        let copy_source = req
+            .headers()
+            .get("x-amz-copy-source")
+            .and_then(|v| v.to_str().ok())
+            .ok_or_else(|| {
+                SilentError::business_error(StatusCode::BAD_REQUEST, "缺少x-amz-copy-source头")
+            })?;
+
+        // 解析源路径 (格式: /source-bucket/source-key)
+        let source_path = copy_source.trim_start_matches('/');
+        let source_parts: Vec<&str> = source_path.splitn(2, '/').collect();
+
+        if source_parts.len() != 2 {
+            return self.error_response(
+                StatusCode::BAD_REQUEST,
+                "InvalidArgument",
+                "Invalid copy source format",
+            );
+        }
+
+        let source_file_id = format!("{}/{}", source_parts[0], source_parts[1]);
+        let dest_file_id = format!("{}/{}", dest_bucket, dest_key);
+
+        debug!("CopyObject: from {} to {}", source_file_id, dest_file_id);
+
+        // 读取源文件
+        let data = self
+            .storage
+            .read_file(&source_file_id)
+            .await
+            .map_err(|_| SilentError::business_error(StatusCode::NOT_FOUND, "源对象不存在"))?;
+
+        // 保存到目标位置
+        let metadata = self
+            .storage
+            .save_file(&dest_file_id, &data)
+            .await
+            .map_err(|e| {
+                SilentError::business_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("复制失败: {}", e),
+                )
+            })?;
+
+        // 发送事件
+        let event = FileEvent::new(EventType::Created, dest_file_id, Some(metadata.clone()));
+        let _ = self.notifier.notify_created(event).await;
+
+        // 生成CopyObjectResult XML响应
+        let last_modified = metadata.modified_at.and_utc().to_rfc3339();
+        let etag = format!("\"{}\"", metadata.hash);
+
+        let xml = format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+             <CopyObjectResult>\n\
+               <LastModified>{}</LastModified>\n\
+               <ETag>{}</ETag>\n\
+             </CopyObjectResult>",
+            last_modified, etag
+        );
+
+        let mut resp = Response::empty();
+        resp.headers_mut().insert(
+            http::header::CONTENT_TYPE,
+            http::HeaderValue::from_static("application/xml"),
+        );
+        resp.headers_mut().insert(
+            "x-amz-request-id",
+            http::HeaderValue::from_static("silent-nas-011"),
+        );
+        resp.set_body(full(xml.into_bytes()));
         resp.set_status(StatusCode::OK);
 
         Ok(resp)
@@ -234,9 +418,25 @@ impl S3Service {
             "x-amz-request-id",
             http::HeaderValue::from_static("silent-nas-004"),
         );
+
+        // 添加用户元数据支持（示例）
+        Self::add_user_metadata(&mut resp);
+
         resp.set_status(StatusCode::OK);
 
         Ok(resp)
+    }
+
+    /// 添加用户自定义元数据（示例实现）
+    fn add_user_metadata(resp: &mut Response) {
+        // 注：实际应用中应该从持久化存储读取
+        // 这里仅为演示S3协议兼容性
+        resp.headers_mut().insert(
+            "x-amz-meta-author",
+            http::HeaderValue::from_static("silent-nas"),
+        );
+        resp.headers_mut()
+            .insert("x-amz-meta-version", http::HeaderValue::from_static("1.0"));
     }
 
     /// ListObjectsV2 - 列出对象
@@ -716,6 +916,7 @@ pub fn create_s3_routes(
     let bucket_handler = move |req: Request| {
         let service = service_bucket.clone();
         async move {
+            debug!("bucket_handler: method={}, uri={}", req.method(), req.uri());
             match *req.method() {
                 Method::GET => {
                     // 检查是否是V2版本
@@ -726,7 +927,10 @@ pub fn create_s3_routes(
                         service.list_objects(req).await
                     }
                 }
-                Method::HEAD => service.head_bucket(req).await,
+                Method::HEAD => {
+                    debug!("调用head_bucket");
+                    service.head_bucket(req).await
+                }
                 _ => service.error_response(
                     StatusCode::METHOD_NOT_ALLOWED,
                     "MethodNotAllowed",
@@ -748,11 +952,18 @@ pub fn create_s3_routes(
         async move { service.delete_bucket(req).await }
     };
 
-    // 对象操作
+    // 对象操作 - PUT需要区分PutObject和CopyObject
     let service_put = service.clone();
     let put_object = move |req: Request| {
         let service = service_put.clone();
-        async move { service.put_object(req).await }
+        async move {
+            // 检查是否是CopyObject请求（有x-amz-copy-source头）
+            if req.headers().contains_key("x-amz-copy-source") {
+                service.copy_object(req).await
+            } else {
+                service.put_object(req).await
+            }
+        }
     };
 
     let service_get_head = service.clone();
@@ -795,7 +1006,7 @@ pub fn create_s3_routes(
 
     Route::new_root().get(root_handler).append(
         Route::new("<bucket>")
-            // Bucket级别操作
+            // Bucket级别操作 - GET和HEAD都用同一个handler
             .get(bucket_handler)
             .put(put_bucket)
             .delete(delete_bucket)

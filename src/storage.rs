@@ -147,7 +147,13 @@ impl StorageManager {
     /// 检查bucket是否存在
     pub async fn bucket_exists(&self, bucket_name: &str) -> bool {
         let bucket_path = self.root_path.join(bucket_name);
-        bucket_path.exists() && bucket_path.is_dir()
+        let exists = bucket_path.exists();
+        let is_dir = if exists { bucket_path.is_dir() } else { false };
+        debug!(
+            "bucket_exists: bucket={}, path={:?}, exists={}, is_dir={}",
+            bucket_name, bucket_path, exists, is_dir
+        );
+        exists && is_dir
     }
 
     /// 列出所有buckets

@@ -4,6 +4,7 @@ mod error;
 mod models;
 mod notify;
 mod rpc;
+mod s3;
 mod storage;
 mod transfer;
 mod webdav;
@@ -72,6 +73,19 @@ async fn main() -> Result<()> {
 
     // WebDAV 现已集成到 HTTP 服务器中
 
+    // 启动 S3 服务器
+    let s3_addr = format!("{}:{}", config.server.host, config.server.s3_port);
+    let s3_addr_clone = s3_addr.clone();
+    let storage_s3 = storage.clone();
+    let notifier_s3 = notifier.clone();
+    let s3_config = config.s3.clone();
+
+    tokio::spawn(async move {
+        if let Err(e) = start_s3_server(&s3_addr_clone, storage_s3, notifier_s3, s3_config).await {
+            error!("S3 服务器错误: {}", e);
+        }
+    });
+
     // 启动 QUIC 服务器
     let quic_addr: SocketAddr = format!("{}:{}", config.server.host, config.server.quic_port)
         .parse()
@@ -83,6 +97,7 @@ async fn main() -> Result<()> {
     info!("所有服务已启动");
     info!("  HTTP:    http://{}", http_addr);
     info!("  gRPC:    {}", grpc_addr);
+    info!("  S3:      http://{}", s3_addr);
     info!("  QUIC:    {}", quic_addr);
 
     // 保持运行
@@ -253,6 +268,36 @@ async fn start_grpc_server(
         .serve(addr)
         .await
         .map_err(|e| error::NasError::Storage(format!("gRPC 服务器错误: {}", e)))?;
+
+    Ok(())
+}
+
+/// 启动 S3 服务器
+async fn start_s3_server(
+    addr: &str,
+    storage: StorageManager,
+    notifier: EventNotifier,
+    s3_config: config::S3Config,
+) -> Result<()> {
+    let storage = Arc::new(storage);
+    let notifier = Arc::new(notifier);
+
+    // 配置S3认证
+    let auth = if s3_config.enable_auth {
+        Some(s3::S3Auth::new(s3_config.access_key, s3_config.secret_key))
+    } else {
+        None
+    };
+
+    let route = s3::create_s3_routes(storage, notifier, auth);
+
+    info!("S3 服务器启动: {}", addr);
+    info!("  - S3 API: http://{}/", addr);
+
+    Server::new()
+        .bind(addr.parse().expect("无效的 S3 地址"))
+        .serve(route)
+        .await;
 
     Ok(())
 }

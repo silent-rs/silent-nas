@@ -18,7 +18,7 @@ Silent-NAS 是 Silent Odyssey 第六阶段的实验项目，旨在构建一个�
 ### 服务端协议兼容层
 - ✅ HTTP/HTTPS 文件访问接口（REST API）
 - ✅ WebDAV 服务端实现（完整支持）
-- 🚧 S3 兼容 API 实现（规划中）
+- ✅ S3 兼容 API 实现（基本对象存储操作）
 - ❌ NFS/SMB 协议支持（后续阶段）
 - ❌ 多协议统一访问网关（后续阶段）
 
@@ -63,6 +63,7 @@ docs/
 - **notify.rs**: NATS 事件发布（created/modified/deleted）
 - **auth.rs**: 基于角色的访问控制（Admin/User/ReadOnly）
 - **webdav.rs**: WebDAV 协议服务器（PROPFIND/GET/PUT/DELETE/MKCOL/MOVE/COPY）
+- **s3.rs**: S3兼容API服务器（PutObject/GetObject/DeleteObject/ListObjects/HeadObject）
 
 ## 快速开始
 
@@ -84,6 +85,7 @@ http_port = 8080
 grpc_port = 50051
 quic_port = 4433
 webdav_port = 8081
+s3_port = 9000
 
 [storage]
 root_path = "./storage"
@@ -92,6 +94,11 @@ chunk_size = 4194304  # 4MB
 [nats]
 url = "nats://127.0.0.1:4222"
 topic_prefix = "silent.nas.files"
+
+[s3]
+access_key = "minioadmin"
+secret_key = "minioadmin"
+enable_auth = false
 ```
 
 ### 3. 运行服务
@@ -142,6 +149,84 @@ curl http://127.0.0.1:8080/webdav/example.txt -o downloaded.txt
 
 # 删除文件
 curl -X DELETE http://127.0.0.1:8080/webdav/example.txt
+```
+
+### 6. 测试 S3 API
+使用 MinIO Client (mc) 或 AWS CLI 进行测试：
+
+**使用 MinIO Client (mc)：**
+```bash
+# 安装 mc (macOS)
+brew install minio/stable/mc
+
+# 配置别名
+mc alias set silent-nas http://127.0.0.1:9000 minioadmin minioadmin
+
+# 创建 bucket
+mc mb silent-nas/test-bucket
+
+# 上传文件
+echo "Hello S3" > test.txt
+mc cp test.txt silent-nas/test-bucket/
+
+# 列出文件
+mc ls silent-nas/test-bucket/
+
+# 下载文件
+mc cp silent-nas/test-bucket/test.txt downloaded.txt
+
+# 查看文件信息
+mc stat silent-nas/test-bucket/test.txt
+
+# 删除文件
+mc rm silent-nas/test-bucket/test.txt
+
+# 删除 bucket
+mc rb silent-nas/test-bucket
+```
+
+**使用 AWS CLI：**
+```bash
+# 配置 AWS CLI
+aws configure set aws_access_key_id minioadmin
+aws configure set aws_secret_access_key minioadmin
+aws configure set region us-east-1
+
+# 使用 S3 命令（指定 endpoint）
+export S3_ENDPOINT=http://127.0.0.1:9000
+
+# 列出 buckets
+aws s3 ls --endpoint-url $S3_ENDPOINT
+
+# 上传文件
+aws s3 cp test.txt s3://test-bucket/ --endpoint-url $S3_ENDPOINT
+
+# 列出文件
+aws s3 ls s3://test-bucket/ --endpoint-url $S3_ENDPOINT
+
+# 下载文件
+aws s3 cp s3://test-bucket/test.txt downloaded.txt --endpoint-url $S3_ENDPOINT
+
+# 删除文件
+aws s3 rm s3://test-bucket/test.txt --endpoint-url $S3_ENDPOINT
+```
+
+**使用 curl 直接测试：**
+```bash
+# 上传对象
+curl -X PUT -T test.txt http://127.0.0.1:9000/test-bucket/test.txt
+
+# 下载对象
+curl http://127.0.0.1:9000/test-bucket/test.txt
+
+# 获取对象元数据
+curl -I http://127.0.0.1:9000/test-bucket/test.txt
+
+# 列出对象
+curl "http://127.0.0.1:9000/test-bucket?list-type=2"
+
+# 删除对象
+curl -X DELETE http://127.0.0.1:9000/test-bucket/test.txt
 ```
 
 

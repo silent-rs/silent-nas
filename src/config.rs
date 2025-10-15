@@ -7,6 +7,7 @@ pub struct Config {
     pub server: ServerConfig,
     pub storage: StorageConfig,
     pub nats: NatsConfig,
+    pub s3: S3Config,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -15,6 +16,7 @@ pub struct ServerConfig {
     pub grpc_port: u16,
     pub quic_port: u16,
     pub webdav_port: u16,
+    pub s3_port: u16,
     pub host: String,
 }
 
@@ -30,6 +32,13 @@ pub struct NatsConfig {
     pub topic_prefix: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct S3Config {
+    pub access_key: String,
+    pub secret_key: String,
+    pub enable_auth: bool,
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -38,6 +47,7 @@ impl Default for Config {
                 grpc_port: 50051,
                 quic_port: 4433,
                 webdav_port: 8081,
+                s3_port: 9000,
                 host: "127.0.0.1".to_string(),
             },
             storage: StorageConfig {
@@ -47,6 +57,11 @@ impl Default for Config {
             nats: NatsConfig {
                 url: "nats://127.0.0.1:4222".to_string(),
                 topic_prefix: "silent.nas.files".to_string(),
+            },
+            s3: S3Config {
+                access_key: "minioadmin".to_string(),
+                secret_key: "minioadmin".to_string(),
+                enable_auth: false,
             },
         }
     }

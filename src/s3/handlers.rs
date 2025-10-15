@@ -8,6 +8,7 @@ use silent::prelude::*;
 use std::sync::Arc;
 use tracing::debug;
 
+#[allow(clippy::collapsible_if)]
 impl S3Service {
     /// PutObject - 上传对象
     pub async fn put_object(&self, req: Request) -> silent::Result<Response> {

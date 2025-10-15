@@ -12,6 +12,7 @@ pub struct S3Object {
 
 /// 分片上传信息
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct MultipartUpload {
     pub upload_id: String,
     pub bucket: String,
@@ -22,6 +23,7 @@ pub struct MultipartUpload {
 
 /// 分片信息
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct PartInfo {
     pub part_number: u32,
     pub etag: String,

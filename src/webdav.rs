@@ -639,7 +639,7 @@ fn register_webdav_methods(route: Route, handler: Arc<WebDavHandler>) -> Route {
 pub fn create_webdav_routes(storage: Arc<StorageManager>, notifier: Arc<EventNotifier>) -> Route {
     let handler = Arc::new(WebDavHandler::new(storage, notifier, "/webdav".to_string()));
 
-    let root_route = register_webdav_methods(Route::new("webdav"), handler.clone());
+    let root_route = register_webdav_methods(Route::new(""), handler.clone());
     let path_route = register_webdav_methods(Route::new("<path:**>"), handler);
 
     root_route.append(path_route)

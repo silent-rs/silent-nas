@@ -1,5 +1,4 @@
 mod bucket;
-mod helpers;
 mod object;
 mod routes;
 

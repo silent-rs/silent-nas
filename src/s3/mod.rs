@@ -1,7 +1,6 @@
 mod auth;
 mod handlers;
 mod models;
-mod multipart;
 mod service;
 
 pub use auth::S3Auth;

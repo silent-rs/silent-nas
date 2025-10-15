@@ -1,5 +1,4 @@
 use crate::models::{EventType, FileEvent};
-use crate::s3::models::S3Object;
 use crate::s3::service::S3Service;
 use http::StatusCode;
 use silent::prelude::*;
@@ -7,7 +6,6 @@ use tracing::debug;
 
 #[allow(clippy::collapsible_if)]
 impl S3Service {
-    /// PutObject - 上传对象
     pub async fn put_object(&self, req: Request) -> silent::Result<Response> {
         if !self.verify_request(&req) {
             return self.error_response(StatusCode::FORBIDDEN, "AccessDenied", "Access Denied");
@@ -125,6 +123,20 @@ impl S3Service {
                         .insert("ETag", http::HeaderValue::from_str(&etag).unwrap());
                     resp.set_status(StatusCode::NOT_MODIFIED);
                     return Ok(resp);
+                }
+            }
+        }
+
+        // 检查If-Match
+        if let Some(if_match) = req.headers().get("If-Match") {
+            if let Ok(header_value) = if_match.to_str() {
+                let etag = format!("\"{}\"", metadata.hash);
+                if header_value != "*" && !header_value.split(',').any(|tag| tag.trim() == etag) {
+                    return self.error_response(
+                        StatusCode::PRECONDITION_FAILED,
+                        "PreconditionFailed",
+                        "Precondition failed",
+                    );
                 }
             }
         }
@@ -340,63 +352,6 @@ impl S3Service {
 
         Ok(resp)
     }
-
-    /// DeleteObjects - 批量删除对象
-    pub async fn delete_objects(&self, req: Request) -> silent::Result<Response> {
-        if !self.verify_request(&req) {
-            return self.error_response(StatusCode::FORBIDDEN, "AccessDenied", "Access Denied");
-        }
-
-        let bucket: String = req.get_path_params("bucket")?;
-
-        debug!("DeleteObjects: bucket={}", bucket);
-
-        // 读取请求体XML
-        let body_bytes = Self::read_body(req).await?;
-        let body_str = String::from_utf8_lossy(&body_bytes);
-
-        // 解析XML获取要删除的对象列表
-        let keys = Self::parse_delete_objects_xml(&body_str);
-
-        let mut deleted = Vec::new();
-        let mut errors = Vec::new();
-
-        // 批量删除对象
-        for key in keys {
-            let file_id = format!("{}/{}", bucket, key);
-            match self.storage.delete_file(&file_id).await {
-                Ok(_) => {
-                    // 发送删除事件
-                    let event = FileEvent::new(EventType::Deleted, file_id.clone(), None);
-                    let _ = self.notifier.notify_deleted(event).await;
-                    deleted.push(key);
-                }
-                Err(e) => {
-                    debug!("删除失败: {} - {}", key, e);
-                    errors.push((key, "InternalError", e.to_string()));
-                }
-            }
-        }
-
-        // 生成XML响应
-        let xml = Self::generate_delete_result_xml(&deleted, &errors);
-
-        let mut resp = Response::empty();
-        resp.headers_mut().insert(
-            http::header::CONTENT_TYPE,
-            http::HeaderValue::from_static("application/xml"),
-        );
-        resp.headers_mut().insert(
-            "x-amz-request-id",
-            http::HeaderValue::from_static("silent-nas-012"),
-        );
-        resp.set_body(full(xml.into_bytes()));
-        resp.set_status(StatusCode::OK);
-
-        Ok(resp)
-    }
-
-    /// HeadObject - 获取对象元数据
     pub async fn head_object(&self, req: Request) -> silent::Result<Response> {
         if !self.verify_request(&req) {
             return self.error_response(StatusCode::FORBIDDEN, "AccessDenied", "Access Denied");
@@ -444,156 +399,6 @@ impl S3Service {
         // 添加用户元数据支持（示例）
         Self::add_user_metadata(&mut resp);
 
-        resp.set_status(StatusCode::OK);
-
-        Ok(resp)
-    }
-
-    /// ListObjectsV2 - 列出对象
-    pub async fn list_objects_v2(&self, req: Request) -> silent::Result<Response> {
-        if !self.verify_request(&req) {
-            return self.error_response(StatusCode::FORBIDDEN, "AccessDenied", "Access Denied");
-        }
-
-        let bucket: String = req.get_path_params("bucket")?;
-
-        // 解析查询参数
-        let query_params = Self::parse_query_string(req.uri().query().unwrap_or(""));
-        let prefix = query_params.get("prefix").map(|s| s.as_str()).unwrap_or("");
-        let max_keys = query_params
-            .get("max-keys")
-            .and_then(|s| s.parse::<usize>().ok())
-            .unwrap_or(1000);
-
-        debug!(
-            "ListObjectsV2: bucket={}, prefix={}, max_keys={}",
-            bucket, prefix, max_keys
-        );
-
-        // 检查bucket是否存在
-        if !self.storage.bucket_exists(&bucket).await {
-            return self.error_response(
-                StatusCode::NOT_FOUND,
-                "NoSuchBucket",
-                "The specified bucket does not exist",
-            );
-        }
-
-        // 使用新的list_bucket_objects API
-        let object_keys = self
-            .storage
-            .list_bucket_objects(&bucket, prefix)
-            .await
-            .map_err(|e| {
-                SilentError::business_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("列出对象失败: {}", e),
-                )
-            })?;
-
-        // 构建对象列表
-        let mut contents = Vec::new();
-        for key in object_keys.iter().take(max_keys) {
-            let file_id = format!("{}/{}", bucket, key);
-            if let Ok(metadata) = self.storage.get_metadata(&file_id).await {
-                contents.push(S3Object {
-                    key: key.clone(),
-                    last_modified: metadata.modified_at.and_utc(),
-                    etag: metadata.hash,
-                    size: metadata.size,
-                });
-            }
-        }
-
-        let is_truncated = contents.len() >= max_keys;
-
-        // 生成XML响应
-        let xml = self.generate_list_v2_response(&bucket, prefix, &contents, is_truncated);
-
-        let mut resp = Response::empty();
-        resp.headers_mut().insert(
-            http::header::CONTENT_TYPE,
-            http::HeaderValue::from_static("application/xml"),
-        );
-        resp.headers_mut().insert(
-            "x-amz-request-id",
-            http::HeaderValue::from_static("silent-nas-005"),
-        );
-        resp.set_body(full(xml.into_bytes()));
-        resp.set_status(StatusCode::OK);
-
-        Ok(resp)
-    }
-
-    /// ListObjects - 列出对象（V1版本）
-    pub async fn list_objects(&self, req: Request) -> silent::Result<Response> {
-        if !self.verify_request(&req) {
-            return self.error_response(StatusCode::FORBIDDEN, "AccessDenied", "Access Denied");
-        }
-
-        let bucket: String = req.get_path_params("bucket")?;
-
-        let query_params = Self::parse_query_string(req.uri().query().unwrap_or(""));
-        let prefix = query_params.get("prefix").map(|s| s.as_str()).unwrap_or("");
-        let max_keys = query_params
-            .get("max-keys")
-            .and_then(|s| s.parse::<usize>().ok())
-            .unwrap_or(1000);
-
-        debug!(
-            "ListObjects: bucket={}, prefix={}, max_keys={}",
-            bucket, prefix, max_keys
-        );
-
-        // 检查bucket是否存在
-        if !self.storage.bucket_exists(&bucket).await {
-            return self.error_response(
-                StatusCode::NOT_FOUND,
-                "NoSuchBucket",
-                "The specified bucket does not exist",
-            );
-        }
-
-        // 使用新的list_bucket_objects API
-        let object_keys = self
-            .storage
-            .list_bucket_objects(&bucket, prefix)
-            .await
-            .map_err(|e| {
-                SilentError::business_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("列出对象失败: {}", e),
-                )
-            })?;
-
-        // 构建对象列表
-        let mut contents = Vec::new();
-        for key in object_keys.iter().take(max_keys) {
-            let file_id = format!("{}/{}", bucket, key);
-            if let Ok(metadata) = self.storage.get_metadata(&file_id).await {
-                contents.push(S3Object {
-                    key: key.clone(),
-                    last_modified: metadata.modified_at.and_utc(),
-                    etag: metadata.hash,
-                    size: metadata.size,
-                });
-            }
-        }
-
-        let is_truncated = contents.len() >= max_keys;
-
-        let xml = self.generate_list_response(&bucket, prefix, &contents, is_truncated, max_keys);
-
-        let mut resp = Response::empty();
-        resp.headers_mut().insert(
-            http::header::CONTENT_TYPE,
-            http::HeaderValue::from_static("application/xml"),
-        );
-        resp.headers_mut().insert(
-            "x-amz-request-id",
-            http::HeaderValue::from_static("silent-nas-006"),
-        );
-        resp.set_body(full(xml.into_bytes()));
         resp.set_status(StatusCode::OK);
 
         Ok(resp)

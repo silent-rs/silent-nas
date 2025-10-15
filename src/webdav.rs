@@ -2,7 +2,7 @@ use crate::models::{EventType, FileEvent};
 use crate::notify::EventNotifier;
 use crate::storage::StorageManager;
 use async_trait::async_trait;
-use http::StatusCode;
+use http::{Method, StatusCode};
 use http_body_util::BodyExt;
 use silent::Result as SilentResult;
 use silent::prelude::*;
@@ -618,4 +618,46 @@ impl Handler for WebDavHandler {
             )),
         }
     }
+}
+
+/// 创建 WebDAV 路由
+pub fn create_webdav_routes(storage: Arc<StorageManager>, notifier: Arc<EventNotifier>) -> Route {
+    let webdav_handler = Arc::new(WebDavHandler::new(storage, notifier, "/webdav".to_string()));
+
+    Route::new("webdav")
+        .insert_handler(Method::HEAD, webdav_handler.clone())
+        .insert_handler(Method::GET, webdav_handler.clone())
+        .insert_handler(Method::POST, webdav_handler.clone())
+        .insert_handler(Method::PUT, webdav_handler.clone())
+        .insert_handler(Method::DELETE, webdav_handler.clone())
+        .insert_handler(Method::OPTIONS, webdav_handler.clone())
+        .insert_handler(
+            Method::from_bytes(b"PROPFIND").unwrap(),
+            webdav_handler.clone(),
+        )
+        .insert_handler(
+            Method::from_bytes(b"MKCOL").unwrap(),
+            webdav_handler.clone(),
+        )
+        .insert_handler(Method::from_bytes(b"MOVE").unwrap(), webdav_handler.clone())
+        .insert_handler(Method::from_bytes(b"COPY").unwrap(), webdav_handler.clone())
+        .append(
+            Route::new("<path:**>")
+                .insert_handler(Method::HEAD, webdav_handler.clone())
+                .insert_handler(Method::GET, webdav_handler.clone())
+                .insert_handler(Method::POST, webdav_handler.clone())
+                .insert_handler(Method::PUT, webdav_handler.clone())
+                .insert_handler(Method::DELETE, webdav_handler.clone())
+                .insert_handler(Method::OPTIONS, webdav_handler.clone())
+                .insert_handler(
+                    Method::from_bytes(b"PROPFIND").unwrap(),
+                    webdav_handler.clone(),
+                )
+                .insert_handler(
+                    Method::from_bytes(b"MKCOL").unwrap(),
+                    webdav_handler.clone(),
+                )
+                .insert_handler(Method::from_bytes(b"MOVE").unwrap(), webdav_handler.clone())
+                .insert_handler(Method::from_bytes(b"COPY").unwrap(), webdav_handler),
+        )
 }

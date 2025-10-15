@@ -214,13 +214,6 @@ async fn start_http_server(
         }
     };
 
-    // WebDAV 处理器 - 直接使用 Arc<WebDavHandler> 作为所有路由的处理器
-    let webdav_handler = Arc::new(webdav::WebDavHandler::new(
-        storage.clone(),
-        notifier.clone(),
-        "/webdav".to_string(),
-    ));
-
     let route = Route::new_root()
         .append(
             Route::new("api")
@@ -228,44 +221,10 @@ async fn start_http_server(
                 .append(Route::new("files/<id>").get(download).delete(delete))
                 .append(Route::new("health").get(health)),
         )
-        .append(
-            Route::new("webdav")
-                .insert_handler(Method::HEAD, webdav_handler.clone())
-                .insert_handler(Method::GET, webdav_handler.clone())
-                .insert_handler(Method::POST, webdav_handler.clone())
-                .insert_handler(Method::PUT, webdav_handler.clone())
-                .insert_handler(Method::DELETE, webdav_handler.clone())
-                .insert_handler(Method::OPTIONS, webdav_handler.clone())
-                .insert_handler(
-                    Method::from_bytes(b"PROPFIND").unwrap(),
-                    webdav_handler.clone(),
-                )
-                .insert_handler(
-                    Method::from_bytes(b"MKCOL").unwrap(),
-                    webdav_handler.clone(),
-                )
-                .insert_handler(Method::from_bytes(b"MOVE").unwrap(), webdav_handler.clone())
-                .insert_handler(Method::from_bytes(b"COPY").unwrap(), webdav_handler.clone()),
-        )
-        .append(
-            Route::new("webdav/<path:**>")
-                .insert_handler(Method::HEAD, webdav_handler.clone())
-                .insert_handler(Method::GET, webdav_handler.clone())
-                .insert_handler(Method::POST, webdav_handler.clone())
-                .insert_handler(Method::PUT, webdav_handler.clone())
-                .insert_handler(Method::DELETE, webdav_handler.clone())
-                .insert_handler(Method::OPTIONS, webdav_handler.clone())
-                .insert_handler(
-                    Method::from_bytes(b"PROPFIND").unwrap(),
-                    webdav_handler.clone(),
-                )
-                .insert_handler(
-                    Method::from_bytes(b"MKCOL").unwrap(),
-                    webdav_handler.clone(),
-                )
-                .insert_handler(Method::from_bytes(b"MOVE").unwrap(), webdav_handler.clone())
-                .insert_handler(Method::from_bytes(b"COPY").unwrap(), webdav_handler),
-        );
+        .append(webdav::create_webdav_routes(
+            storage.clone(),
+            notifier.clone(),
+        ));
 
     info!("HTTP 服务器启动: {}", addr);
     info!("  - REST API: http://{}/api", addr);

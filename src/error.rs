@@ -34,6 +34,9 @@ pub enum NasError {
     #[allow(dead_code)]
     #[error("哈希校验失败")]
     HashMismatch,
+
+    #[error("{0}")]
+    Other(String),
 }
 
 pub type Result<T> = std::result::Result<T, NasError>;

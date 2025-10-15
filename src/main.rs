@@ -8,6 +8,7 @@ mod s3;
 mod storage;
 mod sync;
 mod transfer;
+mod version;
 mod webdav;
 
 use config::Config;
@@ -23,6 +24,7 @@ use storage::StorageManager;
 use sync::SyncManager;
 use tonic::transport::Server as TonicServer;
 use tracing::{error, info};
+use version::{VersionConfig, VersionManager};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -56,16 +58,33 @@ async fn main() -> Result<()> {
     );
     info!("同步管理器已初始化: node_id={}", node_id);
 
+    // 初始化版本管理器
+    let version_config = VersionConfig::default();
+    let version_manager = VersionManager::new(
+        Arc::new(storage.clone()),
+        version_config,
+        &config.storage.root_path.to_string_lossy(),
+    );
+    version_manager.init().await?;
+    info!("版本管理器已初始化");
+
     // 启动 HTTP 服务器（使用 Silent 框架）
     let http_addr = format!("{}:{}", config.server.host, config.server.http_port);
     let http_addr_clone = http_addr.clone();
     let storage_clone = storage.clone();
     let notifier_clone = notifier.clone();
     let sync_clone = sync_manager.clone();
+    let version_clone = version_manager.clone();
 
     tokio::spawn(async move {
-        if let Err(e) =
-            start_http_server(&http_addr_clone, storage_clone, notifier_clone, sync_clone).await
+        if let Err(e) = start_http_server(
+            &http_addr_clone,
+            storage_clone,
+            notifier_clone,
+            sync_clone,
+            version_clone,
+        )
+        .await
         {
             error!("HTTP 服务器错误: {}", e);
         }
@@ -140,6 +159,7 @@ async fn start_http_server(
     storage: StorageManager,
     notifier: EventNotifier,
     sync_manager: Arc<SyncManager>,
+    version_manager: Arc<VersionManager>,
 ) -> Result<()> {
     let storage = Arc::new(storage);
     let notifier = Arc::new(notifier);
@@ -291,10 +311,107 @@ async fn start_http_server(
         }
     };
 
+    // 版本管理相关 API
+    let version_list = version_manager.clone();
+    let list_versions = move |req: Request| {
+        let vm = version_list.clone();
+        async move {
+            let file_id: String = req.get_path_params("id")?;
+            let versions = vm.list_versions(&file_id).await.map_err(|e| {
+                SilentError::business_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("获取版本列表失败: {}", e),
+                )
+            })?;
+            Ok(serde_json::to_value(versions).unwrap())
+        }
+    };
+
+    let version_get = version_manager.clone();
+    let get_version = move |req: Request| {
+        let vm = version_get.clone();
+        async move {
+            let version_id: String = req.get_path_params("version_id")?;
+            let data = vm.read_version(&version_id).await.map_err(|e| {
+                SilentError::business_error(StatusCode::NOT_FOUND, format!("版本不存在: {}", e))
+            })?;
+            let mut resp = Response::empty();
+            resp.headers_mut().insert(
+                http::header::CONTENT_TYPE,
+                http::HeaderValue::from_static("application/octet-stream"),
+            );
+            resp.set_body(full(data));
+            Ok(resp)
+        }
+    };
+
+    let version_restore = version_manager.clone();
+    let storage_restore = storage.clone();
+    let notifier_restore = notifier.clone();
+    let restore_version = move |req: Request| {
+        let vm = version_restore.clone();
+        let storage = storage_restore.clone();
+        let notifier = notifier_restore.clone();
+        async move {
+            let file_id: String = req.get_path_params("id")?;
+            let version_id: String = req.get_path_params("version_id")?;
+
+            let version = vm
+                .restore_version(&file_id, &version_id)
+                .await
+                .map_err(|e| {
+                    SilentError::business_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("恢复版本失败: {}", e),
+                    )
+                })?;
+
+            // 发送修改事件
+            if let Ok(metadata) = storage.get_metadata(&file_id).await {
+                let event = FileEvent::new(EventType::Modified, file_id.clone(), Some(metadata));
+                let _ = notifier.notify_modified(event).await;
+            }
+
+            Ok(serde_json::to_value(version).unwrap())
+        }
+    };
+
+    let version_delete = version_manager.clone();
+    let delete_version = move |req: Request| {
+        let vm = version_delete.clone();
+        async move {
+            let version_id: String = req.get_path_params("version_id")?;
+            vm.delete_version(&version_id).await.map_err(|e| {
+                SilentError::business_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("删除版本失败: {}", e),
+                )
+            })?;
+            Ok(serde_json::json!({"success": true}))
+        }
+    };
+
+    let version_stats = version_manager.clone();
+    let get_version_stats = move |_req: Request| {
+        let vm = version_stats.clone();
+        async move {
+            let stats = vm.get_stats().await;
+            Ok(serde_json::to_value(stats).unwrap())
+        }
+    };
+
     let route = Route::new_root().append(
         Route::new("api")
             .append(Route::new("files").post(upload).get(list))
             .append(Route::new("files/<id>").get(download).delete(delete))
+            .append(Route::new("files/<id>/versions").get(list_versions))
+            .append(
+                Route::new("files/<id>/versions/<version_id>")
+                    .get(get_version)
+                    .delete(delete_version),
+            )
+            .append(Route::new("files/<id>/versions/<version_id>/restore").post(restore_version))
+            .append(Route::new("versions/stats").get(get_version_stats))
             .append(Route::new("sync/states").get(list_sync_states))
             .append(Route::new("sync/states/<id>").get(get_sync_state))
             .append(Route::new("sync/conflicts").get(get_conflicts))

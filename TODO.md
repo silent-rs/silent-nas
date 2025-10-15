@@ -15,9 +15,9 @@
 
 ### 已完成 (Phase 2-3) ✅
 - ✅ CRDT 文件同步与冲突合并 (2025-10-15 完成)
+- ✅ 文件版本管理系统 (2025-10-15 完成)
 
-### 进行中 (Phase 3) 🚧
-- 🚧 文件版本管理
+### 进行中 (Phase 3-4) 🚧
 - 🚧 跨节点同步支持
 
 ---
@@ -26,44 +26,60 @@
 
 ### 高优先级 (P0) - 核心功能完善
 
-#### 1. 文件版本管理系统
+#### 1. 文件版本管理系统 ✅ **已完成 (2025-10-15)**
 **目标**: 实现完整的文件版本控制，支持版本回退和历史查询
 
 **任务清单**:
-- [ ] 设计版本存储结构
-  - [ ] 版本元数据表（version_id, file_id, created_at, author, size, hash）
-  - [ ] 版本内容存储策略（全量 vs 增量）
-  - [ ] 版本索引与快速查询
-- [ ] 实现版本 API
-  - [ ] `GET /api/files/{id}/versions` - 列出版本历史
-  - [ ] `GET /api/files/{id}/versions/{version}` - 获取特定版本
-  - [ ] `POST /api/files/{id}/restore` - 恢复到指定版本
-  - [ ] `DELETE /api/files/{id}/versions/{version}` - 删除版本
-- [ ] S3 版本控制支持
-  - [ ] 实现 `GetBucketVersioning`（当前返回空）
-  - [ ] 实现 `PutBucketVersioning`（启用/暂停/禁用）
+- [x] 设计版本存储结构
+  - [x] 版本元数据表（version_id, file_id, created_at, author, size, hash）
+  - [x] 版本内容存储策略（全量存储）
+  - [x] 版本索引与快速查询（内存 HashMap）
+- [x] 实现版本 API
+  - [x] `GET /api/files/{id}/versions` - 列出版本历史
+  - [x] `GET /api/files/{id}/versions/{version_id}` - 获取特定版本内容
+  - [x] `POST /api/files/{id}/versions/{version_id}/restore` - 恢复到指定版本
+  - [x] `DELETE /api/files/{id}/versions/{version_id}` - 删除版本
+  - [x] `GET /api/versions/stats` - 版本统计信息
+- [x] 配置选项
+  - [x] 最大版本数量限制 (默认10)
+  - [x] 版本保留时长 (默认30天)
+  - [x] 启用/禁用版本管理
+- [ ] S3 版本控制支持（后续）
+  - [ ] 实现 `GetBucketVersioning`
+  - [ ] 实现 `PutBucketVersioning`
   - [ ] 实现 `ListObjectVersions`
-  - [ ] 对象版本 ID 支持
-- [ ] WebDAV 版本扩展
+- [ ] WebDAV 版本扩展（后续）
   - [ ] 实现 `VERSION-CONTROL` 方法
-  - [ ] 实现 `REPORT` 方法（版本历史）
-- [ ] 配置选项
-  - [ ] 最大版本数量限制
-  - [ ] 版本保留时长
-  - [ ] 版本存储配额
+  - [ ] 实现 `REPORT` 方法
 
-**预计工期**: 1-2周
-**依赖**: storage.rs 扩展
-**验证方式**: 使用 S3 版本控制 API 和 WebDAV 客户端测试
+**实际工期**: 6小时
+**验证方式**: HTTP API 测试通过
 
 ---
 
-#### 2. CRDT 文件同步与冲突合并
+#### 2. CRDT 文件同步与冲突合并 ✅ **已完成 (2025-10-15)**
 **目标**: 实现基于 CRDT 的多客户端文件同步，自动处理冲突
 
 **任务清单**:
-- [ ] 集成 silent-crdt 依赖
-  - [ ] 添加 silent-crdt 到 Cargo.toml
+- [x] 集成 silent-crdt 依赖
+  - [x] 添加 silent-crdt 到 Cargo.toml
+- [x] 实现文件同步模块 (`sync.rs`)
+  - [x] 文件状态追踪（LWW-Register）
+  - [x] 元数据合并策略
+  - [x] 内容冲突检测
+  - [x] 自动合并算法
+- [x] 冲突处理策略
+  - [x] LWW（Last-Write-Wins）基于时间戳
+  - [x] 保留冲突副本（.conflict 文件）
+  - [x] 用户手动合并接口
+- [x] NATS 事件集成
+  - [x] 监听文件变更事件
+  - [x] 触发 CRDT 同步
+  - [x] 广播合并结果
+- [x] 冲突解决 API
+  - [x] `GET /api/conflicts` - 列出冲突
+  - [x] `POST /api/conflicts/{id}/resolve` - 解决冲突
+  - [x] `GET /api/sync/status` - 同步状态
   - [ ] 设计文件元数据 CRDT 结构
 - [ ] 实现文件同步模块 (`sync.rs`)
   - [ ] 文件状态追踪（LWW-Register）

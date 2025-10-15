@@ -268,6 +268,61 @@ impl S3Service {
         Ok(resp)
     }
 
+    /// DeleteObjects - 批量删除对象
+    pub async fn delete_objects(&self, req: Request) -> silent::Result<Response> {
+        if !self.verify_request(&req) {
+            return self.error_response(StatusCode::FORBIDDEN, "AccessDenied", "Access Denied");
+        }
+
+        let bucket: String = req.get_path_params("bucket")?;
+
+        debug!("DeleteObjects: bucket={}", bucket);
+
+        // 读取请求体XML
+        let body_bytes = Self::read_body(req).await?;
+        let body_str = String::from_utf8_lossy(&body_bytes);
+
+        // 解析XML获取要删除的对象列表
+        let keys = Self::parse_delete_objects_xml(&body_str);
+
+        let mut deleted = Vec::new();
+        let mut errors = Vec::new();
+
+        // 批量删除对象
+        for key in keys {
+            let file_id = format!("{}/{}", bucket, key);
+            match self.storage.delete_file(&file_id).await {
+                Ok(_) => {
+                    // 发送删除事件
+                    let event = FileEvent::new(EventType::Deleted, file_id.clone(), None);
+                    let _ = self.notifier.notify_deleted(event).await;
+                    deleted.push(key);
+                }
+                Err(e) => {
+                    debug!("删除失败: {} - {}", key, e);
+                    errors.push((key, "InternalError", e.to_string()));
+                }
+            }
+        }
+
+        // 生成XML响应
+        let xml = Self::generate_delete_result_xml(&deleted, &errors);
+
+        let mut resp = Response::empty();
+        resp.headers_mut().insert(
+            http::header::CONTENT_TYPE,
+            http::HeaderValue::from_static("application/xml"),
+        );
+        resp.headers_mut().insert(
+            "x-amz-request-id",
+            http::HeaderValue::from_static("silent-nas-012"),
+        );
+        resp.set_body(full(xml.into_bytes()));
+        resp.set_status(StatusCode::OK);
+
+        Ok(resp)
+    }
+
     /// HeadObject - 获取对象元数据
     pub async fn head_object(&self, req: Request) -> silent::Result<Response> {
         if !self.verify_request(&req) {
@@ -624,6 +679,82 @@ impl S3Service {
         Ok(resp)
     }
 
+    /// GetBucketLocation - 获取bucket位置
+    pub async fn get_bucket_location(&self, req: Request) -> silent::Result<Response> {
+        if !self.verify_request(&req) {
+            return self.error_response(StatusCode::FORBIDDEN, "AccessDenied", "Access Denied");
+        }
+
+        let bucket: String = req.get_path_params("bucket")?;
+
+        debug!("GetBucketLocation: bucket={}", bucket);
+
+        // 检查bucket是否存在
+        if !self.storage.bucket_exists(&bucket).await {
+            return self.error_response(
+                StatusCode::NOT_FOUND,
+                "NoSuchBucket",
+                "The specified bucket does not exist",
+            );
+        }
+
+        // 生成XML响应（默认返回us-east-1）
+        let xml = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+                   <LocationConstraint xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">us-east-1</LocationConstraint>";
+
+        let mut resp = Response::empty();
+        resp.headers_mut().insert(
+            http::header::CONTENT_TYPE,
+            http::HeaderValue::from_static("application/xml"),
+        );
+        resp.headers_mut().insert(
+            "x-amz-request-id",
+            http::HeaderValue::from_static("silent-nas-013"),
+        );
+        resp.set_body(full(xml.to_string().into_bytes()));
+        resp.set_status(StatusCode::OK);
+
+        Ok(resp)
+    }
+
+    /// GetBucketVersioning - 获取bucket版本控制状态
+    pub async fn get_bucket_versioning(&self, req: Request) -> silent::Result<Response> {
+        if !self.verify_request(&req) {
+            return self.error_response(StatusCode::FORBIDDEN, "AccessDenied", "Access Denied");
+        }
+
+        let bucket: String = req.get_path_params("bucket")?;
+
+        debug!("GetBucketVersioning: bucket={}", bucket);
+
+        // 检查bucket是否存在
+        if !self.storage.bucket_exists(&bucket).await {
+            return self.error_response(
+                StatusCode::NOT_FOUND,
+                "NoSuchBucket",
+                "The specified bucket does not exist",
+            );
+        }
+
+        // 生成XML响应（默认未启用版本控制）
+        let xml = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+                   <VersioningConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"/>";
+
+        let mut resp = Response::empty();
+        resp.headers_mut().insert(
+            http::header::CONTENT_TYPE,
+            http::HeaderValue::from_static("application/xml"),
+        );
+        resp.headers_mut().insert(
+            "x-amz-request-id",
+            http::HeaderValue::from_static("silent-nas-014"),
+        );
+        resp.set_body(full(xml.to_string().into_bytes()));
+        resp.set_status(StatusCode::OK);
+
+        Ok(resp)
+    }
+
     // ===== 辅助方法 =====
 
     fn generate_list_response_v2(
@@ -699,6 +830,53 @@ impl S3Service {
         xml.push_str("</ListBucketResult>");
         xml
     }
+
+    /// 解析DeleteObjects请求的XML
+    fn parse_delete_objects_xml(xml: &str) -> Vec<String> {
+        let mut keys = Vec::new();
+
+        // 简单的XML解析，查找<Key>标签
+        for line in xml.lines() {
+            let line = line.trim();
+            if line.starts_with("<Key>") && line.ends_with("</Key>") {
+                let key = line
+                    .trim_start_matches("<Key>")
+                    .trim_end_matches("</Key>")
+                    .to_string();
+                keys.push(key);
+            }
+        }
+
+        keys
+    }
+
+    /// 生成DeleteObjects响应的XML
+    fn generate_delete_result_xml(deleted: &[String], errors: &[(String, &str, String)]) -> String {
+        let mut xml = String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
+        xml.push_str("<DeleteResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\n");
+
+        // 成功删除的对象
+        for key in deleted {
+            xml.push_str("  <Deleted>\n");
+            xml.push_str(&format!("    <Key>{}</Key>\n", Self::xml_escape(key)));
+            xml.push_str("  </Deleted>\n");
+        }
+
+        // 删除失败的对象
+        for (key, code, message) in errors {
+            xml.push_str("  <Error>\n");
+            xml.push_str(&format!("    <Key>{}</Key>\n", Self::xml_escape(key)));
+            xml.push_str(&format!("    <Code>{}</Code>\n", Self::xml_escape(code)));
+            xml.push_str(&format!(
+                "    <Message>{}</Message>\n",
+                Self::xml_escape(message)
+            ));
+            xml.push_str("  </Error>\n");
+        }
+
+        xml.push_str("</DeleteResult>");
+        xml
+    }
 }
 
 /// 创建S3路由
@@ -717,10 +895,14 @@ pub fn create_s3_routes(
             debug!("bucket_handler: method={}, uri={}", req.method(), req.uri());
             match *req.method() {
                 Method::GET => {
-                    // 检查是否是V2版本
+                    // 检查查询参数决定调用哪个API
                     let query = req.uri().query().unwrap_or("");
                     if query.contains("list-type=2") {
                         service.list_objects_v2(req).await
+                    } else if query.contains("location") {
+                        service.get_bucket_location(req).await
+                    } else if query.contains("versioning") {
+                        service.get_bucket_versioning(req).await
                     } else {
                         service.list_objects(req).await
                     }
@@ -802,12 +984,30 @@ pub fn create_s3_routes(
         }
     };
 
+    let service_bucket_post = service.clone();
+    let bucket_handler_post = move |req: Request| {
+        let service = service_bucket_post.clone();
+        async move {
+            let query = req.uri().query().unwrap_or("");
+            if query.contains("delete") {
+                service.delete_objects(req).await
+            } else {
+                service.error_response(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidRequest",
+                    "Invalid POST request",
+                )
+            }
+        }
+    };
+
     Route::new_root().get(root_handler).append(
         Route::new("<bucket>")
-            // Bucket级别操作 - GET和HEAD都用同一个handler
+            // Bucket级别操作 - GET、HEAD、PUT、DELETE、POST
             .get(bucket_handler)
             .put(put_bucket)
             .delete(delete_bucket)
+            .post(bucket_handler_post)
             // 对象级别操作
             .append(
                 Route::new("<key:**>")

@@ -1,6 +1,7 @@
 use crate::models::{EventType, FileEvent};
 use crate::notify::EventNotifier;
 use crate::storage::StorageManager;
+use async_trait::async_trait;
 use http::StatusCode;
 use http_body_util::BodyExt;
 use silent::Result as SilentResult;
@@ -30,36 +31,6 @@ impl WebDavHandler {
             base_path,
         }
     }
-
-    /// 处理 WebDAV 请求
-    pub async fn handle(&self, mut req: Request) -> SilentResult<Response> {
-        let method = req.method().clone();
-        let uri_path = req.uri().path().to_string();
-
-        // 移除 base_path 前缀
-        let relative_path = uri_path
-            .strip_prefix(&self.base_path)
-            .unwrap_or(&uri_path)
-            .to_string();
-
-        debug!("WebDAV {} {}", method, relative_path);
-
-        match method.as_str() {
-            "OPTIONS" => self.handle_options().await,
-            "PROPFIND" => self.handle_propfind(&relative_path, &req).await,
-            "GET" => self.handle_get(&relative_path).await,
-            "PUT" => self.handle_put(&relative_path, &mut req).await,
-            "DELETE" => self.handle_delete(&relative_path).await,
-            "MKCOL" => self.handle_mkcol(&relative_path).await,
-            "MOVE" => self.handle_move(&relative_path, &req).await,
-            "COPY" => self.handle_copy(&relative_path, &req).await,
-            _ => Err(SilentError::business_error(
-                StatusCode::METHOD_NOT_ALLOWED,
-                "不支持的方法",
-            )),
-        }
-    }
-
     /// OPTIONS - 返回支持的方法
     async fn handle_options(&self) -> SilentResult<Response> {
         let mut resp = Response::empty();
@@ -208,10 +179,16 @@ impl WebDavHandler {
             .map_err(|_| SilentError::business_error(StatusCode::NOT_FOUND, "文件不存在"))?;
 
         if metadata.is_dir() {
-            return Err(SilentError::business_error(
-                StatusCode::CONFLICT,
-                "不能下载目录",
+            // 对于目录，返回一个简单的 HTML 页面或者 200 OK
+            let mut resp = Response::empty();
+            resp.headers_mut().insert(
+                http::header::CONTENT_TYPE,
+                http::HeaderValue::from_static("text/html; charset=utf-8"),
+            );
+            resp.set_body(full(
+                b"<!DOCTYPE html><html><body><h1>Directory</h1><p>Use PROPFIND to list contents.</p></body></html>".to_vec(),
             ));
+            return Ok(resp);
         }
 
         let data = fs::read(&storage_path).await.map_err(|e| {
@@ -525,5 +502,38 @@ impl WebDavHandler {
         }
 
         Ok(())
+    }
+}
+
+#[async_trait]
+impl Handler for WebDavHandler {
+    /// 处理 WebDAV 请求
+    async fn call(&self, mut req: Request) -> SilentResult<Response> {
+        let method = req.method().clone();
+        let uri_path = req.uri().path().to_string();
+
+        // 移除 base_path 前缀
+        let relative_path = uri_path
+            .strip_prefix(&self.base_path)
+            .unwrap_or(&uri_path)
+            .to_string();
+
+        debug!("WebDAV {} {}", method, relative_path);
+
+        match method.as_str() {
+            "OPTIONS" => self.handle_options().await,
+            "PROPFIND" => self.handle_propfind(&relative_path, &req).await,
+            "GET" => self.handle_get(&relative_path).await,
+            "PUT" => self.handle_put(&relative_path, &mut req).await,
+            "DELETE" => self.handle_delete(&relative_path).await,
+            "MKCOL" => self.handle_mkcol(&relative_path).await,
+            "MOVE" => self.handle_move(&relative_path, &req).await,
+            "COPY" => self.handle_copy(&relative_path, &req).await,
+            "HEAD" => self.handle_get(&relative_path).await,
+            _ => Err(SilentError::business_error(
+                StatusCode::METHOD_NOT_ALLOWED,
+                "不支持的方法",
+            )),
+        }
     }
 }

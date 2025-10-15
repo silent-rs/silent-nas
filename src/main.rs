@@ -24,7 +24,7 @@ use tracing::{error, info};
 #[tokio::main]
 async fn main() -> Result<()> {
     // 初始化日志
-    logger::fmt().with_max_level(Level::INFO).init();
+    logger::fmt().with_max_level(Level::DEBUG).init();
 
     info!("Silent-NAS 服务器启动中...");
 
@@ -217,19 +217,23 @@ async fn start_http_server(
     // WebDAV 处理器
     let webdav_handler =
         webdav::WebDavHandler::new(storage.clone(), notifier.clone(), "/webdav".to_string());
-
+    let webdav_handler_arc = Arc::new(webdav_handler.clone());
     // WebDAV 路由 - 处理所有方法
     let webdav_all = move |req: Request| {
         let handler = webdav_handler.clone();
-        async move { handler.handle(req).await }
+        async move { handler.call(req).await }
     };
 
-    let route = Route::new("api")
-        .append(Route::new("files").post(upload).get(list))
-        .append(Route::new("files/<id>").get(download).delete(delete))
-        .append(Route::new("health").get(health))
+    let route = Route::new_root()
+        .append(
+            Route::new("api")
+                .append(Route::new("files").post(upload).get(list))
+                .append(Route::new("files/<id>").get(download).delete(delete))
+                .append(Route::new("health").get(health)),
+        )
         .append(
             Route::new("webdav")
+                .insert_handler(Method::HEAD, webdav_handler_arc.clone())
                 .get(webdav_all.clone())
                 .post(webdav_all.clone())
                 .put(webdav_all.clone())
@@ -237,7 +241,8 @@ async fn start_http_server(
                 .options(webdav_all.clone()),
         )
         .append(
-            Route::new("webdav/*path")
+            Route::new("webdav/<path:**>")
+                .insert_handler(Method::HEAD, webdav_handler_arc.clone())
                 .get(webdav_all.clone())
                 .post(webdav_all.clone())
                 .put(webdav_all.clone())

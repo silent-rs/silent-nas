@@ -71,7 +71,19 @@ async fn main() -> Result<()> {
         }
     });
 
-    // WebDAV 现已集成到 HTTP 服务器中
+    // 启动 WebDAV 服务器
+    let webdav_addr = format!("{}:{}", config.server.host, config.server.webdav_port);
+    let webdav_addr_clone = webdav_addr.clone();
+    let storage_webdav = storage.clone();
+    let notifier_webdav = notifier.clone();
+
+    tokio::spawn(async move {
+        if let Err(e) =
+            start_webdav_server(&webdav_addr_clone, storage_webdav, notifier_webdav).await
+        {
+            error!("WebDAV 服务器错误: {}", e);
+        }
+    });
 
     // 启动 S3 服务器
     let s3_addr = format!("{}:{}", config.server.host, config.server.s3_port);
@@ -97,6 +109,7 @@ async fn main() -> Result<()> {
     info!("所有服务已启动");
     info!("  HTTP:    http://{}", http_addr);
     info!("  gRPC:    {}", grpc_addr);
+    info!("  WebDAV:  http://{}", webdav_addr);
     info!("  S3:      http://{}", s3_addr);
     info!("  QUIC:    {}", quic_addr);
 
@@ -229,21 +242,15 @@ async fn start_http_server(
         }
     };
 
-    let route = Route::new_root()
-        .append(
-            Route::new("api")
-                .append(Route::new("files").post(upload).get(list))
-                .append(Route::new("files/<id>").get(download).delete(delete))
-                .append(Route::new("health").get(health)),
-        )
-        .append(webdav::create_webdav_routes(
-            storage.clone(),
-            notifier.clone(),
-        ));
+    let route = Route::new_root().append(
+        Route::new("api")
+            .append(Route::new("files").post(upload).get(list))
+            .append(Route::new("files/<id>").get(download).delete(delete))
+            .append(Route::new("health").get(health)),
+    );
 
     info!("HTTP 服务器启动: {}", addr);
     info!("  - REST API: http://{}/api", addr);
-    info!("  - WebDAV:   http://{}/webdav", addr);
 
     Server::new()
         .bind(addr.parse().expect("无效的 HTTP 地址"))
@@ -268,6 +275,28 @@ async fn start_grpc_server(
         .serve(addr)
         .await
         .map_err(|e| error::NasError::Storage(format!("gRPC 服务器错误: {}", e)))?;
+
+    Ok(())
+}
+
+/// 启动 WebDAV 服务器
+async fn start_webdav_server(
+    addr: &str,
+    storage: StorageManager,
+    notifier: EventNotifier,
+) -> Result<()> {
+    let storage = Arc::new(storage);
+    let notifier = Arc::new(notifier);
+
+    let route = webdav::create_webdav_routes(storage, notifier);
+
+    info!("WebDAV 服务器启动: {}", addr);
+    info!("  - WebDAV: http://{}/webdav", addr);
+
+    Server::new()
+        .bind(addr.parse().expect("无效的 WebDAV 地址"))
+        .serve(route)
+        .await;
 
     Ok(())
 }

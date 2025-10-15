@@ -7,12 +7,19 @@ use tracing::debug;
 #[allow(clippy::collapsible_if)]
 impl S3Service {
     pub async fn put_object(&self, req: Request) -> silent::Result<Response> {
+        // 检查key是否为空，如果为空说明这是bucket创建请求（被路由错误匹配到这里）
+        // 这种情况发生在路径如 /test-bucket 时，<key:**> 通配符匹配了空路径
+        let key: String = req.get_path_params("key")?;
+        if key.is_empty() {
+            debug!("Empty key detected in put_object, redirecting to put_bucket");
+            return self.put_bucket(req).await;
+        }
+
         if !self.verify_request(&req) {
             return self.error_response(StatusCode::FORBIDDEN, "AccessDenied", "Access Denied");
         }
 
         let bucket: String = req.get_path_params("bucket")?;
-        let key: String = req.get_path_params("key")?;
 
         debug!("PutObject: bucket={}, key={}", bucket, key);
 

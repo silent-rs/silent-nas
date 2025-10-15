@@ -165,6 +165,64 @@ impl WebDavHandler {
         xml.push_str("</D:response>");
     }
 
+    /// HEAD - 获取文件元数据（不返回文件内容）
+    async fn handle_head(&self, path: &str) -> SilentResult<Response> {
+        let path = urlencoding::decode(path)
+            .map_err(|e| {
+                SilentError::business_error(StatusCode::BAD_REQUEST, format!("路径解码失败: {}", e))
+            })?
+            .to_string();
+
+        let storage_path = self.storage.get_full_path(&path);
+        let metadata = fs::metadata(&storage_path)
+            .await
+            .map_err(|_| SilentError::business_error(StatusCode::NOT_FOUND, "文件不存在"))?;
+
+        let mut resp = Response::empty();
+
+        if metadata.is_dir() {
+            // 对于目录
+            resp.headers_mut().insert(
+                http::header::CONTENT_TYPE,
+                http::HeaderValue::from_static("text/html; charset=utf-8"),
+            );
+        } else {
+            // 对于文件
+            resp.headers_mut().insert(
+                http::header::CONTENT_TYPE,
+                http::HeaderValue::from_static("application/octet-stream"),
+            );
+            resp.headers_mut().insert(
+                http::header::CONTENT_LENGTH,
+                http::HeaderValue::from_str(&metadata.len().to_string()).unwrap(),
+            );
+
+            // 添加 MIME 类型
+            if let Some(ext) = storage_path.extension() {
+                let mime = mime_guess::from_ext(&ext.to_string_lossy()).first_or_octet_stream();
+                resp.headers_mut().insert(
+                    http::header::CONTENT_TYPE,
+                    http::HeaderValue::from_str(mime.as_ref()).unwrap_or_else(|_| {
+                        http::HeaderValue::from_static("application/octet-stream")
+                    }),
+                );
+            }
+
+            // 添加最后修改时间
+            if let Ok(modified) = metadata.modified()
+                && let Ok(datetime) = modified.duration_since(std::time::UNIX_EPOCH)
+                && let Some(dt) = chrono::DateTime::from_timestamp(datetime.as_secs() as i64, 0)
+                && let Ok(last_modified) =
+                    http::HeaderValue::from_str(&dt.format("%a, %d %b %Y %H:%M:%S GMT").to_string())
+            {
+                resp.headers_mut()
+                    .insert(http::header::LAST_MODIFIED, last_modified);
+            }
+        }
+
+        Ok(resp)
+    }
+
     /// GET - 下载文件
     async fn handle_get(&self, path: &str) -> SilentResult<Response> {
         let path = urlencoding::decode(path)
@@ -179,7 +237,7 @@ impl WebDavHandler {
             .map_err(|_| SilentError::business_error(StatusCode::NOT_FOUND, "文件不存在"))?;
 
         if metadata.is_dir() {
-            // 对于目录，返回一个简单的 HTML 页面或者 200 OK
+            // 对于目录，返回一个简单的 HTML 页面
             let mut resp = Response::empty();
             resp.headers_mut().insert(
                 http::header::CONTENT_TYPE,
@@ -199,14 +257,38 @@ impl WebDavHandler {
         })?;
 
         let mut resp = Response::empty();
-        resp.headers_mut().insert(
-            http::header::CONTENT_TYPE,
-            http::HeaderValue::from_static("application/octet-stream"),
-        );
+
+        // 设置 MIME 类型
+        if let Some(ext) = storage_path.extension() {
+            let mime = mime_guess::from_ext(&ext.to_string_lossy()).first_or_octet_stream();
+            resp.headers_mut().insert(
+                http::header::CONTENT_TYPE,
+                http::HeaderValue::from_str(mime.as_ref())
+                    .unwrap_or_else(|_| http::HeaderValue::from_static("application/octet-stream")),
+            );
+        } else {
+            resp.headers_mut().insert(
+                http::header::CONTENT_TYPE,
+                http::HeaderValue::from_static("application/octet-stream"),
+            );
+        }
+
         resp.headers_mut().insert(
             http::header::CONTENT_LENGTH,
             http::HeaderValue::from_str(&data.len().to_string()).unwrap(),
         );
+
+        // 添加最后修改时间
+        if let Ok(modified) = metadata.modified()
+            && let Ok(datetime) = modified.duration_since(std::time::UNIX_EPOCH)
+            && let Some(dt) = chrono::DateTime::from_timestamp(datetime.as_secs() as i64, 0)
+            && let Ok(last_modified) =
+                http::HeaderValue::from_str(&dt.format("%a, %d %b %Y %H:%M:%S GMT").to_string())
+        {
+            resp.headers_mut()
+                .insert(http::header::LAST_MODIFIED, last_modified);
+        }
+
         resp.set_body(full(data));
         Ok(resp)
     }
@@ -523,13 +605,13 @@ impl Handler for WebDavHandler {
         match method.as_str() {
             "OPTIONS" => self.handle_options().await,
             "PROPFIND" => self.handle_propfind(&relative_path, &req).await,
+            "HEAD" => self.handle_head(&relative_path).await,
             "GET" => self.handle_get(&relative_path).await,
             "PUT" => self.handle_put(&relative_path, &mut req).await,
             "DELETE" => self.handle_delete(&relative_path).await,
             "MKCOL" => self.handle_mkcol(&relative_path).await,
             "MOVE" => self.handle_move(&relative_path, &req).await,
             "COPY" => self.handle_copy(&relative_path, &req).await,
-            "HEAD" => self.handle_get(&relative_path).await,
             _ => Err(SilentError::business_error(
                 StatusCode::METHOD_NOT_ALLOWED,
                 "不支持的方法",

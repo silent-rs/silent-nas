@@ -6,6 +6,7 @@ mod notify;
 mod rpc;
 mod s3;
 mod storage;
+mod sync;
 mod transfer;
 mod webdav;
 
@@ -19,6 +20,7 @@ use silent::prelude::*;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use storage::StorageManager;
+use sync::SyncManager;
 use tonic::transport::Server as TonicServer;
 use tracing::{error, info};
 
@@ -45,14 +47,26 @@ async fn main() -> Result<()> {
             e
         })?;
 
+    // 初始化同步管理器
+    let node_id = scru128::new_string();
+    let sync_manager = SyncManager::new(
+        node_id.clone(),
+        Arc::new(storage.clone()),
+        Arc::new(notifier.clone()),
+    );
+    info!("同步管理器已初始化: node_id={}", node_id);
+
     // 启动 HTTP 服务器（使用 Silent 框架）
     let http_addr = format!("{}:{}", config.server.host, config.server.http_port);
     let http_addr_clone = http_addr.clone();
     let storage_clone = storage.clone();
     let notifier_clone = notifier.clone();
+    let sync_clone = sync_manager.clone();
 
     tokio::spawn(async move {
-        if let Err(e) = start_http_server(&http_addr_clone, storage_clone, notifier_clone).await {
+        if let Err(e) =
+            start_http_server(&http_addr_clone, storage_clone, notifier_clone, sync_clone).await
+        {
             error!("HTTP 服务器错误: {}", e);
         }
     });
@@ -125,6 +139,7 @@ async fn start_http_server(
     addr: &str,
     storage: StorageManager,
     notifier: EventNotifier,
+    sync_manager: Arc<SyncManager>,
 ) -> Result<()> {
     let storage = Arc::new(storage);
     let notifier = Arc::new(notifier);
@@ -242,10 +257,47 @@ async fn start_http_server(
         }
     };
 
+    // 同步相关 API
+    let sync_get_state = sync_manager.clone();
+    let get_sync_state = move |req: Request| {
+        let sync = sync_get_state.clone();
+        async move {
+            let file_id: String = req.get_path_params("id")?;
+            match sync.get_sync_state(&file_id).await {
+                Some(state) => Ok(serde_json::to_value(state).unwrap()),
+                None => Err(SilentError::business_error(
+                    StatusCode::NOT_FOUND,
+                    "同步状态不存在",
+                )),
+            }
+        }
+    };
+
+    let sync_list_states = sync_manager.clone();
+    let list_sync_states = move |_req: Request| {
+        let sync = sync_list_states.clone();
+        async move {
+            let states = sync.get_all_sync_states().await;
+            Ok(serde_json::to_value(states).unwrap())
+        }
+    };
+
+    let sync_conflicts = sync_manager.clone();
+    let get_conflicts = move |_req: Request| {
+        let sync = sync_conflicts.clone();
+        async move {
+            let conflicts = sync.check_conflicts().await;
+            Ok(serde_json::to_value(conflicts).unwrap())
+        }
+    };
+
     let route = Route::new_root().append(
         Route::new("api")
             .append(Route::new("files").post(upload).get(list))
             .append(Route::new("files/<id>").get(download).delete(delete))
+            .append(Route::new("sync/states").get(list_sync_states))
+            .append(Route::new("sync/states/<id>").get(get_sync_state))
+            .append(Route::new("sync/conflicts").get(get_conflicts))
             .append(Route::new("health").get(health)),
     );
 

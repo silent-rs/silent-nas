@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 silent = { path = "./silent/silent" }
+silent-crdt = { path = "./silent-crdt" }
 tokio = { version = "1", features = ["full"] }
 http-body-util = "0.1"
 http = "1"

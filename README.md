@@ -13,7 +13,7 @@ Silent-NAS 是 Silent Odyssey 第六阶段的实验项目，旨在构建一个�
 - ✅ 基于 gRPC 的文件控制与元数据接口
 - ✅ 使用 NATS 进行文件变更事件推送
 - ✅ 用户鉴权与访问控制（基础实现）
-- 🚧 基于 CRDT 的多客户端文件同步与冲突合并
+- ✅ 基于 CRDT 的多客户端文件同步与冲突合并
 
 ### 服务端协议兼容层
 - ✅ HTTP/HTTPS 文件访问接口（REST API）
@@ -81,6 +81,11 @@ docs/
   - Bucket管理: ListBuckets/PutBucket/DeleteBucket/HeadBucket
   - 列表操作: ListObjectsV2/ListObjects
   - 高级特性: Range请求、用户元数据
+- **sync.rs**: CRDT 文件同步管理器
+  - 文件状态追踪: 基于 LWW-Register 和向量时钟
+  - 冲突检测: 自动识别并发修改
+  - 自动合并: Last-Write-Wins 策略
+  - 同步 API: 查询状态、冲突列表
 
 ## 快速开始
 

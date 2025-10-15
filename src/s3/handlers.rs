@@ -1,67 +1,14 @@
 use crate::models::{EventType, FileEvent};
 use crate::notify::EventNotifier;
+use crate::s3::auth::S3Auth;
+use crate::s3::models::S3Object;
+use crate::s3::service::S3Service;
 use crate::storage::StorageManager;
-use chrono::{DateTime, Utc};
 use silent::prelude::*;
-use std::collections::HashMap;
 use std::sync::Arc;
-use tracing::{debug, warn};
-
-/// S3认证信息
-#[derive(Clone)]
-pub struct S3Auth {
-    access_key: String,
-}
-
-impl S3Auth {
-    pub fn new(access_key: String, _secret_key: String) -> Self {
-        Self { access_key }
-    }
-}
-
-/// S3服务
-pub struct S3Service {
-    storage: Arc<StorageManager>,
-    notifier: Arc<EventNotifier>,
-    auth: Option<S3Auth>,
-}
+use tracing::debug;
 
 impl S3Service {
-    pub fn new(
-        storage: Arc<StorageManager>,
-        notifier: Arc<EventNotifier>,
-        auth: Option<S3Auth>,
-    ) -> Self {
-        Self {
-            storage,
-            notifier,
-            auth,
-        }
-    }
-
-    /// 验证请求
-    fn verify_request(&self, req: &Request) -> bool {
-        match &self.auth {
-            Some(auth) => {
-                // 简化版认证：检查Authorization头是否包含access_key
-                let auth_header = req
-                    .headers()
-                    .get("authorization")
-                    .and_then(|v| v.to_str().ok());
-
-                match auth_header {
-                    Some(header) if header.contains(&auth.access_key) => true,
-                    _ => {
-                        // 允许匿名访问（用于测试）
-                        warn!("S3请求认证失败，允许匿名访问");
-                        true
-                    }
-                }
-            }
-            None => true, // 未配置认证，允许所有请求
-        }
-    }
-
     /// PutObject - 上传对象
     pub async fn put_object(&self, req: Request) -> silent::Result<Response> {
         if !self.verify_request(&req) {
@@ -203,59 +150,6 @@ impl S3Service {
         }
 
         Ok(resp)
-    }
-
-    /// 解析Range头，返回(start, end)，都是包含的
-    fn parse_range(range_str: &str, file_size: u64) -> Option<(usize, usize)> {
-        // 格式: "bytes=start-end" 或 "bytes=start-" 或 "bytes=-count"
-        let range_str = range_str.trim();
-        if !range_str.starts_with("bytes=") {
-            return None;
-        }
-
-        let range = range_str.strip_prefix("bytes=")?;
-        let parts: Vec<&str> = range.split('-').collect();
-
-        if parts.len() != 2 {
-            return None;
-        }
-
-        match (parts[0].trim(), parts[1].trim()) {
-            ("", end_str) => {
-                // bytes=-count: 最后count字节
-                let count: u64 = end_str.parse().ok()?;
-                let start = file_size.saturating_sub(count);
-                Some((start as usize, (file_size - 1) as usize))
-            }
-            (start_str, "") => {
-                // bytes=start-: 从start到结束
-                let start: u64 = start_str.parse().ok()?;
-                if start >= file_size {
-                    return None;
-                }
-                Some((start as usize, (file_size - 1) as usize))
-            }
-            (start_str, end_str) => {
-                // bytes=start-end: 指定范围
-                let start: u64 = start_str.parse().ok()?;
-                let mut end: u64 = end_str.parse().ok()?;
-
-                if start >= file_size {
-                    return None;
-                }
-
-                // end不能超过文件大小
-                if end >= file_size {
-                    end = file_size - 1;
-                }
-
-                if start > end {
-                    return None;
-                }
-
-                Some((start as usize, end as usize))
-            }
-        }
     }
 
     /// CopyObject - 复制对象
@@ -425,18 +319,6 @@ impl S3Service {
         resp.set_status(StatusCode::OK);
 
         Ok(resp)
-    }
-
-    /// 添加用户自定义元数据（示例实现）
-    fn add_user_metadata(resp: &mut Response) {
-        // 注：实际应用中应该从持久化存储读取
-        // 这里仅为演示S3协议兼容性
-        resp.headers_mut().insert(
-            "x-amz-meta-author",
-            http::HeaderValue::from_static("silent-nas"),
-        );
-        resp.headers_mut()
-            .insert("x-amz-meta-version", http::HeaderValue::from_static("1.0"));
     }
 
     /// ListObjectsV2 - 列出对象
@@ -744,46 +626,6 @@ impl S3Service {
 
     // ===== 辅助方法 =====
 
-    async fn read_body(mut req: Request) -> silent::Result<Vec<u8>> {
-        use http_body_util::BodyExt;
-
-        let body = req.take_body();
-        match body {
-            ReqBody::Incoming(body) => {
-                let bytes = body
-                    .collect()
-                    .await
-                    .map_err(|e| {
-                        SilentError::business_error(
-                            StatusCode::BAD_REQUEST,
-                            format!("读取请求体失败: {}", e),
-                        )
-                    })?
-                    .to_bytes()
-                    .to_vec();
-                Ok(bytes)
-            }
-            ReqBody::Once(bytes) => Ok(bytes.to_vec()),
-            ReqBody::Empty => Ok(Vec::new()),
-        }
-    }
-
-    fn parse_query_string(query: &str) -> HashMap<String, String> {
-        query
-            .split('&')
-            .filter_map(|part| {
-                let mut split = part.splitn(2, '=');
-                match (split.next(), split.next()) {
-                    (Some(key), Some(value)) => Some((
-                        key.to_string(),
-                        urlencoding::decode(value).ok()?.to_string(),
-                    )),
-                    _ => None,
-                }
-            })
-            .collect()
-    }
-
     fn generate_list_response_v2(
         &self,
         bucket: &str,
@@ -857,50 +699,6 @@ impl S3Service {
         xml.push_str("</ListBucketResult>");
         xml
     }
-
-    fn xml_escape(s: &str) -> String {
-        s.replace('&', "&amp;")
-            .replace('<', "&lt;")
-            .replace('>', "&gt;")
-            .replace('"', "&quot;")
-            .replace('\'', "&apos;")
-    }
-
-    fn error_response(
-        &self,
-        status: StatusCode,
-        code: &str,
-        message: &str,
-    ) -> silent::Result<Response> {
-        let xml = format!(
-            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
-             <Error>\n\
-             <Code>{}</Code>\n\
-             <Message>{}</Message>\n\
-             <RequestId>silent-nas-error</RequestId>\n\
-             </Error>",
-            Self::xml_escape(code),
-            Self::xml_escape(message)
-        );
-
-        let mut resp = Response::empty();
-        resp.headers_mut().insert(
-            http::header::CONTENT_TYPE,
-            http::HeaderValue::from_static("application/xml"),
-        );
-        resp.set_body(full(xml.into_bytes()));
-        resp.set_status(status);
-
-        Ok(resp)
-    }
-}
-
-#[derive(Debug)]
-struct S3Object {
-    key: String,
-    last_modified: DateTime<Utc>,
-    etag: String,
-    size: u64,
 }
 
 /// 创建S3路由

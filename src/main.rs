@@ -24,7 +24,7 @@ use tracing::{error, info};
 #[tokio::main]
 async fn main() -> Result<()> {
     // 初始化日志
-    logger::fmt().with_max_level(Level::DEBUG).init();
+    logger::fmt().with_max_level(Level::INFO).init();
 
     info!("Silent-NAS 服务器启动中...");
 

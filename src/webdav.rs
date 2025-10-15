@@ -11,6 +11,24 @@ use std::sync::Arc;
 use tokio::fs;
 use tracing::debug;
 
+// WebDAV 方法常量
+const METHOD_PROPFIND: &[u8] = b"PROPFIND";
+const METHOD_MKCOL: &[u8] = b"MKCOL";
+const METHOD_MOVE: &[u8] = b"MOVE";
+const METHOD_COPY: &[u8] = b"COPY";
+
+// WebDAV XML 命名空间
+const XML_HEADER: &str = r#"<?xml version="1.0" encoding="utf-8"?>"#;
+const XML_NS_DAV: &str = r#"<D:multistatus xmlns:D="DAV:">"#;
+const XML_MULTISTATUS_END: &str = "</D:multistatus>";
+
+// HTTP 头常量
+const HEADER_DAV: &str = "dav";
+const HEADER_DAV_VALUE: &str = "1, 2";
+const HEADER_ALLOW_VALUE: &str = "OPTIONS, GET, HEAD, PUT, DELETE, PROPFIND, MKCOL, MOVE, COPY";
+const CONTENT_TYPE_XML: &str = "application/xml; charset=utf-8";
+const CONTENT_TYPE_HTML: &str = "text/html; charset=utf-8";
+
 /// WebDAV 处理器
 #[derive(Clone)]
 pub struct WebDavHandler {
@@ -31,29 +49,38 @@ impl WebDavHandler {
             base_path,
         }
     }
+
+    /// 解码 URL 路径
+    fn decode_path(path: &str) -> SilentResult<String> {
+        urlencoding::decode(path)
+            .map(|s| s.to_string())
+            .map_err(|e| {
+                SilentError::business_error(StatusCode::BAD_REQUEST, format!("路径解码失败: {}", e))
+            })
+    }
+
+    /// 构建完整的 WebDAV href（包含 base_path 前缀）
+    fn build_full_href(&self, relative_path: &str) -> String {
+        format!("{}{}", &self.base_path, relative_path)
+    }
+
     /// OPTIONS - 返回支持的方法
     async fn handle_options(&self) -> SilentResult<Response> {
         let mut resp = Response::empty();
         resp.headers_mut().insert(
-            http::header::HeaderName::from_static("dav"),
-            http::HeaderValue::from_static("1, 2"),
+            http::header::HeaderName::from_static(HEADER_DAV),
+            http::HeaderValue::from_static(HEADER_DAV_VALUE),
         );
         resp.headers_mut().insert(
             http::header::ALLOW,
-            http::HeaderValue::from_static(
-                "OPTIONS, GET, HEAD, PUT, DELETE, PROPFIND, MKCOL, MOVE, COPY",
-            ),
+            http::HeaderValue::from_static(HEADER_ALLOW_VALUE),
         );
         Ok(resp)
     }
 
     /// PROPFIND - 列出文件和目录
     async fn handle_propfind(&self, path: &str, req: &Request) -> SilentResult<Response> {
-        let path = urlencoding::decode(path)
-            .map_err(|e| {
-                SilentError::business_error(StatusCode::BAD_REQUEST, format!("路径解码失败: {}", e))
-            })?
-            .to_string();
+        let path = Self::decode_path(path)?;
 
         let depth = req
             .headers()
@@ -68,12 +95,12 @@ impl WebDavHandler {
             .map_err(|_| SilentError::business_error(StatusCode::NOT_FOUND, "路径不存在"))?;
 
         let mut xml = String::new();
-        xml.push_str(r#"<?xml version="1.0" encoding="utf-8"?>"#);
-        xml.push_str(r#"<D:multistatus xmlns:D="DAV:">"#);
+        xml.push_str(XML_HEADER);
+        xml.push_str(XML_NS_DAV);
 
         if metadata.is_dir() {
-            // 添加目录本身的响应，href 需要包含 /webdav 前缀
-            let full_href = format!("{}{}", &self.base_path, &path);
+            // 添加目录本身的响应
+            let full_href = self.build_full_href(&path);
             Self::add_prop_response(&mut xml, &full_href, &storage_path, true).await;
 
             if depth != "0" {
@@ -96,24 +123,23 @@ impl WebDavHandler {
                     } else {
                         format!("{}/{}", path, entry.file_name().to_string_lossy())
                     };
-                    // href 需要包含 /webdav 前缀
-                    let full_href = format!("{}{}", &self.base_path, &relative_path);
+                    let full_href = self.build_full_href(&relative_path);
                     let is_dir = entry_path.is_dir();
                     Self::add_prop_response(&mut xml, &full_href, &entry_path, is_dir).await;
                 }
             }
         } else {
-            let full_href = format!("{}{}", &self.base_path, &path);
+            let full_href = self.build_full_href(&path);
             Self::add_prop_response(&mut xml, &full_href, &storage_path, false).await;
         }
 
-        xml.push_str("</D:multistatus>");
+        xml.push_str(XML_MULTISTATUS_END);
 
         let mut resp = Response::text(&xml);
         resp.set_status(StatusCode::MULTI_STATUS);
         resp.headers_mut().insert(
             http::header::CONTENT_TYPE,
-            http::HeaderValue::from_static("application/xml; charset=utf-8"),
+            http::HeaderValue::from_static(CONTENT_TYPE_XML),
         );
         Ok(resp)
     }
@@ -172,11 +198,7 @@ impl WebDavHandler {
 
     /// HEAD - 获取文件元数据（不返回文件内容）
     async fn handle_head(&self, path: &str) -> SilentResult<Response> {
-        let path = urlencoding::decode(path)
-            .map_err(|e| {
-                SilentError::business_error(StatusCode::BAD_REQUEST, format!("路径解码失败: {}", e))
-            })?
-            .to_string();
+        let path = Self::decode_path(path)?;
 
         let storage_path = self.storage.get_full_path(&path);
         let metadata = fs::metadata(&storage_path)
@@ -189,7 +211,7 @@ impl WebDavHandler {
             // 对于目录
             resp.headers_mut().insert(
                 http::header::CONTENT_TYPE,
-                http::HeaderValue::from_static("text/html; charset=utf-8"),
+                http::HeaderValue::from_static(CONTENT_TYPE_HTML),
             );
         } else {
             // 对于文件
@@ -230,11 +252,7 @@ impl WebDavHandler {
 
     /// GET - 下载文件
     async fn handle_get(&self, path: &str) -> SilentResult<Response> {
-        let path = urlencoding::decode(path)
-            .map_err(|e| {
-                SilentError::business_error(StatusCode::BAD_REQUEST, format!("路径解码失败: {}", e))
-            })?
-            .to_string();
+        let path = Self::decode_path(path)?;
 
         let storage_path = self.storage.get_full_path(&path);
         let metadata = fs::metadata(&storage_path)
@@ -246,7 +264,7 @@ impl WebDavHandler {
             let mut resp = Response::empty();
             resp.headers_mut().insert(
                 http::header::CONTENT_TYPE,
-                http::HeaderValue::from_static("text/html; charset=utf-8"),
+                http::HeaderValue::from_static(CONTENT_TYPE_HTML),
             );
             resp.set_body(full(
                 b"<!DOCTYPE html><html><body><h1>Directory</h1><p>Use PROPFIND to list contents.</p></body></html>".to_vec(),
@@ -300,11 +318,7 @@ impl WebDavHandler {
 
     /// PUT - 上传文件
     async fn handle_put(&self, path: &str, req: &mut Request) -> SilentResult<Response> {
-        let path = urlencoding::decode(path)
-            .map_err(|e| {
-                SilentError::business_error(StatusCode::BAD_REQUEST, format!("路径解码失败: {}", e))
-            })?
-            .to_string();
+        let path = Self::decode_path(path)?;
 
         let body = req.take_body();
         let body_data = match body {
@@ -358,11 +372,7 @@ impl WebDavHandler {
 
     /// DELETE - 删除文件或目录
     async fn handle_delete(&self, path: &str) -> SilentResult<Response> {
-        let path = urlencoding::decode(path)
-            .map_err(|e| {
-                SilentError::business_error(StatusCode::BAD_REQUEST, format!("路径解码失败: {}", e))
-            })?
-            .to_string();
+        let path = Self::decode_path(path)?;
 
         let storage_path = self.storage.get_full_path(&path);
         let metadata = fs::metadata(&storage_path)
@@ -397,11 +407,7 @@ impl WebDavHandler {
 
     /// MKCOL - 创建目录
     async fn handle_mkcol(&self, path: &str) -> SilentResult<Response> {
-        let path = urlencoding::decode(path)
-            .map_err(|e| {
-                SilentError::business_error(StatusCode::BAD_REQUEST, format!("路径解码失败: {}", e))
-            })?
-            .to_string();
+        let path = Self::decode_path(path)?;
 
         let storage_path = self.storage.get_full_path(&path);
 
@@ -424,16 +430,9 @@ impl WebDavHandler {
         Ok(resp)
     }
 
-    /// MOVE - 移动文件或目录
-    async fn handle_move(&self, src_path: &str, req: &Request) -> SilentResult<Response> {
-        let src_path = urlencoding::decode(src_path)
-            .map_err(|e| {
-                SilentError::business_error(
-                    StatusCode::BAD_REQUEST,
-                    format!("源路径解码失败: {}", e),
-                )
-            })?
-            .to_string();
+    /// MOVE - 移动/重命名文件
+    async fn handle_move(&self, path: &str, req: &Request) -> SilentResult<Response> {
+        let path = Self::decode_path(path)?;
 
         let dest = req
             .headers()
@@ -446,7 +445,7 @@ impl WebDavHandler {
         // 提取目标路径
         let dest_path = self.extract_path_from_url(dest)?;
 
-        let src_storage_path = self.storage.get_full_path(&src_path);
+        let storage_path = self.storage.get_full_path(&path);
         let dest_storage_path = self.storage.get_full_path(&dest_path);
 
         if let Some(parent) = dest_storage_path.parent() {
@@ -458,7 +457,7 @@ impl WebDavHandler {
             })?;
         }
 
-        fs::rename(&src_storage_path, &dest_storage_path)
+        fs::rename(&storage_path, &dest_storage_path)
             .await
             .map_err(|e| {
                 SilentError::business_error(
@@ -477,16 +476,9 @@ impl WebDavHandler {
         Ok(resp)
     }
 
-    /// COPY - 复制文件或目录
-    async fn handle_copy(&self, src_path: &str, req: &Request) -> SilentResult<Response> {
-        let src_path = urlencoding::decode(src_path)
-            .map_err(|e| {
-                SilentError::business_error(
-                    StatusCode::BAD_REQUEST,
-                    format!("源路径解码失败: {}", e),
-                )
-            })?
-            .to_string();
+    /// COPY - 复制文件
+    async fn handle_copy(&self, path: &str, req: &Request) -> SilentResult<Response> {
+        let path = Self::decode_path(path)?;
 
         let dest = req
             .headers()
@@ -498,7 +490,7 @@ impl WebDavHandler {
 
         let dest_path = self.extract_path_from_url(dest)?;
 
-        let src_storage_path = self.storage.get_full_path(&src_path);
+        let src_storage_path = self.storage.get_full_path(&path);
         let dest_storage_path = self.storage.get_full_path(&dest_path);
 
         let metadata = fs::metadata(&src_storage_path)
@@ -625,44 +617,30 @@ impl Handler for WebDavHandler {
     }
 }
 
+/// 为路由注册所有 WebDAV 方法
+fn register_webdav_methods(route: Route, handler: Arc<WebDavHandler>) -> Route {
+    route
+        .insert_handler(Method::HEAD, handler.clone())
+        .insert_handler(Method::GET, handler.clone())
+        .insert_handler(Method::POST, handler.clone())
+        .insert_handler(Method::PUT, handler.clone())
+        .insert_handler(Method::DELETE, handler.clone())
+        .insert_handler(Method::OPTIONS, handler.clone())
+        .insert_handler(
+            Method::from_bytes(METHOD_PROPFIND).unwrap(),
+            handler.clone(),
+        )
+        .insert_handler(Method::from_bytes(METHOD_MKCOL).unwrap(), handler.clone())
+        .insert_handler(Method::from_bytes(METHOD_MOVE).unwrap(), handler.clone())
+        .insert_handler(Method::from_bytes(METHOD_COPY).unwrap(), handler)
+}
+
 /// 创建 WebDAV 路由
 pub fn create_webdav_routes(storage: Arc<StorageManager>, notifier: Arc<EventNotifier>) -> Route {
-    let webdav_handler = Arc::new(WebDavHandler::new(storage, notifier, "/webdav".to_string()));
+    let handler = Arc::new(WebDavHandler::new(storage, notifier, "/webdav".to_string()));
 
-    Route::new("webdav")
-        .insert_handler(Method::HEAD, webdav_handler.clone())
-        .insert_handler(Method::GET, webdav_handler.clone())
-        .insert_handler(Method::POST, webdav_handler.clone())
-        .insert_handler(Method::PUT, webdav_handler.clone())
-        .insert_handler(Method::DELETE, webdav_handler.clone())
-        .insert_handler(Method::OPTIONS, webdav_handler.clone())
-        .insert_handler(
-            Method::from_bytes(b"PROPFIND").unwrap(),
-            webdav_handler.clone(),
-        )
-        .insert_handler(
-            Method::from_bytes(b"MKCOL").unwrap(),
-            webdav_handler.clone(),
-        )
-        .insert_handler(Method::from_bytes(b"MOVE").unwrap(), webdav_handler.clone())
-        .insert_handler(Method::from_bytes(b"COPY").unwrap(), webdav_handler.clone())
-        .append(
-            Route::new("<path:**>")
-                .insert_handler(Method::HEAD, webdav_handler.clone())
-                .insert_handler(Method::GET, webdav_handler.clone())
-                .insert_handler(Method::POST, webdav_handler.clone())
-                .insert_handler(Method::PUT, webdav_handler.clone())
-                .insert_handler(Method::DELETE, webdav_handler.clone())
-                .insert_handler(Method::OPTIONS, webdav_handler.clone())
-                .insert_handler(
-                    Method::from_bytes(b"PROPFIND").unwrap(),
-                    webdav_handler.clone(),
-                )
-                .insert_handler(
-                    Method::from_bytes(b"MKCOL").unwrap(),
-                    webdav_handler.clone(),
-                )
-                .insert_handler(Method::from_bytes(b"MOVE").unwrap(), webdav_handler.clone())
-                .insert_handler(Method::from_bytes(b"COPY").unwrap(), webdav_handler),
-        )
+    let root_route = register_webdav_methods(Route::new("webdav"), handler.clone());
+    let path_route = register_webdav_methods(Route::new("<path:**>"), handler);
+
+    root_route.append(path_route)
 }

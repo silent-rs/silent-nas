@@ -18,14 +18,20 @@ Silent-NAS 是 Silent Odyssey 第六阶段的实验项目，旨在构建一个�
 ### 服务端协议兼容层
 - ✅ HTTP/HTTPS 文件访问接口（REST API）
 - ✅ WebDAV 服务端实现（完整支持）
-- ✅ S3 兼容 API 实现（基本对象存储操作）
+- ✅ S3 兼容 API 实现（核心对象存储 + 高级特性）
+  - ✅ 对象CRUD操作
+  - ✅ Bucket管理
+  - ✅ Range请求（断点续传）
+  - ✅ CopyObject
+  - ✅ 用户元数据
 - ❌ NFS/SMB 协议支持（后续阶段）
 - ❌ 多协议统一访问网关（后续阶段）
 
 ### 服务端自动化与同步能力
 - ✅ 文件变更自动检测与事件推送
+- ✅ 断点续传支持（S3 Range请求）
 - 🚧 跨节点文件同步支持（规划中）
-- 🚧 断点续传与分块上传支持（规划中）
+- 🚧 分块上传支持（规划中）
 - 🚧 文件版本管理与冲突处理（规划中）
 - ❌ 元数据索引与全文检索（后续阶段）
 
@@ -57,13 +63,17 @@ docs/
 ```
 
 ### 已实现的模块
-- **storage.rs**: 文件上传/下载/删除、元数据管理、SHA-256 校验
+- **storage.rs**: 文件上传/下载/删除、元数据管理、SHA-256 校验、Bucket管理
 - **transfer.rs**: QUIC 服务端、自签名证书、双向流通信
 - **rpc.rs**: gRPC 文件服务（GetFile/ListFiles/DeleteFile）
 - **notify.rs**: NATS 事件发布（created/modified/deleted）
 - **auth.rs**: 基于角色的访问控制（Admin/User/ReadOnly）
 - **webdav.rs**: WebDAV 协议服务器（PROPFIND/GET/PUT/DELETE/MKCOL/MOVE/COPY）
-- **s3.rs**: S3兼容API服务器（PutObject/GetObject/DeleteObject/ListObjects/HeadObject）
+- **s3.rs**: S3兼容API服务器
+  - 对象操作: PutObject/GetObject/HeadObject/DeleteObject/CopyObject
+  - Bucket管理: ListBuckets/PutBucket/DeleteBucket/HeadBucket
+  - 列表操作: ListObjectsV2/ListObjects
+  - 高级特性: Range请求、用户元数据
 
 ## 快速开始
 

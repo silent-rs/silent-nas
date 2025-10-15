@@ -4,3 +4,6 @@
 [submodule "silent"]
 	path = silent
 	url = git@github.com:silent-rs/silent.git
+[submodule "silent-crdt"]
+	path = silent-crdt
+	url = git@github.com:silent-rs/silent-crdt.git

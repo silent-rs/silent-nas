@@ -20,11 +20,51 @@ impl S3Service {
 
         debug!("PutObject: bucket={}, key={}", bucket, key);
 
+        // 使用bucket/key组合作file_id
+        let file_id = format!("{}/{}", bucket, key);
+
+        // 检查条件请求头 - If-Match
+        if let Some(if_match) = req.headers().get("If-Match") {
+            if let Ok(header_value) = if_match.to_str() {
+                if let Ok(existing_meta) = self.storage.get_metadata(&file_id).await {
+                    let etag = format!("\"{}\"", existing_meta.hash);
+                    if header_value != "*" && !header_value.split(',').any(|tag| tag.trim() == etag)
+                    {
+                        return self.error_response(
+                            StatusCode::PRECONDITION_FAILED,
+                            "PreconditionFailed",
+                            "Precondition failed",
+                        );
+                    }
+                } else if header_value != "*" {
+                    return self.error_response(
+                        StatusCode::PRECONDITION_FAILED,
+                        "PreconditionFailed",
+                        "Precondition failed",
+                    );
+                }
+            }
+        }
+
+        // 检查条件请求头 - If-None-Match
+        if let Some(if_none_match) = req.headers().get("If-None-Match") {
+            if let Ok(header_value) = if_none_match.to_str() {
+                if let Ok(existing_meta) = self.storage.get_metadata(&file_id).await {
+                    let etag = format!("\"{}\"", existing_meta.hash);
+                    if header_value == "*" || header_value.split(',').any(|tag| tag.trim() == etag)
+                    {
+                        return self.error_response(
+                            StatusCode::PRECONDITION_FAILED,
+                            "PreconditionFailed",
+                            "Precondition failed",
+                        );
+                    }
+                }
+            }
+        }
+
         // 读取请求体
         let body_bytes = Self::read_body(req).await?;
-
-        // 使用bucket/key组合作为file_id
-        let file_id = format!("{}/{}", bucket, key);
 
         // 保存文件
         let metadata = self
@@ -70,15 +110,51 @@ impl S3Service {
 
         let file_id = format!("{}/{}", bucket, key);
 
+        // 先获取元数据以支持条件请求
+        let metadata = self
+            .storage
+            .get_metadata(&file_id)
+            .await
+            .map_err(|_| SilentError::business_error(StatusCode::NOT_FOUND, "NoSuchKey"))?;
+
+        // 检查If-None-Match
+        if let Some(if_none_match) = req.headers().get("If-None-Match") {
+            if let Ok(header_value) = if_none_match.to_str() {
+                let etag = format!("\"{}\"", metadata.hash);
+                if header_value == "*" || header_value.split(',').any(|tag| tag.trim() == etag) {
+                    let mut resp = Response::empty();
+                    resp.headers_mut()
+                        .insert("ETag", http::HeaderValue::from_str(&etag).unwrap());
+                    resp.set_status(StatusCode::NOT_MODIFIED);
+                    return Ok(resp);
+                }
+            }
+        }
+
+        // 检查If-Modified-Since
+        if let Some(if_modified_since) = req.headers().get("If-Modified-Since") {
+            if let Ok(header_value) = if_modified_since.to_str() {
+                if let Ok(since_time) = chrono::DateTime::parse_from_rfc2822(header_value) {
+                    let file_modified = metadata.modified_at.and_utc();
+                    if file_modified <= since_time {
+                        let mut resp = Response::empty();
+                        resp.headers_mut().insert(
+                            "Last-Modified",
+                            http::HeaderValue::from_str(&file_modified.to_rfc2822()).unwrap(),
+                        );
+                        resp.set_status(StatusCode::NOT_MODIFIED);
+                        return Ok(resp);
+                    }
+                }
+            }
+        }
+
         // 读取完整文件
         let data = self
             .storage
             .read_file(&file_id)
             .await
             .map_err(|_| SilentError::business_error(StatusCode::NOT_FOUND, "NoSuchKey"))?;
-
-        // 获取元数据以获取ETag
-        let metadata = self.storage.get_metadata(&file_id).await.ok();
         let file_size = data.len() as u64;
 
         // 检查Range请求
@@ -90,16 +166,15 @@ impl S3Service {
             http::HeaderValue::from_static("binary/octet-stream"),
         );
 
-        if let Some(meta) = &metadata {
-            resp.headers_mut().insert(
-                "ETag",
-                http::HeaderValue::from_str(&format!("\"{}\"", meta.hash)).unwrap(),
-            );
-            resp.headers_mut().insert(
-                "Last-Modified",
-                http::HeaderValue::from_str(&meta.modified_at.and_utc().to_rfc2822()).unwrap(),
-            );
-        }
+        // 添加ETag和Last-Modified
+        resp.headers_mut().insert(
+            "ETag",
+            http::HeaderValue::from_str(&format!("\"{}\"", metadata.hash)).unwrap(),
+        );
+        resp.headers_mut().insert(
+            "Last-Modified",
+            http::HeaderValue::from_str(&metadata.modified_at.and_utc().to_rfc2822()).unwrap(),
+        );
 
         resp.headers_mut().insert(
             "x-amz-request-id",
@@ -932,11 +1007,18 @@ pub fn create_s3_routes(
         async move { service.delete_bucket(req).await }
     };
 
-    // 对象操作 - PUT需要区分PutObject和CopyObject
+    // 对象操作 - PUT需要区分PutObject、CopyObject和UploadPart
     let service_put = service.clone();
     let put_object = move |req: Request| {
         let service = service_put.clone();
         async move {
+            let query = req.uri().query().unwrap_or("");
+
+            // 检查是否是UploadPart请求
+            if query.contains("partNumber") && query.contains("uploadId") {
+                return service.upload_part(req).await;
+            }
+
             // 检查是否是CopyObject请求（有x-amz-copy-source头）
             if req.headers().contains_key("x-amz-copy-source") {
                 service.copy_object(req).await
@@ -1003,7 +1085,16 @@ pub fn create_s3_routes(
     let service_delete = service.clone();
     let delete_object = move |req: Request| {
         let service = service_delete.clone();
-        async move { service.delete_object(req).await }
+        async move {
+            let query = req.uri().query().unwrap_or("");
+
+            // 检查是否是AbortMultipartUpload
+            if query.contains("uploadId") {
+                service.abort_multipart_upload(req).await
+            } else {
+                service.delete_object(req).await
+            }
+        }
     };
 
     // 根路径处理ListBuckets
@@ -1027,12 +1118,13 @@ pub fn create_s3_routes(
     let post_handler = move |req: Request| {
         let service = service_post.clone();
         async move {
+            let query = req.uri().query().unwrap_or("");
+
             // 检查key是否为空
             let key_result: silent::Result<String> = req.get_path_params("key");
             if let Ok(key) = &key_result {
                 if key.is_empty() {
                     // Bucket级别POST - DeleteObjects
-                    let query = req.uri().query().unwrap_or("");
                     if query.contains("delete") {
                         service.delete_objects(req).await
                     } else {
@@ -1043,12 +1135,20 @@ pub fn create_s3_routes(
                         )
                     }
                 } else {
-                    // 对象级别POST（目前不支持）
-                    service.error_response(
-                        StatusCode::METHOD_NOT_ALLOWED,
-                        "MethodNotAllowed",
-                        "POST not allowed on objects",
-                    )
+                    // 对象级别POST
+                    if query.contains("uploads") {
+                        // InitiateMultipartUpload
+                        service.initiate_multipart_upload(req).await
+                    } else if query.contains("uploadId") {
+                        // CompleteMultipartUpload
+                        service.complete_multipart_upload(req).await
+                    } else {
+                        service.error_response(
+                            StatusCode::METHOD_NOT_ALLOWED,
+                            "MethodNotAllowed",
+                            "Invalid POST request",
+                        )
+                    }
                 }
             } else {
                 service.error_response(

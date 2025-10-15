@@ -24,14 +24,21 @@ Silent-NAS 是 Silent Odyssey 第六阶段的实验项目，旨在构建一个�
   - ✅ Range请求（断点续传）
   - ✅ CopyObject
   - ✅ 用户元数据
+  - ✅ HTTP条件请求（If-None-Match、If-Modified-Since、If-Match）
+  - ✅ 批量删除（DeleteObjects）
+  - ✅ Bucket查询（Location、Versioning）
+  - ✅ Multipart Upload（分片上传，支持大文件）
 - ❌ NFS/SMB 协议支持（后续阶段）
 - ❌ 多协议统一访问网关（后续阶段）
 
 ### 服务端自动化与同步能力
 - ✅ 文件变更自动检测与事件推送
 - ✅ 断点续传支持（S3 Range请求）
+- ✅ HTTP条件请求支持（ETag、Last-Modified）
+- ✅ 缓存优化（304 Not Modified）
+- ✅ 并发更新保护（412 Precondition Failed）
+- ✅ 分片上传支持（Multipart Upload，大文件>5GB）
 - 🚧 跨节点文件同步支持（规划中）
-- 🚧 分块上传支持（规划中）
 - 🚧 文件版本管理与冲突处理（规划中）
 - ❌ 元数据索引与全文检索（后续阶段）
 
@@ -359,7 +366,7 @@ Silent-NAS 服务端通过实现标准协议（如 WebDAV / S3），直接兼容
 - **元数据管理**：记录文件修改时间、版本号和哈希值。
 - **上传事件通知**：通过 NATS 推送文件变更事件。
 - **CRDT 合并策略**：在多客户端写入冲突时自动合并元数据和内容。
-- **HTTP 条件请求支持**：支持 `If-None-Match`、`ETag`、`If-Modified-Since` 等标准头实现版本控制。
+- ✅ **HTTP 条件请求支持**：支持 `If-None-Match`、`ETag`、`If-Modified-Since`、`If-Match` 等标准头实现版本控制和缓存优化。
 
 ### 验证场景与测试建议
 

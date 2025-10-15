@@ -1,15 +1,17 @@
 use crate::notify::EventNotifier;
 use crate::s3::auth::S3Auth;
+use crate::s3::models::MultipartUpload;
 use crate::storage::StorageManager;
 use silent::prelude::*;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 /// S3服务
 pub struct S3Service {
     pub(crate) storage: Arc<StorageManager>,
     pub(crate) notifier: Arc<EventNotifier>,
     pub(crate) auth: Option<S3Auth>,
+    pub(crate) multipart_uploads: Arc<RwLock<HashMap<String, MultipartUpload>>>,
 }
 
 impl S3Service {
@@ -22,6 +24,7 @@ impl S3Service {
             storage,
             notifier,
             auth,
+            multipart_uploads: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 

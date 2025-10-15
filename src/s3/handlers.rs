@@ -947,17 +947,55 @@ pub fn create_s3_routes(
     };
 
     let service_get_head = service.clone();
+    let service_bucket_get = service.clone();
     let get_or_head_object = move |req: Request| {
         let service = service_get_head.clone();
+        let service_bucket = service_bucket_get.clone();
         async move {
-            match *req.method() {
-                Method::GET => service.get_object(req).await,
-                Method::HEAD => service.head_object(req).await,
-                _ => service.error_response(
-                    StatusCode::METHOD_NOT_ALLOWED,
-                    "MethodNotAllowed",
-                    "Method not allowed",
-                ),
+            // 检查key是否为空，如果为空说明是bucket级别请求
+            let key_result: silent::Result<String> = req.get_path_params("key");
+            if let Ok(key) = &key_result {
+                if key.is_empty() {
+                    // 空key，这是bucket级别请求，转发到bucket_handler逻辑
+                    debug!("Empty key detected, routing to bucket handler");
+                    match *req.method() {
+                        Method::GET => {
+                            let query = req.uri().query().unwrap_or("");
+                            if query.contains("list-type=2") {
+                                service_bucket.list_objects_v2(req).await
+                            } else if query.contains("location") {
+                                service_bucket.get_bucket_location(req).await
+                            } else if query.contains("versioning") {
+                                service_bucket.get_bucket_versioning(req).await
+                            } else {
+                                service_bucket.list_objects(req).await
+                            }
+                        }
+                        Method::HEAD => service_bucket.head_bucket(req).await,
+                        _ => service.error_response(
+                            StatusCode::METHOD_NOT_ALLOWED,
+                            "MethodNotAllowed",
+                            "Method not allowed",
+                        ),
+                    }
+                } else {
+                    // 正常的对象请求
+                    match *req.method() {
+                        Method::GET => service.get_object(req).await,
+                        Method::HEAD => service.head_object(req).await,
+                        _ => service.error_response(
+                            StatusCode::METHOD_NOT_ALLOWED,
+                            "MethodNotAllowed",
+                            "Method not allowed",
+                        ),
+                    }
+                }
+            } else {
+                service.error_response(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidRequest",
+                    "Missing parameters",
+                )
             }
         }
     };
@@ -984,18 +1022,39 @@ pub fn create_s3_routes(
         }
     };
 
-    let service_bucket_post = service.clone();
-    let bucket_handler_post = move |req: Request| {
-        let service = service_bucket_post.clone();
+    // POST处理（包括bucket和对象级别）
+    let service_post = service.clone();
+    let post_handler = move |req: Request| {
+        let service = service_post.clone();
         async move {
-            let query = req.uri().query().unwrap_or("");
-            if query.contains("delete") {
-                service.delete_objects(req).await
+            // 检查key是否为空
+            let key_result: silent::Result<String> = req.get_path_params("key");
+            if let Ok(key) = &key_result {
+                if key.is_empty() {
+                    // Bucket级别POST - DeleteObjects
+                    let query = req.uri().query().unwrap_or("");
+                    if query.contains("delete") {
+                        service.delete_objects(req).await
+                    } else {
+                        service.error_response(
+                            StatusCode::BAD_REQUEST,
+                            "InvalidRequest",
+                            "Invalid POST request",
+                        )
+                    }
+                } else {
+                    // 对象级别POST（目前不支持）
+                    service.error_response(
+                        StatusCode::METHOD_NOT_ALLOWED,
+                        "MethodNotAllowed",
+                        "POST not allowed on objects",
+                    )
+                }
             } else {
                 service.error_response(
                     StatusCode::BAD_REQUEST,
                     "InvalidRequest",
-                    "Invalid POST request",
+                    "Missing parameters",
                 )
             }
         }
@@ -1003,17 +1062,17 @@ pub fn create_s3_routes(
 
     Route::new_root().get(root_handler).append(
         Route::new("<bucket>")
-            // Bucket级别操作 - GET、HEAD、PUT、DELETE、POST
+            // Bucket级别操作 - GET、HEAD、PUT、DELETE
             .get(bucket_handler)
             .put(put_bucket)
             .delete(delete_bucket)
-            .post(bucket_handler_post)
-            // 对象级别操作
+            // 对象级别操作（也处理空key的bucket请求）
             .append(
                 Route::new("<key:**>")
                     .put(put_object)
                     .get(get_or_head_object)
-                    .delete(delete_object),
+                    .delete(delete_object)
+                    .post(post_handler),
             ),
     )
 }

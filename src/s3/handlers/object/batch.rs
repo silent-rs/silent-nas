@@ -31,7 +31,8 @@ impl S3Service {
             match self.storage.delete_file(&file_id).await {
                 Ok(_) => {
                     // 发送删除事件
-                    let event = FileEvent::new(EventType::Deleted, file_id.clone(), None);
+                    let mut event = FileEvent::new(EventType::Deleted, file_id.clone(), None);
+                    event.source_http_addr = Some(self.source_http_addr.clone());
                     let _ = self.notifier.notify_deleted(event).await;
                     deleted.push(key);
                 }

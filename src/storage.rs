@@ -22,6 +22,12 @@ impl StorageManager {
         }
     }
 
+    /// 获取根目录路径
+    #[allow(dead_code)]
+    pub fn root_dir(&self) -> &Path {
+        &self.root_path
+    }
+
     /// 初始化存储目录
     pub async fn init(&self) -> Result<()> {
         fs::create_dir_all(&self.root_path).await?;

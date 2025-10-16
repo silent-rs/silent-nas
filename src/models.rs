@@ -42,6 +42,10 @@ pub struct FileEvent {
     pub timestamp: NaiveDateTime,
     /// 文件元数据
     pub metadata: Option<FileMetadata>,
+    /// 源节点ID（可选，用于内容拉取与溯源）
+    pub source_node_id: Option<String>,
+    /// 源HTTP基址（可选，如 http://node1:8080，用于内容拉取）
+    pub source_http_addr: Option<String>,
 }
 
 impl FileEvent {
@@ -52,6 +56,8 @@ impl FileEvent {
             file_id,
             timestamp: chrono::Local::now().naive_local(),
             metadata,
+            source_node_id: None,
+            source_http_addr: None,
         }
     }
 }

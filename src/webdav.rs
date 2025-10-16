@@ -1,15 +1,14 @@
-use crate::models::{EventType, FileEvent};
+use crate::models::{EventType, FileEvent, FileMetadata};
 use crate::notify::EventNotifier;
 use crate::storage::StorageManager;
+use crate::sync::SyncManager;
 use async_trait::async_trait;
-use http::{Method, StatusCode};
 use http_body_util::BodyExt;
-use silent::Result as SilentResult;
 use silent::prelude::*;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::fs;
-use tracing::debug;
+use tracing::{debug, info};
 
 // WebDAV 方法常量
 const METHOD_PROPFIND: &[u8] = b"PROPFIND";
@@ -34,24 +33,30 @@ const CONTENT_TYPE_HTML: &str = "text/html; charset=utf-8";
 pub struct WebDavHandler {
     pub storage: Arc<StorageManager>,
     pub notifier: Arc<EventNotifier>,
+    pub sync_manager: Arc<SyncManager>,
     pub base_path: String,
+    pub source_http_addr: String,
 }
 
 impl WebDavHandler {
     pub fn new(
         storage: Arc<StorageManager>,
         notifier: Arc<EventNotifier>,
+        sync_manager: Arc<SyncManager>,
         base_path: String,
+        source_http_addr: String,
     ) -> Self {
         Self {
             storage,
             notifier,
+            sync_manager,
             base_path,
+            source_http_addr,
         }
     }
 
     /// 解码 URL 路径
-    fn decode_path(path: &str) -> SilentResult<String> {
+    fn decode_path(path: &str) -> silent::Result<String> {
         urlencoding::decode(path)
             .map(|s| s.to_string())
             .map_err(|e| {
@@ -65,7 +70,7 @@ impl WebDavHandler {
     }
 
     /// OPTIONS - 返回支持的方法
-    async fn handle_options(&self) -> SilentResult<Response> {
+    async fn handle_options(&self) -> silent::Result<Response> {
         let mut resp = Response::empty();
         resp.headers_mut().insert(
             http::header::HeaderName::from_static(HEADER_DAV),
@@ -79,7 +84,7 @@ impl WebDavHandler {
     }
 
     /// PROPFIND - 列出文件和目录
-    async fn handle_propfind(&self, path: &str, req: &Request) -> SilentResult<Response> {
+    async fn handle_propfind(&self, path: &str, req: &Request) -> silent::Result<Response> {
         let path = Self::decode_path(path)?;
 
         let depth = req
@@ -197,7 +202,7 @@ impl WebDavHandler {
     }
 
     /// HEAD - 获取文件元数据（不返回文件内容）
-    async fn handle_head(&self, path: &str) -> SilentResult<Response> {
+    async fn handle_head(&self, path: &str) -> silent::Result<Response> {
         let path = Self::decode_path(path)?;
 
         let storage_path = self.storage.get_full_path(&path);
@@ -251,7 +256,7 @@ impl WebDavHandler {
     }
 
     /// GET - 下载文件
-    async fn handle_get(&self, path: &str) -> SilentResult<Response> {
+    async fn handle_get(&self, path: &str) -> silent::Result<Response> {
         let path = Self::decode_path(path)?;
 
         let storage_path = self.storage.get_full_path(&path);
@@ -317,7 +322,7 @@ impl WebDavHandler {
     }
 
     /// PUT - 上传文件
-    async fn handle_put(&self, path: &str, req: &mut Request) -> SilentResult<Response> {
+    async fn handle_put(&self, path: &str, req: &mut Request) -> silent::Result<Response> {
         let path = Self::decode_path(path)?;
 
         let body = req.take_body();
@@ -360,9 +365,46 @@ impl WebDavHandler {
             )
         })?;
 
-        // 发布事件
+        // 生成文件 ID 并写入基于ID的存储（用于跨节点按ID拉取）
         let file_id = scru128::new_string();
-        let event = FileEvent::new(EventType::Created, file_id, None);
+        let id_metadata = self
+            .storage
+            .save_file(&file_id, &body_data)
+            .await
+            .map_err(|e| {
+                SilentError::business_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("保存ID文件失败: {}", e),
+                )
+            })?;
+
+        // 用于事件的元数据，保留原始WebDAV路径，便于对端按路径回退拉取
+        let metadata = FileMetadata {
+            id: id_metadata.id.clone(),
+            name: storage_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("unknown")
+                .to_string(),
+            path: path.clone(),
+            size: id_metadata.size,
+            hash: id_metadata.hash.clone(),
+            created_at: id_metadata.created_at,
+            modified_at: id_metadata.modified_at,
+        };
+
+        // 通知 SyncManager 处理本地变更
+        if let Err(e) = self
+            .sync_manager
+            .handle_local_change(EventType::Created, file_id.clone(), Some(metadata.clone()))
+            .await
+        {
+            info!("同步管理器处理失败: {}", e);
+        }
+
+        // 发布事件到 NATS（用于跨节点通知）
+        let mut event = FileEvent::new(EventType::Created, file_id, Some(metadata));
+        event.source_http_addr = Some(self.source_http_addr.clone());
         let _ = self.notifier.notify_created(event).await;
 
         let mut resp = Response::empty();
@@ -371,7 +413,7 @@ impl WebDavHandler {
     }
 
     /// DELETE - 删除文件或目录
-    async fn handle_delete(&self, path: &str) -> SilentResult<Response> {
+    async fn handle_delete(&self, path: &str) -> silent::Result<Response> {
         let path = Self::decode_path(path)?;
 
         let storage_path = self.storage.get_full_path(&path);
@@ -397,7 +439,17 @@ impl WebDavHandler {
 
         // 发布事件
         let file_id = scru128::new_string();
-        let event = FileEvent::new(EventType::Deleted, file_id, None);
+        let mut event = FileEvent::new(EventType::Deleted, file_id, None);
+        if let Ok(host) = std::env::var("ADVERTISE_HOST").or_else(|_| std::env::var("HOSTNAME")) {
+            event.source_http_addr = Some(format!(
+                "http://{}:{}",
+                host,
+                std::env::var("HTTP_PORT")
+                    .ok()
+                    .and_then(|p| p.parse().ok())
+                    .unwrap_or(8081 - 1)
+            ));
+        }
         let _ = self.notifier.notify_deleted(event).await;
 
         let mut resp = Response::empty();
@@ -406,7 +458,7 @@ impl WebDavHandler {
     }
 
     /// MKCOL - 创建目录
-    async fn handle_mkcol(&self, path: &str) -> SilentResult<Response> {
+    async fn handle_mkcol(&self, path: &str) -> silent::Result<Response> {
         let path = Self::decode_path(path)?;
 
         let storage_path = self.storage.get_full_path(&path);
@@ -431,7 +483,7 @@ impl WebDavHandler {
     }
 
     /// MOVE - 移动/重命名文件
-    async fn handle_move(&self, path: &str, req: &Request) -> SilentResult<Response> {
+    async fn handle_move(&self, path: &str, req: &Request) -> silent::Result<Response> {
         let path = Self::decode_path(path)?;
 
         let dest = req
@@ -468,7 +520,17 @@ impl WebDavHandler {
 
         // 发布事件
         let file_id = scru128::new_string();
-        let event = FileEvent::new(EventType::Modified, file_id, None);
+        let mut event = FileEvent::new(EventType::Modified, file_id, None);
+        if let Ok(host) = std::env::var("ADVERTISE_HOST").or_else(|_| std::env::var("HOSTNAME")) {
+            event.source_http_addr = Some(format!(
+                "http://{}:{}",
+                host,
+                std::env::var("HTTP_PORT")
+                    .ok()
+                    .and_then(|p| p.parse().ok())
+                    .unwrap_or(8081 - 1)
+            ));
+        }
         let _ = self.notifier.notify_created(event).await;
 
         let mut resp = Response::empty();
@@ -477,7 +539,7 @@ impl WebDavHandler {
     }
 
     /// COPY - 复制文件
-    async fn handle_copy(&self, path: &str, req: &Request) -> SilentResult<Response> {
+    async fn handle_copy(&self, path: &str, req: &Request) -> silent::Result<Response> {
         let path = Self::decode_path(path)?;
 
         let dest = req
@@ -532,7 +594,7 @@ impl WebDavHandler {
     }
 
     /// 从完整 URL 中提取路径
-    fn extract_path_from_url(&self, url: &str) -> SilentResult<String> {
+    fn extract_path_from_url(&self, url: &str) -> silent::Result<String> {
         // 提取路径部分（去除协议和域名）
         let path = if let Some(idx) = url.find("://") {
             // 找到协议后的第一个 /
@@ -587,7 +649,7 @@ impl WebDavHandler {
 #[async_trait]
 impl Handler for WebDavHandler {
     /// 处理 WebDAV 请求
-    async fn call(&self, mut req: Request) -> SilentResult<Response> {
+    async fn call(&self, mut req: Request) -> silent::Result<Response> {
         let method = req.method().clone();
         let uri_path = req.uri().path().to_string();
 
@@ -636,8 +698,19 @@ fn register_webdav_methods(route: Route, handler: Arc<WebDavHandler>) -> Route {
 }
 
 /// 创建 WebDAV 路由
-pub fn create_webdav_routes(storage: Arc<StorageManager>, notifier: Arc<EventNotifier>) -> Route {
-    let handler = Arc::new(WebDavHandler::new(storage, notifier, "/webdav".to_string()));
+pub fn create_webdav_routes(
+    storage: Arc<StorageManager>,
+    notifier: Arc<EventNotifier>,
+    sync_manager: Arc<SyncManager>,
+    source_http_addr: String,
+) -> Route {
+    let handler = Arc::new(WebDavHandler::new(
+        storage,
+        notifier,
+        sync_manager,
+        "/webdav".to_string(),
+        source_http_addr,
+    ));
 
     let root_route = register_webdav_methods(Route::new(""), handler.clone());
     let path_route = register_webdav_methods(Route::new("<path:**>"), handler);

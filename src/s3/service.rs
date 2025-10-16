@@ -12,6 +12,7 @@ pub struct S3Service {
     pub(crate) notifier: Arc<EventNotifier>,
     pub(crate) auth: Option<S3Auth>,
     pub(crate) multipart_uploads: Arc<RwLock<HashMap<String, MultipartUpload>>>,
+    pub(crate) source_http_addr: String,
 }
 
 impl S3Service {
@@ -19,12 +20,14 @@ impl S3Service {
         storage: Arc<StorageManager>,
         notifier: Arc<EventNotifier>,
         auth: Option<S3Auth>,
+        source_http_addr: String,
     ) -> Self {
         Self {
             storage,
             notifier,
             auth,
             multipart_uploads: Arc::new(RwLock::new(HashMap::new())),
+            source_http_addr,
         }
     }
 

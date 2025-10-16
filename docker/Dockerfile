@@ -15,25 +15,25 @@ RUN apt-get update && apt-get install -y \
 # 设置工作目录
 WORKDIR /build
 
-# 复制依赖文件（利用 Docker 层缓存）
+# 先仅复制清单文件与工作区依赖以利用缓存
 COPY Cargo.toml Cargo.lock ./
-COPY proto/ ./proto/
 COPY build.rs ./
+COPY proto/ ./proto/
 COPY silent/ ./silent/
 COPY silent-crdt/ ./silent-crdt/
 COPY odyssey/ ./odyssey/
 
-# 创建虚拟 src 目录以预编译依赖
-RUN mkdir src && \
-    echo "fn main() {}" > src/main.rs && \
-    cargo build --release && \
-    rm -rf src
+# 预热依赖缓存（使用临时 main）
+RUN mkdir -p src && echo "fn main() {}" > src/main.rs \
+    && cargo build --release \
+    && rm -rf src
 
-# 复制实际源代码
+# 复制实际源码
 COPY src/ ./src/
 
-# 重新构建应用（此时依赖已缓存）
-RUN cargo build --release
+# 为确保主二进制使用真实源码，清理该包缓存后再构建
+RUN cargo clean \
+    && cargo build --release
 
 # ==================== 运行阶段 ====================
 FROM debian:bookworm-slim

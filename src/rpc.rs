@@ -14,11 +14,21 @@ use file_service::*;
 pub struct FileServiceImpl {
     storage: StorageManager,
     notifier: EventNotifier,
+    /// 对外可访问的 HTTP 基址（用于事件中携带源地址，便于其他节点拉取）
+    source_http_addr: Option<String>,
 }
 
 impl FileServiceImpl {
-    pub fn new(storage: StorageManager, notifier: EventNotifier) -> Self {
-        Self { storage, notifier }
+    pub fn new(
+        storage: StorageManager,
+        notifier: EventNotifier,
+        source_http_addr: Option<String>,
+    ) -> Self {
+        Self {
+            storage,
+            notifier,
+            source_http_addr,
+        }
     }
 
     pub fn into_server(self) -> FileServiceServer<Self> {
@@ -45,11 +55,14 @@ impl FileService for FileServiceImpl {
             .map_err(|e| Status::internal(format!("保存文件失败: {}", e)))?;
 
         // 发布文件创建事件
-        let event = FileEvent::new(
+        let mut event = FileEvent::new(
             EventType::Created,
             req.file_id.clone(),
             Some(metadata.clone()),
         );
+        if let Some(addr) = &self.source_http_addr {
+            event.source_http_addr = Some(addr.clone());
+        }
         let _ = self.notifier.notify_created(event).await;
 
         Ok(Response::new(UploadFileResponse {
@@ -93,7 +106,10 @@ impl FileService for FileServiceImpl {
             .map_err(|e| Status::internal(format!("删除文件失败: {}", e)))?;
 
         // 发布文件删除事件
-        let event = FileEvent::new(EventType::Deleted, req.file_id.clone(), None);
+        let mut event = FileEvent::new(EventType::Deleted, req.file_id.clone(), None);
+        if let Some(addr) = &self.source_http_addr {
+            event.source_http_addr = Some(addr.clone());
+        }
         let _ = self.notifier.notify_deleted(event).await;
 
         Ok(Response::new(DeleteFileResponse { success: true }))

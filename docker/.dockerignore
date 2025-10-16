@@ -1,0 +1,41 @@
+# Git
+.git
+.gitignore
+# .gitmodules 需要保留 submodule 信息
+
+# Docker
+docker/
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# Rust
+target/
+**/*.rs.bk
+*.pdb
+
+# 文档
+docs/
+*.md
+LICENSE
+
+# 测试数据
+test_*/
+storage/
+data/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# 临时文件
+*.log
+*.tmp
+.DS_Store
+
+# 配置
+config.toml
+*.toml.local

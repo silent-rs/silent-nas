@@ -1,0 +1,241 @@
+# Silent-NAS Docker Compose 配置
+# 3 节点分布式集群 + NATS 消息总线
+
+services:
+  # ==================== NATS 消息总线 ====================
+  nats:
+    image: nats:2.10-alpine
+    container_name: silent-nas-nats
+    hostname: nats
+    ports:
+      - "4222:4222"  # 客户端连接
+      - "8222:8222"  # HTTP 监控
+    command:
+      - "--http_port"
+      - "8222"
+      - "-m"
+      - "8222"
+    networks:
+      - nas-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8222/healthz", "-O", "-"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+  # ==================== 节点 1 (种子节点) ====================
+  node1:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: silent-nas:latest
+    container_name: silent-nas-node1
+    hostname: node1
+    environment:
+      # 节点配置
+      NODE_ID: node-1
+      LISTEN_ADDR: 0.0.0.0:9000
+      SEED_NODES: ""  # 种子节点不需要配置
+
+      # 发现配置
+      HEARTBEAT_INTERVAL: 10
+      NODE_TIMEOUT: 30
+
+      # 同步配置
+      AUTO_SYNC: "true"
+      SYNC_INTERVAL: 60
+      MAX_FILES_PER_SYNC: 100
+
+      # 存储配置
+      STORAGE_PATH: /data
+      CHUNK_SIZE: 10485760
+
+      # HTTP 配置
+      HTTP_HOST: 0.0.0.0
+      HTTP_PORT: 8080
+
+      # WebDAV 配置
+      WEBDAV_ENABLED: "true"
+      WEBDAV_PORT: 8081
+
+      # S3 配置
+      S3_ENABLED: "true"
+      S3_PORT: 9001
+      S3_ACCESS_KEY: admin
+      S3_SECRET_KEY: password123
+
+      # NATS 配置
+      NATS_URL: nats://nats:4222
+      NATS_TOPIC_PREFIX: nas
+
+      # 版本控制
+      VERSION_ENABLED: "true"
+      MAX_VERSIONS: 10
+      RETENTION_DAYS: 30
+
+      # Rust 日志
+      RUST_LOG: info
+      RUST_BACKTRACE: 1
+    ports:
+      - "9000:9000"  # gRPC 同步
+      - "8080:8080"  # HTTP API
+      - "8081:8081"  # WebDAV
+      - "9001:9001"  # S3 API
+    volumes:
+      - node1-data:/data
+      - node1-config:/app/config
+    networks:
+      - nas-network
+    depends_on:
+      - nats
+    restart: unless-stopped
+    user: "0:0"
+    # healthcheck:
+    #   test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+    #   interval: 30s
+    #   timeout: 10s
+    #   retries: 3
+    #   start_period: 10s
+
+  # ==================== 节点 2 ====================
+  node2:
+    image: silent-nas:latest
+    container_name: silent-nas-node2
+    hostname: node2
+    environment:
+      NODE_ID: node-2
+      LISTEN_ADDR: 0.0.0.0:9000
+      SEED_NODES: node1:9000
+      HEARTBEAT_INTERVAL: 10
+      NODE_TIMEOUT: 30
+      AUTO_SYNC: "true"
+      SYNC_INTERVAL: 60
+      MAX_FILES_PER_SYNC: 100
+      STORAGE_PATH: /data
+      CHUNK_SIZE: 10485760
+      HTTP_HOST: 0.0.0.0
+      HTTP_PORT: 8080
+      WEBDAV_ENABLED: "true"
+      WEBDAV_PORT: 8081
+      S3_ENABLED: "true"
+      S3_PORT: 9001
+      S3_ACCESS_KEY: admin
+      S3_SECRET_KEY: password123
+      NATS_URL: nats://nats:4222
+      NATS_TOPIC_PREFIX: nas
+      VERSION_ENABLED: "true"
+      MAX_VERSIONS: 10
+      RETENTION_DAYS: 30
+      RUST_LOG: info
+      RUST_BACKTRACE: 1
+    ports:
+      - "9010:9000"
+      - "8090:8080"
+      - "8091:8081"
+      - "9011:9001"
+    volumes:
+      - node2-data:/data
+      - node2-config:/app/config
+    networks:
+      - nas-network
+    depends_on:
+      - nats
+      - node1
+    restart: unless-stopped
+    user: "0:0"
+    # healthcheck:
+    #   test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+    #   interval: 30s
+    #   timeout: 10s
+    #   retries: 3
+    #   start_period: 10s
+
+  # ==================== 节点 3 ====================
+  node3:
+    image: silent-nas:latest
+    container_name: silent-nas-node3
+    hostname: node3
+    environment:
+      NODE_ID: node-3
+      LISTEN_ADDR: 0.0.0.0:9000
+      SEED_NODES: node1:9000
+      HEARTBEAT_INTERVAL: 10
+      NODE_TIMEOUT: 30
+      AUTO_SYNC: "true"
+      SYNC_INTERVAL: 60
+      MAX_FILES_PER_SYNC: 100
+      STORAGE_PATH: /data
+      CHUNK_SIZE: 10485760
+      HTTP_HOST: 0.0.0.0
+      HTTP_PORT: 8080
+      WEBDAV_ENABLED: "true"
+      WEBDAV_PORT: 8081
+      S3_ENABLED: "true"
+      S3_PORT: 9001
+      S3_ACCESS_KEY: admin
+      S3_SECRET_KEY: password123
+      NATS_URL: nats://nats:4222
+      NATS_TOPIC_PREFIX: nas
+      VERSION_ENABLED: "true"
+      MAX_VERSIONS: 10
+      RETENTION_DAYS: 30
+      RUST_LOG: info
+      RUST_BACKTRACE: 1
+    ports:
+      - "9020:9000"
+      - "8100:8080"
+      - "8101:8081"
+      - "9021:9001"
+    volumes:
+      - node3-data:/data
+      - node3-config:/app/config
+    networks:
+      - nas-network
+    depends_on:
+      - nats
+      - node1
+    restart: unless-stopped
+    user: "0:0"
+    # healthcheck:
+    #   test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+    #   interval: 30s
+    #   timeout: 10s
+    #   retries: 3
+    #   start_period: 10s
+
+# ==================== 数据卷 ====================
+volumes:
+  node1-data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ./data/node1
+  node1-config:
+    driver: local
+  node2-data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ./data/node2
+  node2-config:
+    driver: local
+  node3-data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ./data/node3
+  node3-config:
+    driver: local
+
+# ==================== 网络 ====================
+networks:
+  nas-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16

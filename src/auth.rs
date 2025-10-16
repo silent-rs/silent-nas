@@ -12,11 +12,11 @@ pub struct User {
 }
 
 /// 用户角色
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 pub enum UserRole {
-    Admin,
-    User,
-    ReadOnly,
+    ReadOnly = 0,
+    User = 1,
+    Admin = 2,
 }
 
 /// 认证管理器
@@ -175,5 +175,158 @@ mod tests {
             auth.check_permission("readonly", UserRole::ReadOnly)
                 .unwrap()
         );
+    }
+
+    #[test]
+    fn test_user_role_ordering() {
+        assert!(UserRole::Admin > UserRole::User);
+        assert!(UserRole::User > UserRole::ReadOnly);
+        assert!(UserRole::Admin > UserRole::ReadOnly);
+    }
+
+    #[test]
+    fn test_user_role_equality() {
+        assert_eq!(UserRole::Admin, UserRole::Admin);
+        assert_eq!(UserRole::User, UserRole::User);
+        assert_eq!(UserRole::ReadOnly, UserRole::ReadOnly);
+        assert_ne!(UserRole::Admin, UserRole::User);
+    }
+
+    #[test]
+    fn test_add_duplicate_user() {
+        let auth = AuthManager::new();
+        auth.add_user("test".to_string(), "password".to_string(), UserRole::User)
+            .unwrap();
+
+        // 尝试添加同名用户应该失败
+        let result = auth.add_user("test".to_string(), "password2".to_string(), UserRole::Admin);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_verify_with_wrong_password() {
+        let auth = AuthManager::new();
+        auth.add_user("test".to_string(), "correct".to_string(), UserRole::User)
+            .unwrap();
+
+        let result = auth.verify_user("test", "wrong");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_verify_nonexistent_user() {
+        let auth = AuthManager::new();
+        let result = auth.verify_user("nobody", "password");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_check_permission_nonexistent_user() {
+        let auth = AuthManager::new();
+        let result = auth.check_permission("nobody", UserRole::User);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_password_hashing() {
+        let auth = AuthManager::new();
+        auth.add_user(
+            "test".to_string(),
+            "password123".to_string(),
+            UserRole::User,
+        )
+        .unwrap();
+
+        // 密码应该被哈希存储，而不是明文
+        let users = auth.users.read().unwrap();
+        let user = users.get("test").unwrap();
+        assert_ne!(user.password_hash, "password123");
+        assert_eq!(user.password_hash.len(), 64); // SHA-256 = 64 hex chars
+    }
+
+    #[test]
+    fn test_user_clone() {
+        let user = User {
+            username: "test".to_string(),
+            password_hash: "hash123".to_string(),
+            role: UserRole::User,
+        };
+
+        let cloned = user.clone();
+        assert_eq!(user.username, cloned.username);
+        assert_eq!(user.password_hash, cloned.password_hash);
+        assert_eq!(user.role, cloned.role);
+    }
+
+    #[test]
+    fn test_auth_manager_default() {
+        let auth1 = AuthManager::new();
+        let auth2 = AuthManager::default();
+
+        // 两个实例都应该是空的
+        assert_eq!(
+            auth1.users.read().unwrap().len(),
+            auth2.users.read().unwrap().len()
+        );
+    }
+
+    #[test]
+    fn test_init_default_admin() {
+        let auth = AuthManager::new();
+        auth.init_default_admin().unwrap();
+
+        // 验证默认管理员
+        let admin = auth.verify_user("admin", "admin123").unwrap();
+        assert_eq!(admin.username, "admin");
+        assert_eq!(admin.role, UserRole::Admin);
+    }
+
+    #[test]
+    fn test_multiple_users() {
+        let auth = AuthManager::new();
+
+        // 添加多个用户
+        for i in 0..10 {
+            let username = format!("user{}", i);
+            let password = format!("pass{}", i);
+            auth.add_user(username, password, UserRole::User).unwrap();
+        }
+
+        // 验证所有用户
+        for i in 0..10 {
+            let username = format!("user{}", i);
+            let password = format!("pass{}", i);
+            let user = auth.verify_user(&username, &password).unwrap();
+            assert_eq!(user.username, format!("user{}", i));
+        }
+    }
+
+    #[test]
+    fn test_concurrent_access() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let auth = Arc::new(AuthManager::new());
+        let mut handles = vec![];
+
+        // 多线程添加用户
+        for i in 0..5 {
+            let auth_clone = Arc::clone(&auth);
+            let handle = thread::spawn(move || {
+                let username = format!("user{}", i);
+                let password = format!("pass{}", i);
+                auth_clone
+                    .add_user(username, password, UserRole::User)
+                    .unwrap();
+            });
+            handles.push(handle);
+        }
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        // 验证所有用户都已添加
+        assert_eq!(auth.users.read().unwrap().len(), 5);
     }
 }

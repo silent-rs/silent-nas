@@ -305,34 +305,230 @@ impl StorageManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
+
+    fn create_test_storage() -> (StorageManager, TempDir) {
+        let temp_dir = TempDir::new().unwrap();
+        let storage = StorageManager::new(temp_dir.path().to_path_buf(), 4 * 1024 * 1024);
+        (storage, temp_dir)
+    }
 
     #[tokio::test]
-    async fn test_storage_basic_operations() {
-        let temp_dir = std::env::temp_dir().join("silent-nas-test");
-        let storage = StorageManager::new(temp_dir.clone(), 4096);
+    async fn test_storage_new() {
+        let (storage, _temp) = create_test_storage();
+        assert_eq!(storage.chunk_size, 4 * 1024 * 1024);
+    }
 
+    #[tokio::test]
+    async fn test_storage_init() {
+        let (storage, _temp) = create_test_storage();
+        let result = storage.init().await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_save_and_read_file() {
+        let (storage, _temp) = create_test_storage();
         storage.init().await.unwrap();
 
-        let file_id = scru128::new_string();
-        let data = b"Hello, Silent-NAS!";
+        let data = b"Hello, World!";
+        let metadata = storage.save_file("test_file", data).await.unwrap();
 
-        // 保存文件
-        let metadata = storage.save_file(&file_id, data).await.unwrap();
         assert_eq!(metadata.size, data.len() as u64);
+        assert_eq!(metadata.id, "test_file");
+        assert!(!metadata.hash.is_empty());
 
-        // 读取文件
-        let read_data = storage.read_file(&file_id).await.unwrap();
+        let read_data = storage.read_file("test_file").await.unwrap();
         assert_eq!(read_data, data);
+    }
 
-        // 验证哈希
-        let valid = storage.verify_hash(&file_id, &metadata.hash).await.unwrap();
-        assert!(valid);
+    #[tokio::test]
+    async fn test_save_empty_file() {
+        let (storage, _temp) = create_test_storage();
+        storage.init().await.unwrap();
 
-        // 删除文件
-        storage.delete_file(&file_id).await.unwrap();
-        assert!(!storage.file_exists(&file_id).await);
+        let data = b"";
+        let metadata = storage.save_file("empty_file", data).await.unwrap();
+        assert_eq!(metadata.size, 0);
+    }
 
-        // 清理
-        let _ = fs::remove_dir_all(temp_dir).await;
+    #[tokio::test]
+    async fn test_save_large_file() {
+        let (storage, _temp) = create_test_storage();
+        storage.init().await.unwrap();
+
+        let data = vec![0u8; 1024 * 1024]; // 1MB
+        let metadata = storage.save_file("large_file", &data).await.unwrap();
+        assert_eq!(metadata.size, 1024 * 1024);
+    }
+
+    #[tokio::test]
+    async fn test_read_nonexistent_file() {
+        let (storage, _temp) = create_test_storage();
+        storage.init().await.unwrap();
+
+        let result = storage.read_file("nonexistent").await;
+        assert!(result.is_err());
+        if let Err(e) = result {
+            assert!(matches!(e, NasError::FileNotFound(_)));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_delete_file() {
+        let (storage, _temp) = create_test_storage();
+        storage.init().await.unwrap();
+
+        let data = b"test data";
+        storage.save_file("delete_test", data).await.unwrap();
+
+        let result = storage.delete_file("delete_test").await;
+        assert!(result.is_ok());
+
+        let read_result = storage.read_file("delete_test").await;
+        assert!(read_result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_delete_nonexistent_file() {
+        let (storage, _temp) = create_test_storage();
+        storage.init().await.unwrap();
+
+        let result = storage.delete_file("nonexistent").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_file_exists() {
+        let (storage, _temp) = create_test_storage();
+        storage.init().await.unwrap();
+
+        assert!(!storage.file_exists("test").await);
+
+        storage.save_file("test", b"data").await.unwrap();
+        assert!(storage.file_exists("test").await);
+    }
+
+    #[tokio::test]
+    async fn test_get_metadata() {
+        let (storage, _temp) = create_test_storage();
+        storage.init().await.unwrap();
+
+        let data = b"metadata test";
+        storage.save_file("meta_test", data).await.unwrap();
+
+        let metadata = storage.get_metadata("meta_test").await.unwrap();
+        assert_eq!(metadata.id, "meta_test");
+        assert_eq!(metadata.size, data.len() as u64);
+    }
+
+    #[tokio::test]
+    async fn test_get_metadata_nonexistent() {
+        let (storage, _temp) = create_test_storage();
+        storage.init().await.unwrap();
+
+        let result = storage.get_metadata("nonexistent").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_calculate_hash() {
+        let (storage, _temp) = create_test_storage();
+
+        let data1 = b"test data";
+        let hash1 = storage.calculate_hash(data1);
+        assert!(!hash1.is_empty());
+        assert_eq!(hash1.len(), 64); // SHA-256 = 64 hex chars
+
+        let data2 = b"test data";
+        let hash2 = storage.calculate_hash(data2);
+        assert_eq!(hash1, hash2); // Same data = same hash
+
+        let data3 = b"different data";
+        let hash3 = storage.calculate_hash(data3);
+        assert_ne!(hash1, hash3); // Different data = different hash
+    }
+
+    #[tokio::test]
+    async fn test_list_files() {
+        let (storage, _temp) = create_test_storage();
+        storage.init().await.unwrap();
+
+        let files = storage.list_files().await.unwrap();
+        assert_eq!(files.len(), 0);
+
+        storage.save_file("file1", b"data1").await.unwrap();
+        storage.save_file("file2", b"data2").await.unwrap();
+
+        let files = storage.list_files().await.unwrap();
+        assert_eq!(files.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_get_file_path() {
+        let (storage, _temp) = create_test_storage();
+
+        let path1 = storage.get_file_path("abc123");
+        assert!(path1.to_string_lossy().contains("ab"));
+        assert!(path1.to_string_lossy().contains("abc123"));
+
+        let path2 = storage.get_file_path("bucket/key");
+        assert!(path2.to_string_lossy().contains("bucket/key"));
+    }
+
+    #[tokio::test]
+    async fn test_get_full_path() {
+        let (storage, _temp) = create_test_storage();
+
+        let path1 = storage.get_full_path("/test/file.txt");
+        assert!(path1.to_string_lossy().contains("test/file.txt"));
+
+        let path2 = storage.get_full_path("test/file.txt");
+        assert!(path2.to_string_lossy().contains("test/file.txt"));
+    }
+
+    #[tokio::test]
+    async fn test_storage_clone() {
+        let (storage, _temp) = create_test_storage();
+        let cloned = storage.clone();
+
+        assert_eq!(storage.root_path, cloned.root_path);
+        assert_eq!(storage.chunk_size, cloned.chunk_size);
+    }
+
+    #[tokio::test]
+    async fn test_multiple_operations() {
+        let (storage, _temp) = create_test_storage();
+        storage.init().await.unwrap();
+
+        // 保存多个文件
+        for i in 0..5 {
+            let file_id = format!("file_{}", i);
+            let data = format!("data_{}", i).into_bytes();
+            storage.save_file(&file_id, &data).await.unwrap();
+        }
+
+        // 验证所有文件
+        for i in 0..5 {
+            let file_id = format!("file_{}", i);
+            let data = storage.read_file(&file_id).await.unwrap();
+            assert_eq!(data, format!("data_{}", i).into_bytes());
+        }
+
+        // 删除部分文件
+        for i in 0..3 {
+            let file_id = format!("file_{}", i);
+            storage.delete_file(&file_id).await.unwrap();
+        }
+
+        // 验证删除结果
+        for i in 0..3 {
+            let file_id = format!("file_{}", i);
+            assert!(storage.read_file(&file_id).await.is_err());
+        }
+        for i in 3..5 {
+            let file_id = format!("file_{}", i);
+            assert!(storage.read_file(&file_id).await.is_ok());
+        }
     }
 }

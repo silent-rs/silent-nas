@@ -492,4 +492,174 @@ mod tests {
         assert_eq!(version2.size, 2048);
         assert_eq!(version2.hash, "hash_abc");
     }
+
+    #[tokio::test]
+    async fn test_create_version_disabled() {
+        let config = VersionConfig {
+            enabled: false,
+            ..Default::default()
+        };
+        let manager = create_test_version_manager(config);
+        manager.init().await.unwrap();
+
+        let storage = manager.storage.clone();
+        storage.init().await.unwrap();
+        storage.save_file("test_file", b"test data").await.unwrap();
+
+        let version = FileVersion::new(
+            "test_file".to_string(),
+            "test.txt".to_string(),
+            9,
+            "hash".to_string(),
+            None,
+            None,
+        );
+
+        let result = manager.create_version("test_file", version).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_version_config_clone() {
+        let config = VersionConfig {
+            max_versions: 5,
+            retention_days: 7,
+            enabled: true,
+        };
+
+        let cloned = config.clone();
+        assert_eq!(cloned.max_versions, 5);
+        assert_eq!(cloned.retention_days, 7);
+        assert!(cloned.enabled);
+    }
+
+    #[tokio::test]
+    async fn test_version_config_debug() {
+        let config = VersionConfig::default();
+        let debug_str = format!("{:?}", config);
+        assert!(debug_str.contains("VersionConfig"));
+    }
+
+    #[tokio::test]
+    async fn test_list_versions_sorting() {
+        let config = VersionConfig::default();
+        let manager = create_test_version_manager(config);
+
+        // 版本列表应该按创建时间降序排序
+        // 这里测试空列表情况
+        let versions = manager.list_versions("test_file").await.unwrap();
+        assert_eq!(versions.len(), 0);
+    }
+
+    #[test]
+    fn test_version_path_generation() {
+        let config = VersionConfig::default();
+        let manager = create_test_version_manager(config);
+
+        // 测试 get_version_path（通过其他方法间接测试）
+        let version_id = "version_123";
+        let path = manager.get_version_path(version_id);
+        assert!(path.to_string_lossy().contains("version_123"));
+        assert!(path.to_string_lossy().contains("versions"));
+    }
+
+    #[tokio::test]
+    async fn test_version_with_special_characters() {
+        let version = FileVersion::new(
+            "文件123".to_string(),
+            "测试文件.txt".to_string(),
+            1024,
+            "hash_中文".to_string(),
+            Some("用户_🔥".to_string()),
+            Some("版本说明 with emoji 🎉".to_string()),
+        );
+
+        assert_eq!(version.file_id, "文件123");
+        assert_eq!(version.name, "测试文件.txt");
+        assert!(version.comment.unwrap().contains("🎉"));
+    }
+
+    #[tokio::test]
+    async fn test_version_large_size() {
+        let large_size = 10_737_418_240u64; // 10GB
+        let version = FileVersion::new(
+            "large_file".to_string(),
+            "large.bin".to_string(),
+            large_size,
+            "hash_large".to_string(),
+            None,
+            None,
+        );
+
+        assert_eq!(version.size, large_size);
+    }
+
+    #[test]
+    fn test_version_config_disabled() {
+        let config = VersionConfig {
+            max_versions: 0,
+            retention_days: 0,
+            enabled: false,
+        };
+
+        assert!(!config.enabled);
+        assert_eq!(config.max_versions, 0);
+        assert_eq!(config.retention_days, 0);
+    }
+
+    #[test]
+    fn test_version_config_unlimited() {
+        let config = VersionConfig {
+            max_versions: 0,   // 0 表示无限制
+            retention_days: 0, // 0 表示永久保留
+            enabled: true,
+        };
+
+        assert!(config.enabled);
+        assert_eq!(config.max_versions, 0);
+        assert_eq!(config.retention_days, 0);
+    }
+
+    #[test]
+    fn test_version_stats_zero() {
+        let stats = VersionStats {
+            total_files: 0,
+            total_versions: 0,
+            total_size: 0,
+        };
+
+        assert_eq!(stats.total_files, 0);
+        assert_eq!(stats.total_versions, 0);
+        assert_eq!(stats.total_size, 0);
+    }
+
+    #[test]
+    fn test_file_version_minimal() {
+        let version = FileVersion::new(
+            "file1".to_string(),
+            "file1.txt".to_string(),
+            100,
+            "hash1".to_string(),
+            Some("user".to_string()),
+            None, // 没有注释
+        );
+
+        assert!(version.comment.is_none());
+        assert_eq!(version.size, 100);
+    }
+
+    #[test]
+    fn test_file_version_full() {
+        let version = FileVersion::new(
+            "file1".to_string(),
+            "file1.txt".to_string(),
+            100,
+            "hash1".to_string(),
+            Some("user".to_string()),
+            Some("comment".to_string()),
+        );
+
+        assert!(version.comment.is_some());
+        assert_eq!(version.comment.unwrap(), "comment");
+    }
 }

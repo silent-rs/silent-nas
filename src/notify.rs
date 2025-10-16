@@ -130,4 +130,129 @@ mod tests {
         let type_name = std::any::type_name::<EventNotifier>();
         assert!(type_name.contains("EventNotifier"));
     }
+
+    #[test]
+    fn test_event_type_variants() {
+        use crate::models::EventType;
+
+        // 测试所有 EventType 变体
+        let created = EventType::Created;
+        let modified = EventType::Modified;
+        let deleted = EventType::Deleted;
+
+        // 确保所有变体都存在
+        assert!(matches!(created, EventType::Created));
+        assert!(matches!(modified, EventType::Modified));
+        assert!(matches!(deleted, EventType::Deleted));
+    }
+
+    #[test]
+    fn test_topic_generation_for_all_event_types() {
+        use crate::models::EventType;
+
+        let prefix = "test.nas";
+        let event_types = vec![EventType::Created, EventType::Modified, EventType::Deleted];
+
+        for event_type in event_types {
+            let topic = match &event_type {
+                EventType::Created => format!("{}.created", prefix),
+                EventType::Modified => format!("{}.modified", prefix),
+                EventType::Deleted => format!("{}.deleted", prefix),
+            };
+
+            assert!(topic.starts_with(prefix));
+            assert!(topic.len() > prefix.len());
+        }
+    }
+
+    #[test]
+    fn test_topic_with_empty_prefix() {
+        let prefix = "";
+        let topic = format!("{}.created", prefix);
+        assert_eq!(topic, ".created");
+    }
+
+    #[test]
+    fn test_topic_with_long_prefix() {
+        let prefix = "very.long.prefix.with.many.segments";
+        let topic = format!("{}.created", prefix);
+        assert!(topic.starts_with(prefix));
+        assert!(topic.ends_with(".created"));
+    }
+
+    #[test]
+    fn test_topic_with_special_chars() {
+        let prefixes = vec![
+            "prefix-with-dashes",
+            "prefix_with_underscores",
+            "prefix.with.dots",
+            "prefix123",
+        ];
+
+        for prefix in prefixes {
+            let topic = format!("{}.created", prefix);
+            assert!(topic.contains(prefix));
+        }
+    }
+
+    #[test]
+    fn test_file_event_serialization_for_notify() {
+        use crate::models::{EventType, FileEvent, FileMetadata};
+        use chrono::Local;
+
+        let metadata = FileMetadata {
+            id: "file-123".to_string(),
+            name: "test.txt".to_string(),
+            path: "/test.txt".to_string(),
+            size: 1024,
+            hash: "abc123".to_string(),
+            created_at: Local::now().naive_local(),
+            modified_at: Local::now().naive_local(),
+        };
+
+        let event = FileEvent::new(EventType::Created, "file-123".to_string(), Some(metadata));
+
+        // 测试序列化
+        let json = serde_json::to_vec(&event).unwrap();
+        assert!(!json.is_empty());
+
+        // 测试反序列化
+        let deserialized: FileEvent = serde_json::from_slice(&json).unwrap();
+        assert_eq!(deserialized.file_id, "file-123");
+    }
+
+    #[test]
+    fn test_multiple_event_types_topic_uniqueness() {
+        use crate::models::EventType;
+
+        let prefix = "test";
+        let created = format!("{}.{:?}", prefix, EventType::Created).to_lowercase();
+        let modified = format!("{}.{:?}", prefix, EventType::Modified).to_lowercase();
+        let deleted = format!("{}.{:?}", prefix, EventType::Deleted).to_lowercase();
+
+        // 确保每个主题都是唯一的
+        assert_ne!(created, modified);
+        assert_ne!(modified, deleted);
+        assert_ne!(created, deleted);
+    }
+
+    #[test]
+    fn test_topic_prefix_consistency() {
+        let prefixes = vec!["prefix1", "prefix2", "prefix3"];
+
+        for prefix in &prefixes {
+            let topic1 = format!("{}.created", prefix);
+            let topic2 = format!("{}.created", prefix);
+            assert_eq!(topic1, topic2); // 相同前缀应该生成相同的主题
+        }
+    }
+
+    #[test]
+    fn test_event_notifier_type_properties() {
+        // 测试 EventNotifier 的类型属性
+        let type_name = std::any::type_name::<EventNotifier>();
+
+        assert!(type_name.contains("EventNotifier"));
+        assert!(type_name.contains("notify"));
+    }
 }

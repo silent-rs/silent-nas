@@ -3,6 +3,7 @@ mod config;
 mod error;
 mod models;
 mod node_sync;
+mod node_sync_service;
 mod notify;
 mod rpc;
 mod s3;

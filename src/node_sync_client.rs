@@ -1,0 +1,338 @@
+// NodeSyncService gRPC 客户端实现
+#![allow(dead_code)]
+
+use crate::error::{NasError, Result};
+use crate::node_sync::NodeInfo;
+use crate::rpc::file_service::node_sync_service_client::NodeSyncServiceClient;
+use crate::rpc::file_service::*;
+use chrono::{DateTime, Utc};
+use std::sync::Arc;
+use tokio::sync::RwLock;
+use tonic::transport::Channel;
+use tracing::{debug, info};
+
+/// gRPC 客户端连接配置
+#[derive(Debug, Clone)]
+pub struct ClientConfig {
+    /// 连接超时时间（秒）
+    pub connect_timeout: u64,
+    /// 请求超时时间（秒）
+    pub request_timeout: u64,
+    /// 重试次数
+    pub max_retries: u32,
+    /// 重试间隔（秒）
+    pub retry_interval: u64,
+}
+
+impl Default for ClientConfig {
+    fn default() -> Self {
+        Self {
+            connect_timeout: 10,
+            request_timeout: 30,
+            max_retries: 3,
+            retry_interval: 5,
+        }
+    }
+}
+
+/// NodeSync gRPC 客户端
+pub struct NodeSyncClient {
+    /// 目标节点地址
+    address: String,
+    /// gRPC 客户端
+    client: Arc<RwLock<Option<NodeSyncServiceClient<Channel>>>>,
+    /// 客户端配置
+    config: ClientConfig,
+}
+
+impl NodeSyncClient {
+    /// 创建新的客户端
+    pub fn new(address: String, config: ClientConfig) -> Self {
+        Self {
+            address,
+            client: Arc::new(RwLock::new(None)),
+            config,
+        }
+    }
+
+    /// 连接到远程节点
+    pub async fn connect(&self) -> Result<()> {
+        info!("连接到节点: {}", self.address);
+
+        let endpoint = format!("http://{}", self.address);
+
+        let channel = Channel::from_shared(endpoint)
+            .map_err(|e| NasError::Other(format!("无效的地址: {}", e)))?
+            .connect()
+            .await
+            .map_err(|e| NasError::Other(format!("连接失败: {}", e)))?;
+
+        let client = NodeSyncServiceClient::new(channel);
+
+        let mut client_lock = self.client.write().await;
+        *client_lock = Some(client);
+
+        info!("成功连接到节点: {}", self.address);
+        Ok(())
+    }
+
+    /// 确保客户端已连接
+    async fn ensure_connected(&self) -> Result<NodeSyncServiceClient<Channel>> {
+        let client_lock = self.client.read().await;
+
+        if let Some(client) = client_lock.as_ref() {
+            Ok(client.clone())
+        } else {
+            drop(client_lock);
+            self.connect().await?;
+
+            let client_lock = self.client.read().await;
+            client_lock
+                .as_ref()
+                .cloned()
+                .ok_or_else(|| NasError::Other("连接失败".to_string()))
+        }
+    }
+
+    /// 注册节点到远程节点
+    pub async fn register_node(&self, node: &NodeInfo) -> Result<Vec<NodeInfo>> {
+        debug!("向 {} 注册节点: {}", self.address, node.node_id);
+
+        let mut client = self.ensure_connected().await?;
+
+        let proto_node = crate::rpc::file_service::NodeInfo {
+            node_id: node.node_id.clone(),
+            address: node.address.clone(),
+            last_seen: node.last_seen.and_utc().timestamp_millis(),
+            version: node.version.clone(),
+            metadata: node.metadata.clone(),
+        };
+
+        let request = tonic::Request::new(RegisterNodeRequest {
+            node: Some(proto_node),
+        });
+
+        let response = client
+            .register_node(request)
+            .await
+            .map_err(|e| NasError::Other(format!("注册节点失败: {}", e)))?;
+
+        let resp = response.into_inner();
+
+        // 转换返回的节点列表
+        let nodes = resp
+            .known_nodes
+            .into_iter()
+            .filter_map(|proto_node| convert_from_proto_node(&proto_node).ok())
+            .collect();
+
+        Ok(nodes)
+    }
+
+    /// 发送心跳
+    pub async fn send_heartbeat(&self, node_id: &str) -> Result<i64> {
+        debug!("向 {} 发送心跳", self.address);
+
+        let mut client = self.ensure_connected().await?;
+
+        let request = tonic::Request::new(HeartbeatRequest {
+            node_id: node_id.to_string(),
+            timestamp: chrono::Local::now().timestamp_millis(),
+        });
+
+        let response = client
+            .heartbeat(request)
+            .await
+            .map_err(|e| NasError::Other(format!("心跳失败: {}", e)))?;
+
+        let resp = response.into_inner();
+        Ok(resp.server_timestamp)
+    }
+
+    /// 获取节点列表
+    pub async fn list_nodes(&self) -> Result<Vec<NodeInfo>> {
+        debug!("从 {} 获取节点列表", self.address);
+
+        let mut client = self.ensure_connected().await?;
+
+        let request = tonic::Request::new(ListNodesRequest {});
+
+        let response = client
+            .list_nodes(request)
+            .await
+            .map_err(|e| NasError::Other(format!("获取节点列表失败: {}", e)))?;
+
+        let resp = response.into_inner();
+
+        let nodes = resp
+            .nodes
+            .into_iter()
+            .filter_map(|proto_node| convert_from_proto_node(&proto_node).ok())
+            .collect();
+
+        Ok(nodes)
+    }
+
+    /// 同步文件状态到远程节点
+    pub async fn sync_file_states(
+        &self,
+        source_node_id: &str,
+        states: Vec<FileSyncState>,
+    ) -> Result<Vec<String>> {
+        info!("同步 {} 个文件状态到 {}", states.len(), self.address);
+
+        let mut client = self.ensure_connected().await?;
+
+        let request = tonic::Request::new(SyncFileStateRequest {
+            source_node_id: source_node_id.to_string(),
+            states,
+        });
+
+        let response = client
+            .sync_file_state(request)
+            .await
+            .map_err(|e| NasError::Other(format!("同步文件状态失败: {}", e)))?;
+
+        let resp = response.into_inner();
+        Ok(resp.conflicts)
+    }
+
+    /// 请求从远程节点同步文件
+    pub async fn request_file_sync(&self, node_id: &str, file_ids: Vec<String>) -> Result<i32> {
+        info!("向 {} 请求同步 {} 个文件", self.address, file_ids.len());
+
+        let mut client = self.ensure_connected().await?;
+
+        let request = tonic::Request::new(RequestFileSyncRequest {
+            node_id: node_id.to_string(),
+            file_ids,
+        });
+
+        let response = client
+            .request_file_sync(request)
+            .await
+            .map_err(|e| NasError::Other(format!("请求文件同步失败: {}", e)))?;
+
+        let resp = response.into_inner();
+        Ok(resp.synced_count)
+    }
+
+    /// 获取远程节点的同步状态
+    pub async fn get_sync_status(&self, node_id: &str) -> Result<SyncStatusInfo> {
+        debug!("获取节点 {} 的同步状态", self.address);
+
+        let mut client = self.ensure_connected().await?;
+
+        let request = tonic::Request::new(GetSyncStatusRequest {
+            node_id: node_id.to_string(),
+        });
+
+        let response = client
+            .get_sync_status(request)
+            .await
+            .map_err(|e| NasError::Other(format!("获取同步状态失败: {}", e)))?;
+
+        let resp = response.into_inner();
+
+        Ok(SyncStatusInfo {
+            total_files: resp.total_files as usize,
+            synced_files: resp.synced_files as usize,
+            pending_files: resp.pending_files as usize,
+            last_sync_time: if resp.last_sync_time > 0 {
+                DateTime::<Utc>::from_timestamp_millis(resp.last_sync_time).map(|dt| dt.naive_utc())
+            } else {
+                None
+            },
+        })
+    }
+
+    /// 断开连接
+    pub async fn disconnect(&self) {
+        let mut client_lock = self.client.write().await;
+        *client_lock = None;
+        info!("断开与节点 {} 的连接", self.address);
+    }
+}
+
+/// 同步状态信息
+#[derive(Debug, Clone)]
+pub struct SyncStatusInfo {
+    pub total_files: usize,
+    pub synced_files: usize,
+    pub pending_files: usize,
+    pub last_sync_time: Option<chrono::NaiveDateTime>,
+}
+
+// ========== 辅助函数 ==========
+
+/// 将 protobuf NodeInfo 转换为内部 NodeInfo
+fn convert_from_proto_node(proto: &crate::rpc::file_service::NodeInfo) -> Result<NodeInfo> {
+    let datetime = DateTime::<Utc>::from_timestamp_millis(proto.last_seen)
+        .ok_or_else(|| NasError::Other("无效的时间戳".to_string()))?;
+    let last_seen = datetime.naive_utc();
+
+    Ok(NodeInfo {
+        node_id: proto.node_id.clone(),
+        address: proto.address.clone(),
+        last_seen,
+        version: proto.version.clone(),
+        metadata: proto.metadata.clone(),
+        status: crate::node_sync::NodeStatus::Online,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_client_config_default() {
+        let config = ClientConfig::default();
+
+        assert_eq!(config.connect_timeout, 10);
+        assert_eq!(config.request_timeout, 30);
+        assert_eq!(config.max_retries, 3);
+        assert_eq!(config.retry_interval, 5);
+    }
+
+    #[test]
+    fn test_client_creation() {
+        let config = ClientConfig::default();
+        let client = NodeSyncClient::new("127.0.0.1:9000".to_string(), config);
+
+        assert_eq!(client.address, "127.0.0.1:9000");
+    }
+
+    #[test]
+    fn test_sync_status_info() {
+        let status = SyncStatusInfo {
+            total_files: 100,
+            synced_files: 80,
+            pending_files: 20,
+            last_sync_time: None,
+        };
+
+        assert_eq!(status.total_files, 100);
+        assert_eq!(status.synced_files, 80);
+        assert_eq!(status.pending_files, 20);
+        assert!(status.last_sync_time.is_none());
+    }
+
+    #[test]
+    fn test_convert_proto_node() {
+        let proto_node = crate::rpc::file_service::NodeInfo {
+            node_id: "test-node".to_string(),
+            address: "192.168.1.10:9000".to_string(),
+            last_seen: chrono::Utc::now().timestamp_millis(),
+            version: "1.0.0".to_string(),
+            metadata: std::collections::HashMap::new(),
+        };
+
+        let node = convert_from_proto_node(&proto_node).unwrap();
+
+        assert_eq!(node.node_id, "test-node");
+        assert_eq!(node.address, "192.168.1.10:9000");
+        assert_eq!(node.version, "1.0.0");
+        assert_eq!(node.status, crate::node_sync::NodeStatus::Online);
+    }
+}

@@ -198,12 +198,59 @@ impl NodeManager {
 
     /// 连接到种子节点
     pub async fn connect_to_seeds(&self) -> Result<()> {
+        use crate::node_sync_client::{ClientConfig, NodeSyncClient};
+
         for seed_addr in &self.config.seed_nodes {
             info!("连接到种子节点: {}", seed_addr);
 
-            // TODO: 实现 gRPC 客户端连接逻辑
-            // 这里需要调用远程节点的 RegisterNode RPC
+            // 创建客户端并连接
+            let client = NodeSyncClient::new(seed_addr.clone(), ClientConfig::default());
+
+            match client.connect().await {
+                Ok(_) => {
+                    // 注册当前节点
+                    let current_node = NodeInfo::new(
+                        self.config.node_id.clone(),
+                        self.config.listen_addr.clone(),
+                        env!("CARGO_PKG_VERSION").to_string(),
+                    );
+
+                    match client.register_node(&current_node).await {
+                        Ok(known_nodes) => {
+                            info!(
+                                "成功注册到种子节点 {}, 发现 {} 个节点",
+                                seed_addr,
+                                known_nodes.len()
+                            );
+
+                            // 注册所有已知节点
+                            for node in known_nodes {
+                                if node.node_id != self.config.node_id {
+                                    let _ = self.register_node(node).await;
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            warn!("注册到种子节点 {} 失败: {}", seed_addr, e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!("连接到种子节点 {} 失败: {}", seed_addr, e);
+                }
+            }
         }
+
+        Ok(())
+    }
+
+    /// 向指定节点发送心跳
+    pub async fn send_heartbeat_to_node(&self, _node_id: &str, address: &str) -> Result<()> {
+        use crate::node_sync_client::{ClientConfig, NodeSyncClient};
+
+        let client = NodeSyncClient::new(address.to_string(), ClientConfig::default());
+        client.connect().await?;
+        client.send_heartbeat(&self.config.node_id).await?;
 
         Ok(())
     }

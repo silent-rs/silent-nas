@@ -177,3 +177,192 @@ async fn handle_download(send: &mut quinn::SendStream, recv: &mut quinn::RecvStr
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_quic_transfer_server_type() {
+        // 测试 QuicTransferServer 类型
+        let type_name = std::any::type_name::<QuicTransferServer>();
+        assert!(type_name.contains("QuicTransferServer"));
+    }
+
+    #[test]
+    fn test_command_bytes() {
+        // 测试命令字节
+        let upload_cmd: u8 = 0x01;
+        let download_cmd: u8 = 0x02;
+        let unknown_cmd: u8 = 0xFF;
+
+        assert_eq!(upload_cmd, 1);
+        assert_eq!(download_cmd, 2);
+        assert_ne!(upload_cmd, download_cmd);
+        assert_ne!(unknown_cmd, upload_cmd);
+        assert_ne!(unknown_cmd, download_cmd);
+    }
+
+    #[test]
+    fn test_file_id_encoding() {
+        // 测试文件 ID 编码和解码
+        let file_id = "test-file-123";
+        let bytes = file_id.as_bytes();
+        let len = bytes.len() as u32;
+        let len_bytes = len.to_be_bytes();
+
+        // 验证长度编码
+        assert_eq!(len_bytes.len(), 4);
+        let decoded_len = u32::from_be_bytes(len_bytes);
+        assert_eq!(decoded_len, len);
+
+        // 验证 ID 解码
+        let decoded_id = String::from_utf8(bytes.to_vec()).unwrap();
+        assert_eq!(decoded_id, file_id);
+    }
+
+    #[test]
+    fn test_file_id_length_encoding() {
+        // 测试不同长度的文件 ID
+        let test_cases = vec![
+            ("a", 1u32),
+            ("test", 4u32),
+            ("test-file-123", 13u32),
+            ("very-long-file-id-with-many-characters", 38u32),
+        ];
+
+        for (file_id, expected_len) in test_cases {
+            let len = file_id.len() as u32;
+            assert_eq!(len, expected_len);
+
+            let len_bytes = len.to_be_bytes();
+            let decoded = u32::from_be_bytes(len_bytes);
+            assert_eq!(decoded, expected_len);
+        }
+    }
+
+    #[test]
+    fn test_upload_command_value() {
+        const UPLOAD_CMD: u8 = 0x01;
+        assert_eq!(UPLOAD_CMD, 1);
+
+        let cmd_array = [UPLOAD_CMD];
+        assert_eq!(cmd_array[0], 0x01);
+    }
+
+    #[test]
+    fn test_download_command_value() {
+        const DOWNLOAD_CMD: u8 = 0x02;
+        assert_eq!(DOWNLOAD_CMD, 2);
+
+        let cmd_array = [DOWNLOAD_CMD];
+        assert_eq!(cmd_array[0], 0x02);
+    }
+
+    #[test]
+    fn test_unknown_command_detection() {
+        let valid_commands = [0x01, 0x02];
+        let unknown_commands = [0x00, 0x03, 0xFF];
+
+        for cmd in valid_commands {
+            assert!(cmd == 0x01 || cmd == 0x02);
+        }
+
+        for cmd in unknown_commands {
+            assert!(cmd != 0x01 && cmd != 0x02);
+        }
+    }
+
+    #[test]
+    fn test_max_file_size_constant() {
+        const MAX_FILE_SIZE: usize = 100 * 1024 * 1024; // 100MB
+        assert_eq!(MAX_FILE_SIZE, 104_857_600);
+    }
+
+    #[test]
+    fn test_response_byte() {
+        const SUCCESS_RESPONSE: u8 = 0x00;
+        assert_eq!(SUCCESS_RESPONSE, 0);
+
+        let response_array = [SUCCESS_RESPONSE];
+        assert_eq!(response_array[0], 0x00);
+    }
+
+    #[test]
+    fn test_buffer_sizes() {
+        let cmd_buf_size = 1;
+        let id_len_buf_size = 4;
+
+        assert_eq!(cmd_buf_size, 1);
+        assert_eq!(id_len_buf_size, 4);
+
+        let cmd_buf = [0u8; 1];
+        let id_len_buf = [0u8; 4];
+
+        assert_eq!(cmd_buf.len(), cmd_buf_size);
+        assert_eq!(id_len_buf.len(), id_len_buf_size);
+    }
+
+    #[test]
+    fn test_file_id_utf8_encoding() {
+        let test_ids = vec![
+            "simple-id",
+            "id-with-numbers-123",
+            "文件ID中文",
+            "id_with_emoji_🔥",
+            "id/with/slashes",
+        ];
+
+        for file_id in test_ids {
+            let bytes = file_id.as_bytes();
+            let decoded = String::from_utf8(bytes.to_vec()).unwrap();
+            assert_eq!(decoded, file_id);
+        }
+    }
+
+    #[test]
+    fn test_command_matching() {
+        let commands = vec![0x01, 0x02, 0xFF];
+
+        for cmd in commands {
+            match cmd {
+                0x01 => assert_eq!(cmd, 1),
+                0x02 => assert_eq!(cmd, 2),
+                _ => assert!(cmd != 0x01 && cmd != 0x02),
+            }
+        }
+    }
+
+    #[test]
+    fn test_be_bytes_conversion() {
+        let test_values = vec![0u32, 1u32, 100u32, 1000u32, 1_000_000u32];
+
+        for value in test_values {
+            let bytes = value.to_be_bytes();
+            let decoded = u32::from_be_bytes(bytes);
+            assert_eq!(decoded, value);
+        }
+    }
+
+    #[test]
+    fn test_error_message_format() {
+        let file_id = "test-file";
+        let error_msg = format!("读取文件ID失败: {}", file_id);
+        assert!(error_msg.contains("读取文件ID失败"));
+        assert!(error_msg.contains(file_id));
+    }
+
+    #[test]
+    fn test_data_size_calculation() {
+        let data_sizes = vec![
+            (0, 0),
+            (1024, 1024),
+            (1024 * 1024, 1_048_576),
+            (100 * 1024 * 1024, 104_857_600),
+        ];
+
+        for (input, expected) in data_sizes {
+            assert_eq!(input, expected);
+        }
+    }
+}

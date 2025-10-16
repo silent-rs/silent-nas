@@ -3,3 +3,4 @@
 .history
 Cargo.lock
 storage
+test_*

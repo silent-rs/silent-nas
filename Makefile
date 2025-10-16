@@ -40,15 +40,15 @@ test-webdav:
 	@echo "运行 WebDAV 模块测试..."
 	@cargo test webdav:: --all-features
 
-# 生成覆盖率报告（仅统计本项目代码，排除 silent 依赖和 silent-crdt）
+# 生成覆盖率报告（仅统计本项目核心代码，排除 silent 依赖、silent-crdt 和 s3）
 coverage:
-	@echo "生成覆盖率报告（排除 silent 框架和 silent-crdt）..."
-	@cargo llvm-cov --all-features --ignore-filename-regex '.*/silent/silent/.*|.*/silent-crdt/.*' --summary-only
+	@echo "生成覆盖率报告（排除 silent 框架、silent-crdt 和 s3）..."
+	@cargo llvm-cov --all-features --ignore-filename-regex '.*/silent/silent/.*|.*/silent-crdt/.*|.*/s3/.*' --summary-only
 
 # 生成 HTML 覆盖率报告
 coverage-html:
-	@echo "生成 HTML 覆盖率报告（排除 silent 框架和 silent-crdt）..."
-	@cargo llvm-cov --all-features --ignore-filename-regex '.*/silent/silent/.*|.*/silent-crdt/.*' --html
+	@echo "生成 HTML 覆盖率报告（排除 silent 框架、silent-crdt 和 s3）..."
+	@cargo llvm-cov --all-features --ignore-filename-regex '.*/silent/silent/.*|.*/silent-crdt/.*|.*/s3/.*' --html
 	@echo "HTML 报告已生成到: target/llvm-cov/html/index.html"
 	@echo "在浏览器中打开: open target/llvm-cov/html/index.html"
 

@@ -144,3 +144,142 @@ fn convert_metadata(metadata: &crate::models::FileMetadata) -> FileMetadata {
         modified_at: metadata.modified_at.to_string(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Local;
+
+    #[test]
+    fn test_convert_metadata() {
+        let metadata = crate::models::FileMetadata {
+            id: "test-id".to_string(),
+            name: "test.txt".to_string(),
+            path: "/path/to/test.txt".to_string(),
+            size: 1024,
+            hash: "abc123".to_string(),
+            created_at: Local::now().naive_local(),
+            modified_at: Local::now().naive_local(),
+        };
+
+        let proto_metadata = convert_metadata(&metadata);
+
+        assert_eq!(proto_metadata.id, "test-id");
+        assert_eq!(proto_metadata.name, "test.txt");
+        assert_eq!(proto_metadata.path, "/path/to/test.txt");
+        assert_eq!(proto_metadata.size, 1024);
+        assert_eq!(proto_metadata.hash, "abc123");
+        assert!(!proto_metadata.created_at.is_empty());
+        assert!(!proto_metadata.modified_at.is_empty());
+    }
+
+    #[test]
+    fn test_convert_metadata_empty_fields() {
+        let metadata = crate::models::FileMetadata {
+            id: "".to_string(),
+            name: "".to_string(),
+            path: "".to_string(),
+            size: 0,
+            hash: "".to_string(),
+            created_at: Local::now().naive_local(),
+            modified_at: Local::now().naive_local(),
+        };
+
+        let proto_metadata = convert_metadata(&metadata);
+
+        assert_eq!(proto_metadata.id, "");
+        assert_eq!(proto_metadata.name, "");
+        assert_eq!(proto_metadata.path, "");
+        assert_eq!(proto_metadata.size, 0);
+        assert_eq!(proto_metadata.hash, "");
+    }
+
+    #[test]
+    fn test_convert_metadata_large_size() {
+        let metadata = crate::models::FileMetadata {
+            id: "large-file".to_string(),
+            name: "large.bin".to_string(),
+            path: "/data/large.bin".to_string(),
+            size: 10_737_418_240, // 10GB
+            hash: "hash_of_large_file".to_string(),
+            created_at: Local::now().naive_local(),
+            modified_at: Local::now().naive_local(),
+        };
+
+        let proto_metadata = convert_metadata(&metadata);
+
+        assert_eq!(proto_metadata.size, 10_737_418_240);
+    }
+
+    #[test]
+    fn test_convert_metadata_special_characters() {
+        let metadata = crate::models::FileMetadata {
+            id: "id-with-特殊字符-🔥".to_string(),
+            name: "文件名.txt".to_string(),
+            path: "/路径/to/文件.txt".to_string(),
+            size: 2048,
+            hash: "hash123".to_string(),
+            created_at: Local::now().naive_local(),
+            modified_at: Local::now().naive_local(),
+        };
+
+        let proto_metadata = convert_metadata(&metadata);
+
+        assert_eq!(proto_metadata.id, "id-with-特殊字符-🔥");
+        assert_eq!(proto_metadata.name, "文件名.txt");
+        assert!(proto_metadata.path.contains("路径"));
+    }
+
+    #[test]
+    fn test_convert_metadata_timestamp_format() {
+        let now = Local::now().naive_local();
+        let metadata = crate::models::FileMetadata {
+            id: "test".to_string(),
+            name: "test.txt".to_string(),
+            path: "/test.txt".to_string(),
+            size: 100,
+            hash: "hash".to_string(),
+            created_at: now,
+            modified_at: now,
+        };
+
+        let proto_metadata = convert_metadata(&metadata);
+
+        // 验证时间戳被转换为字符串
+        assert!(!proto_metadata.created_at.is_empty());
+        assert!(!proto_metadata.modified_at.is_empty());
+
+        // 时间戳字符串应该包含日期格式
+        assert!(proto_metadata.created_at.contains('-') || proto_metadata.created_at.contains(':'));
+    }
+
+    #[test]
+    fn test_multiple_convert_metadata() {
+        let metadatas = vec![
+            crate::models::FileMetadata {
+                id: "1".to_string(),
+                name: "file1.txt".to_string(),
+                path: "/file1.txt".to_string(),
+                size: 100,
+                hash: "hash1".to_string(),
+                created_at: Local::now().naive_local(),
+                modified_at: Local::now().naive_local(),
+            },
+            crate::models::FileMetadata {
+                id: "2".to_string(),
+                name: "file2.txt".to_string(),
+                path: "/file2.txt".to_string(),
+                size: 200,
+                hash: "hash2".to_string(),
+                created_at: Local::now().naive_local(),
+                modified_at: Local::now().naive_local(),
+            },
+        ];
+
+        let proto_metadatas: Vec<_> = metadatas.iter().map(convert_metadata).collect();
+
+        assert_eq!(proto_metadatas.len(), 2);
+        assert_eq!(proto_metadatas[0].id, "1");
+        assert_eq!(proto_metadatas[1].id, "2");
+    }
+}

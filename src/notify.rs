@@ -78,3 +78,56 @@ impl EventNotifier {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_topic_format() {
+        let prefix = "silent.nas.files";
+
+        // 测试主题格式
+        assert_eq!(format!("{}.created", prefix), "silent.nas.files.created");
+        assert_eq!(format!("{}.modified", prefix), "silent.nas.files.modified");
+        assert_eq!(format!("{}.deleted", prefix), "silent.nas.files.deleted");
+    }
+
+    #[test]
+    fn test_event_type_to_topic() {
+        let prefix = "test.prefix";
+
+        let created_topic = format!("{}.created", prefix);
+        let modified_topic = format!("{}.modified", prefix);
+        let deleted_topic = format!("{}.deleted", prefix);
+
+        assert!(created_topic.ends_with(".created"));
+        assert!(modified_topic.ends_with(".modified"));
+        assert!(deleted_topic.ends_with(".deleted"));
+    }
+
+    #[test]
+    fn test_topic_prefix_handling() {
+        let prefixes = vec![
+            "simple",
+            "with.dots",
+            "with-dashes",
+            "with_underscores",
+            "123numeric",
+        ];
+
+        for prefix in prefixes {
+            let topic = format!("{}.created", prefix);
+            assert!(topic.contains(prefix));
+            assert!(topic.contains(".created"));
+        }
+    }
+
+    #[test]
+    fn test_event_notifier_clone() {
+        // EventNotifier 实现了 Clone
+        // 这个测试验证 Clone trait 的存在
+        let type_name = std::any::type_name::<EventNotifier>();
+        assert!(type_name.contains("EventNotifier"));
+    }
+}

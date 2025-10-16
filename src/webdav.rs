@@ -644,3 +644,160 @@ pub fn create_webdav_routes(storage: Arc<StorageManager>, notifier: Arc<EventNot
 
     root_route.append(path_route)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_webdav_method_constants() {
+        assert_eq!(METHOD_PROPFIND, b"PROPFIND");
+        assert_eq!(METHOD_MKCOL, b"MKCOL");
+        assert_eq!(METHOD_MOVE, b"MOVE");
+        assert_eq!(METHOD_COPY, b"COPY");
+    }
+
+    #[test]
+    fn test_xml_constants() {
+        assert!(XML_HEADER.contains("xml version"));
+        assert!(XML_NS_DAV.contains("DAV:"));
+        assert!(XML_MULTISTATUS_END.contains("multistatus"));
+    }
+
+    #[test]
+    fn test_header_constants() {
+        assert_eq!(HEADER_DAV, "dav");
+        assert_eq!(HEADER_DAV_VALUE, "1, 2");
+        assert!(HEADER_ALLOW_VALUE.contains("OPTIONS"));
+        assert!(HEADER_ALLOW_VALUE.contains("PROPFIND"));
+    }
+
+    #[test]
+    fn test_content_type_constants() {
+        assert_eq!(CONTENT_TYPE_XML, "application/xml; charset=utf-8");
+        assert_eq!(CONTENT_TYPE_HTML, "text/html; charset=utf-8");
+    }
+
+    #[test]
+    fn test_decode_path_simple() {
+        let path = "/test/file.txt";
+        let decoded = WebDavHandler::decode_path(path);
+        assert!(decoded.is_ok());
+        assert_eq!(decoded.unwrap(), "/test/file.txt");
+    }
+
+    #[test]
+    fn test_decode_path_with_spaces() {
+        let path = "/test%20file.txt";
+        let decoded = WebDavHandler::decode_path(path);
+        assert!(decoded.is_ok());
+        assert_eq!(decoded.unwrap(), "/test file.txt");
+    }
+
+    #[test]
+    fn test_decode_path_with_special_chars() {
+        let path = "/file%2Bname.txt";
+        let decoded = WebDavHandler::decode_path(path);
+        assert!(decoded.is_ok());
+        assert_eq!(decoded.unwrap(), "/file+name.txt");
+    }
+
+    #[test]
+    fn test_decode_path_chinese() {
+        let path = "/%E6%B5%8B%E8%AF%95";
+        let decoded = WebDavHandler::decode_path(path);
+        assert!(decoded.is_ok());
+        assert_eq!(decoded.unwrap(), "/测试");
+    }
+
+    #[test]
+    fn test_xml_header_format() {
+        assert!(XML_HEADER.starts_with("<?"));
+        assert!(XML_HEADER.ends_with("?>"));
+    }
+
+    #[test]
+    fn test_xml_namespace_format() {
+        assert!(XML_NS_DAV.starts_with("<D:"));
+        assert!(XML_NS_DAV.contains("xmlns:D"));
+    }
+
+    #[test]
+    fn test_method_byte_arrays() {
+        assert_eq!(METHOD_PROPFIND.len(), 8);
+        assert_eq!(METHOD_MKCOL.len(), 5);
+        assert_eq!(METHOD_MOVE.len(), 4);
+        assert_eq!(METHOD_COPY.len(), 4);
+    }
+
+    #[test]
+    fn test_header_dav_compliance() {
+        assert!(HEADER_DAV_VALUE.contains("1"));
+        assert!(HEADER_DAV_VALUE.contains("2"));
+    }
+
+    #[test]
+    fn test_allowed_methods_coverage() {
+        let methods = vec![
+            "OPTIONS", "GET", "HEAD", "PUT", "DELETE", "PROPFIND", "MKCOL", "MOVE", "COPY",
+        ];
+        for method in methods {
+            assert!(HEADER_ALLOW_VALUE.contains(method));
+        }
+    }
+
+    #[test]
+    fn test_content_types_have_charset() {
+        assert!(CONTENT_TYPE_XML.contains("charset=utf-8"));
+        assert!(CONTENT_TYPE_HTML.contains("charset=utf-8"));
+    }
+
+    #[test]
+    fn test_xml_multistatus_structure() {
+        let full_xml = format!("{}{}{}", XML_HEADER, XML_NS_DAV, XML_MULTISTATUS_END);
+        assert!(full_xml.contains("<?xml"));
+        assert!(full_xml.contains("<D:multistatus"));
+        assert!(full_xml.contains("</D:multistatus>"));
+    }
+
+    #[test]
+    fn test_path_decoding_empty() {
+        let path = "";
+        let decoded = WebDavHandler::decode_path(path);
+        assert!(decoded.is_ok());
+        assert_eq!(decoded.unwrap(), "");
+    }
+
+    #[test]
+    fn test_path_decoding_root() {
+        let path = "/";
+        let decoded = WebDavHandler::decode_path(path);
+        assert!(decoded.is_ok());
+        assert_eq!(decoded.unwrap(), "/");
+    }
+
+    #[test]
+    fn test_webdav_handler_type() {
+        let type_name = std::any::type_name::<WebDavHandler>();
+        assert!(type_name.contains("WebDavHandler"));
+    }
+
+    #[test]
+    fn test_method_constants_uppercase() {
+        assert!(
+            String::from_utf8_lossy(METHOD_PROPFIND)
+                .chars()
+                .all(|c| c.is_uppercase() || !c.is_alphabetic())
+        );
+        assert!(
+            String::from_utf8_lossy(METHOD_MKCOL)
+                .chars()
+                .all(|c| c.is_uppercase() || !c.is_alphabetic())
+        );
+    }
+
+    #[test]
+    fn test_xml_namespace_dav_protocol() {
+        assert!(XML_NS_DAV.contains("DAV:"));
+    }
+}

@@ -279,6 +279,31 @@ pub struct VersionStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::FileMetadata;
+
+    fn create_test_storage() -> Arc<StorageManager> {
+        Arc::new(StorageManager::new(
+            "./test_storage".into(),
+            4 * 1024 * 1024,
+        ))
+    }
+
+    fn create_test_version_manager(config: VersionConfig) -> Arc<VersionManager> {
+        let storage = create_test_storage();
+        VersionManager::new(storage, config, "./test_storage_versions")
+    }
+
+    fn create_test_metadata(id: &str, name: &str, size: u64) -> FileMetadata {
+        FileMetadata {
+            id: id.to_string(),
+            name: name.to_string(),
+            path: format!("/test/{}", name),
+            size,
+            hash: format!("hash_{}", id),
+            created_at: chrono::Local::now().naive_local(),
+            modified_at: chrono::Local::now().naive_local(),
+        }
+    }
 
     #[test]
     fn test_version_config_default() {
@@ -289,18 +314,182 @@ mod tests {
     }
 
     #[test]
+    fn test_version_config_custom() {
+        let config = VersionConfig {
+            max_versions: 5,
+            retention_days: 7,
+            enabled: false,
+        };
+        assert_eq!(config.max_versions, 5);
+        assert_eq!(config.retention_days, 7);
+        assert!(!config.enabled);
+    }
+
+    #[test]
     fn test_version_path() {
-        let storage = Arc::new(StorageManager::new(
-            "./test_storage".into(),
-            4 * 1024 * 1024,
-        ));
         let config = VersionConfig::default();
-        let manager = VersionManager::new(storage, config, "./test_storage");
+        let manager = create_test_version_manager(config);
 
         let version_id = "test-version-123";
         let path = manager.get_version_path(version_id);
 
         assert!(path.to_str().unwrap().contains("versions"));
         assert!(path.to_str().unwrap().contains(version_id));
+    }
+
+    #[test]
+    fn test_file_version_creation() {
+        let metadata = create_test_metadata("file123", "test.txt", 1024);
+        let version = FileVersion::from_metadata(&metadata, Some("user1".to_string()));
+
+        assert_eq!(version.file_id, "file123");
+        assert_eq!(version.name, "test.txt");
+        assert_eq!(version.size, 1024);
+        assert_eq!(version.hash, "hash_file123");
+        assert_eq!(version.author, Some("user1".to_string()));
+        assert!(version.is_current);
+        assert!(!version.version_id.is_empty());
+    }
+
+    #[test]
+    fn test_file_version_new() {
+        let version = FileVersion::new(
+            "file123".to_string(),
+            "test.txt".to_string(),
+            2048,
+            "hash_abc".to_string(),
+            Some("admin".to_string()),
+            Some("Initial version".to_string()),
+        );
+
+        assert_eq!(version.file_id, "file123");
+        assert_eq!(version.name, "test.txt");
+        assert_eq!(version.size, 2048);
+        assert_eq!(version.hash, "hash_abc");
+        assert_eq!(version.author, Some("admin".to_string()));
+        assert_eq!(version.comment, Some("Initial version".to_string()));
+        assert!(!version.is_current); // new() 默认不是当前版本
+    }
+
+    #[tokio::test]
+    async fn test_version_manager_init() {
+        let config = VersionConfig::default();
+        let manager = create_test_version_manager(config);
+
+        let result = manager.init().await;
+        assert!(result.is_ok());
+
+        // 清理测试目录
+        let _ = tokio::fs::remove_dir_all("./test_storage_versions/versions").await;
+    }
+
+    #[tokio::test]
+    async fn test_version_manager_init_disabled() {
+        let config = VersionConfig {
+            enabled: false,
+            ..Default::default()
+        };
+        let manager = create_test_version_manager(config);
+
+        let result = manager.init().await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_list_versions_empty() {
+        let config = VersionConfig::default();
+        let manager = create_test_version_manager(config);
+
+        let versions = manager.list_versions("file123").await;
+        assert!(versions.is_ok());
+        assert_eq!(versions.unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_get_version_not_found() {
+        let config = VersionConfig::default();
+        let manager = create_test_version_manager(config);
+
+        let result = manager.get_version("non_existent_version").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_version_stats_empty() {
+        let config = VersionConfig::default();
+        let manager = create_test_version_manager(config);
+
+        let stats = manager.get_stats().await;
+        assert_eq!(stats.total_files, 0);
+        assert_eq!(stats.total_versions, 0);
+        assert_eq!(stats.total_size, 0);
+    }
+
+    #[tokio::test]
+    async fn test_restore_version_disabled() {
+        let config = VersionConfig {
+            enabled: false,
+            ..Default::default()
+        };
+        let manager = create_test_version_manager(config);
+
+        let result = manager.restore_version("file123", "version123").await;
+        assert!(result.is_err());
+        if let Err(e) = result {
+            assert!(e.to_string().contains("版本管理未启用"));
+        }
+    }
+
+    #[test]
+    fn test_version_stats_display() {
+        let stats = VersionStats {
+            total_files: 10,
+            total_versions: 50,
+            total_size: 1024 * 1024 * 100, // 100MB
+        };
+
+        assert_eq!(stats.total_files, 10);
+        assert_eq!(stats.total_versions, 50);
+        assert_eq!(stats.total_size, 104_857_600);
+    }
+
+    #[test]
+    fn test_version_config_serialization() {
+        let config = VersionConfig {
+            max_versions: 20,
+            retention_days: 60,
+            enabled: true,
+        };
+
+        // 测试序列化
+        let json = serde_json::to_string(&config).unwrap();
+
+        // 测试反序列化
+        let config2: VersionConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(config2.max_versions, 20);
+        assert_eq!(config2.retention_days, 60);
+        assert!(config2.enabled);
+    }
+
+    #[test]
+    fn test_file_version_serialization() {
+        let version = FileVersion::new(
+            "file123".to_string(),
+            "test.txt".to_string(),
+            2048,
+            "hash_abc".to_string(),
+            Some("admin".to_string()),
+            Some("Test version".to_string()),
+        );
+
+        // 测试序列化
+        let json = serde_json::to_string(&version).unwrap();
+
+        // 测试反序列化
+        let version2: FileVersion = serde_json::from_str(&json).unwrap();
+        assert_eq!(version2.file_id, "file123");
+        assert_eq!(version2.name, "test.txt");
+        assert_eq!(version2.size, 2048);
+        assert_eq!(version2.hash, "hash_abc");
     }
 }

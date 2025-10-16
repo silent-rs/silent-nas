@@ -594,4 +594,273 @@ mod tests {
         assert_eq!(sync1.get_metadata().unwrap().name, "test_v5.txt");
         assert_eq!(sync1.get_metadata().unwrap().size, 1029);
     }
+
+    #[test]
+    fn test_filesync_is_deleted() {
+        let metadata = FileMetadata {
+            id: "test-file-1".to_string(),
+            name: "test.txt".to_string(),
+            path: "/test.txt".to_string(),
+            size: 1024,
+            hash: "abc123".to_string(),
+            created_at: Local::now().naive_local(),
+            modified_at: Local::now().naive_local(),
+        };
+
+        let mut sync = FileSync::new("test-file-1".to_string(), metadata, "node1");
+        assert!(!sync.is_deleted());
+
+        sync.mark_deleted(chrono::Utc::now().timestamp_millis(), "node1");
+        assert!(sync.is_deleted());
+    }
+
+    #[test]
+    fn test_filesync_get_metadata_when_deleted() {
+        let metadata = FileMetadata {
+            id: "test-file-1".to_string(),
+            name: "test.txt".to_string(),
+            path: "/test.txt".to_string(),
+            size: 1024,
+            hash: "abc123".to_string(),
+            created_at: Local::now().naive_local(),
+            modified_at: Local::now().naive_local(),
+        };
+
+        let mut sync = FileSync::new("test-file-1".to_string(), metadata, "node1");
+        assert!(sync.get_metadata().is_some());
+
+        sync.mark_deleted(chrono::Utc::now().timestamp_millis(), "node1");
+        assert!(sync.get_metadata().is_none());
+    }
+
+    #[test]
+    fn test_filesync_debug() {
+        let metadata = FileMetadata {
+            id: "test-file-1".to_string(),
+            name: "test.txt".to_string(),
+            path: "/test.txt".to_string(),
+            size: 1024,
+            hash: "abc123".to_string(),
+            created_at: Local::now().naive_local(),
+            modified_at: Local::now().naive_local(),
+        };
+
+        let sync = FileSync::new("test-file-1".to_string(), metadata, "node1");
+        let debug_str = format!("{:?}", sync);
+        assert!(debug_str.contains("FileSync"));
+        assert!(debug_str.contains("test-file-1"));
+    }
+
+    #[test]
+    fn test_filesync_clone() {
+        let metadata = FileMetadata {
+            id: "test-file-1".to_string(),
+            name: "test.txt".to_string(),
+            path: "/test.txt".to_string(),
+            size: 1024,
+            hash: "abc123".to_string(),
+            created_at: Local::now().naive_local(),
+            modified_at: Local::now().naive_local(),
+        };
+
+        let sync1 = FileSync::new("test-file-1".to_string(), metadata, "node1");
+        let sync2 = sync1.clone();
+
+        assert_eq!(sync1.file_id, sync2.file_id);
+        assert_eq!(sync1.is_deleted(), sync2.is_deleted());
+    }
+
+    #[test]
+    fn test_filesync_serialization() {
+        let metadata = FileMetadata {
+            id: "test-file-1".to_string(),
+            name: "test.txt".to_string(),
+            path: "/test.txt".to_string(),
+            size: 1024,
+            hash: "abc123".to_string(),
+            created_at: Local::now().naive_local(),
+            modified_at: Local::now().naive_local(),
+        };
+
+        let sync = FileSync::new("test-file-1".to_string(), metadata, "node1");
+
+        let json = serde_json::to_string(&sync).unwrap();
+        assert!(json.contains("test-file-1"));
+
+        let deserialized: FileSync = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.file_id, "test-file-1");
+    }
+
+    #[test]
+    fn test_vector_clock_ordering() {
+        let metadata = FileMetadata {
+            id: "test-file-1".to_string(),
+            name: "test.txt".to_string(),
+            path: "/test.txt".to_string(),
+            size: 1024,
+            hash: "abc123".to_string(),
+            created_at: Local::now().naive_local(),
+            modified_at: Local::now().naive_local(),
+        };
+
+        let mut sync1 = FileSync::new("test-file-1".to_string(), metadata.clone(), "node1");
+        let mut sync2 = FileSync::new("test-file-2".to_string(), metadata.clone(), "node2");
+
+        // 初始状态：两个节点互不相关（并发）
+        assert!(sync1.has_conflict(&sync2));
+
+        // 更新 sync1
+        sync1.vector_clock.increment("node1");
+
+        // 合并后不应再有冲突（一个节点领先）
+        sync2.merge(&sync1);
+    }
+
+    #[test]
+    fn test_conflict_resolution_lww() {
+        let early_metadata = FileMetadata {
+            id: "test-file-1".to_string(),
+            name: "early.txt".to_string(),
+            path: "/early.txt".to_string(),
+            size: 1024,
+            hash: "abc123".to_string(),
+            created_at: Local::now().naive_local(),
+            modified_at: Local::now().naive_local(),
+        };
+
+        let late_metadata = FileMetadata {
+            id: "test-file-1".to_string(),
+            name: "late.txt".to_string(),
+            path: "/late.txt".to_string(),
+            size: 2048,
+            hash: "def456".to_string(),
+            created_at: Local::now().naive_local(),
+            modified_at: Local::now().naive_local() + chrono::Duration::seconds(10),
+        };
+
+        let mut sync1 = FileSync::new("test-file-1".to_string(), early_metadata, "node1");
+        let sync2 = FileSync::new("test-file-1".to_string(), late_metadata, "node2");
+
+        sync1.merge(&sync2);
+
+        // LWW 策略应该保留较晚的版本
+        assert_eq!(sync1.get_metadata().unwrap().name, "late.txt");
+        assert_eq!(sync1.get_metadata().unwrap().size, 2048);
+    }
+
+    #[test]
+    fn test_concurrent_updates_different_nodes() {
+        let metadata = FileMetadata {
+            id: "test-file-1".to_string(),
+            name: "test.txt".to_string(),
+            path: "/test.txt".to_string(),
+            size: 1024,
+            hash: "abc123".to_string(),
+            created_at: Local::now().naive_local(),
+            modified_at: Local::now().naive_local(),
+        };
+
+        let sync1 = FileSync::new("test-file-1".to_string(), metadata.clone(), "node1");
+        let sync2 = FileSync::new("test-file-1".to_string(), metadata, "node2");
+
+        // 不同节点的初始状态应该被检测为并发
+        assert!(sync1.has_conflict(&sync2));
+    }
+
+    #[test]
+    fn test_mark_deleted_timestamp() {
+        let metadata = FileMetadata {
+            id: "test-file-1".to_string(),
+            name: "test.txt".to_string(),
+            path: "/test.txt".to_string(),
+            size: 1024,
+            hash: "abc123".to_string(),
+            created_at: Local::now().naive_local(),
+            modified_at: Local::now().naive_local(),
+        };
+
+        let mut sync = FileSync::new("test-file-1".to_string(), metadata, "node1");
+        let timestamp = chrono::Utc::now().timestamp_millis();
+
+        sync.mark_deleted(timestamp, "node1");
+        assert!(sync.is_deleted());
+    }
+
+    #[test]
+    fn test_conflict_info_debug() {
+        let conflict = ConflictInfo {
+            file_id: "test-file-1".to_string(),
+            local_timestamp: 100,
+            remote_timestamp: 200,
+            resolved_by: "LWW".to_string(),
+            timestamp: Local::now().naive_local(),
+        };
+
+        let debug_str = format!("{:?}", conflict);
+        assert!(debug_str.contains("ConflictInfo"));
+        assert!(debug_str.contains("test-file-1"));
+    }
+
+    #[test]
+    fn test_conflict_info_clone() {
+        let conflict1 = ConflictInfo {
+            file_id: "test-file-1".to_string(),
+            local_timestamp: 100,
+            remote_timestamp: 200,
+            resolved_by: "LWW".to_string(),
+            timestamp: Local::now().naive_local(),
+        };
+
+        let conflict2 = conflict1.clone();
+        assert_eq!(conflict1.file_id, conflict2.file_id);
+        assert_eq!(conflict1.local_timestamp, conflict2.local_timestamp);
+    }
+
+    #[test]
+    fn test_filesync_with_special_characters() {
+        let metadata = FileMetadata {
+            id: "文件-123".to_string(),
+            name: "测试文件🔥.txt".to_string(),
+            path: "/path/测试文件🔥.txt".to_string(),
+            size: 1024,
+            hash: "hash_中文".to_string(),
+            created_at: Local::now().naive_local(),
+            modified_at: Local::now().naive_local(),
+        };
+
+        let sync = FileSync::new("文件-123".to_string(), metadata, "节点1");
+        assert_eq!(sync.file_id, "文件-123");
+        assert_eq!(sync.get_metadata().unwrap().name, "测试文件🔥.txt");
+    }
+
+    #[test]
+    fn test_update_metadata_increments_clock() {
+        let metadata1 = FileMetadata {
+            id: "test-file-1".to_string(),
+            name: "test.txt".to_string(),
+            path: "/test.txt".to_string(),
+            size: 1024,
+            hash: "abc123".to_string(),
+            created_at: Local::now().naive_local(),
+            modified_at: Local::now().naive_local(),
+        };
+
+        let metadata2 = FileMetadata {
+            id: "test-file-1".to_string(),
+            name: "test_v2.txt".to_string(),
+            path: "/test_v2.txt".to_string(),
+            size: 2048,
+            hash: "def456".to_string(),
+            created_at: Local::now().naive_local(),
+            modified_at: Local::now().naive_local(),
+        };
+
+        let mut sync = FileSync::new("test-file-1".to_string(), metadata1, "node1");
+        let initial_clock = sync.vector_clock.clone();
+
+        sync.update_metadata(metadata2, "node1");
+
+        // 向量时钟应该递增
+        assert!(sync.vector_clock.get("node1") > initial_clock.get("node1"));
+    }
 }

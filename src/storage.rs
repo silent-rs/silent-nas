@@ -531,4 +531,211 @@ mod tests {
             assert!(storage.read_file(&file_id).await.is_ok());
         }
     }
+
+    #[tokio::test]
+    async fn test_create_bucket() {
+        let (storage, _temp) = create_test_storage();
+        storage.init().await.unwrap();
+
+        let result = storage.create_bucket("test-bucket").await;
+        assert!(result.is_ok());
+
+        assert!(storage.bucket_exists("test-bucket").await);
+    }
+
+    #[tokio::test]
+    async fn test_create_bucket_duplicate() {
+        let (storage, _temp) = create_test_storage();
+        storage.init().await.unwrap();
+
+        storage.create_bucket("test-bucket").await.unwrap();
+        let result = storage.create_bucket("test-bucket").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_delete_bucket() {
+        let (storage, _temp) = create_test_storage();
+        storage.init().await.unwrap();
+
+        storage.create_bucket("test-bucket").await.unwrap();
+        assert!(storage.bucket_exists("test-bucket").await);
+
+        let result = storage.delete_bucket("test-bucket").await;
+        assert!(result.is_ok());
+        assert!(!storage.bucket_exists("test-bucket").await);
+    }
+
+    #[tokio::test]
+    async fn test_delete_nonexistent_bucket() {
+        let (storage, _temp) = create_test_storage();
+        storage.init().await.unwrap();
+
+        let result = storage.delete_bucket("nonexistent").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_delete_nonempty_bucket() {
+        let (storage, _temp) = create_test_storage();
+        storage.init().await.unwrap();
+
+        storage.create_bucket("test-bucket").await.unwrap();
+
+        // 在bucket中添加文件
+        let file_path = "test-bucket/test.txt";
+        storage.save_file(file_path, b"data").await.unwrap();
+
+        let result = storage.delete_bucket("test-bucket").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_bucket_exists() {
+        let (storage, _temp) = create_test_storage();
+        storage.init().await.unwrap();
+
+        assert!(!storage.bucket_exists("test-bucket").await);
+
+        storage.create_bucket("test-bucket").await.unwrap();
+        assert!(storage.bucket_exists("test-bucket").await);
+    }
+
+    #[tokio::test]
+    async fn test_list_buckets() {
+        let (storage, _temp) = create_test_storage();
+        storage.init().await.unwrap();
+
+        let buckets = storage.list_buckets().await.unwrap();
+        assert_eq!(buckets.len(), 0);
+
+        storage.create_bucket("bucket1").await.unwrap();
+        storage.create_bucket("bucket2").await.unwrap();
+        storage.create_bucket("bucket3").await.unwrap();
+
+        let buckets = storage.list_buckets().await.unwrap();
+        assert_eq!(buckets.len(), 3);
+        assert!(buckets.contains(&"bucket1".to_string()));
+        assert!(buckets.contains(&"bucket2".to_string()));
+        assert!(buckets.contains(&"bucket3".to_string()));
+
+        // 应该按字母顺序排序
+        assert_eq!(buckets[0], "bucket1");
+        assert_eq!(buckets[1], "bucket2");
+        assert_eq!(buckets[2], "bucket3");
+    }
+
+    #[tokio::test]
+    async fn test_list_bucket_objects_empty() {
+        let (storage, _temp) = create_test_storage();
+        storage.init().await.unwrap();
+
+        storage.create_bucket("test-bucket").await.unwrap();
+
+        let objects = storage
+            .list_bucket_objects("test-bucket", "")
+            .await
+            .unwrap();
+        assert_eq!(objects.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_list_bucket_objects() {
+        let (storage, _temp) = create_test_storage();
+        storage.init().await.unwrap();
+
+        storage.create_bucket("test-bucket").await.unwrap();
+
+        // 添加文件
+        storage
+            .save_file("test-bucket/file1.txt", b"data1")
+            .await
+            .unwrap();
+        storage
+            .save_file("test-bucket/file2.txt", b"data2")
+            .await
+            .unwrap();
+        storage
+            .save_file("test-bucket/dir/file3.txt", b"data3")
+            .await
+            .unwrap();
+
+        let objects = storage
+            .list_bucket_objects("test-bucket", "")
+            .await
+            .unwrap();
+        assert_eq!(objects.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_list_bucket_objects_with_prefix() {
+        let (storage, _temp) = create_test_storage();
+        storage.init().await.unwrap();
+
+        storage.create_bucket("test-bucket").await.unwrap();
+
+        storage
+            .save_file("test-bucket/docs/file1.txt", b"data1")
+            .await
+            .unwrap();
+        storage
+            .save_file("test-bucket/docs/file2.txt", b"data2")
+            .await
+            .unwrap();
+        storage
+            .save_file("test-bucket/images/file3.png", b"data3")
+            .await
+            .unwrap();
+
+        let objects = storage
+            .list_bucket_objects("test-bucket", "docs")
+            .await
+            .unwrap();
+        assert_eq!(objects.len(), 2);
+        assert!(objects.iter().all(|o| o.starts_with("docs")));
+    }
+
+    #[tokio::test]
+    async fn test_verify_hash_correct() {
+        let (storage, _temp) = create_test_storage();
+        storage.init().await.unwrap();
+
+        let data = b"test data for hash";
+        let metadata = storage.save_file("test_file", data).await.unwrap();
+
+        let valid = storage
+            .verify_hash("test_file", &metadata.hash)
+            .await
+            .unwrap();
+        assert!(valid);
+    }
+
+    #[tokio::test]
+    async fn test_verify_hash_incorrect() {
+        let (storage, _temp) = create_test_storage();
+        storage.init().await.unwrap();
+
+        storage.save_file("test_file", b"test data").await.unwrap();
+
+        let valid = storage
+            .verify_hash("test_file", "wrong_hash")
+            .await
+            .unwrap();
+        assert!(!valid);
+    }
+
+    #[tokio::test]
+    async fn test_bucket_with_special_chars() {
+        let (storage, _temp) = create_test_storage();
+        storage.init().await.unwrap();
+
+        // 测试带特殊字符的bucket名称
+        let bucket_names = vec!["test-bucket", "test_bucket", "test.bucket"];
+
+        for name in bucket_names {
+            let result = storage.create_bucket(name).await;
+            assert!(result.is_ok());
+            assert!(storage.bucket_exists(name).await);
+        }
+    }
 }

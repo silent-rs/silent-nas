@@ -61,3 +61,97 @@ message ListFilesRequest {
 message ListFilesResponse {
   repeated FileMetadata files = 1;
 }
+
+// ========== 跨节点同步服务 ==========
+
+service NodeSyncService {
+  // 节点注册和发现
+  rpc RegisterNode(RegisterNodeRequest) returns (RegisterNodeResponse);
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+  rpc ListNodes(ListNodesRequest) returns (ListNodesResponse);
+
+  // 文件同步
+  rpc SyncFileState(SyncFileStateRequest) returns (SyncFileStateResponse);
+  rpc RequestFileSync(RequestFileSyncRequest) returns (RequestFileSyncResponse);
+  rpc GetSyncStatus(GetSyncStatusRequest) returns (GetSyncStatusResponse);
+}
+
+// 节点信息
+message NodeInfo {
+  string node_id = 1;
+  string address = 2;
+  int64 last_seen = 3;
+  string version = 4;
+  map<string, string> metadata = 5;
+}
+
+// 节点注册
+message RegisterNodeRequest {
+  NodeInfo node = 1;
+}
+
+message RegisterNodeResponse {
+  bool success = 1;
+  repeated NodeInfo known_nodes = 2;
+}
+
+// 心跳
+message HeartbeatRequest {
+  string node_id = 1;
+  int64 timestamp = 2;
+}
+
+message HeartbeatResponse {
+  bool alive = 1;
+  int64 server_timestamp = 2;
+}
+
+// 列出节点
+message ListNodesRequest {}
+
+message ListNodesResponse {
+  repeated NodeInfo nodes = 1;
+}
+
+// 文件同步状态
+message FileSyncState {
+  string file_id = 1;
+  FileMetadata metadata = 2;
+  bool deleted = 3;
+  string vector_clock = 4;  // JSON 序列化的向量时钟
+  int64 timestamp = 5;
+}
+
+// 同步文件状态
+message SyncFileStateRequest {
+  string source_node_id = 1;
+  repeated FileSyncState states = 2;
+}
+
+message SyncFileStateResponse {
+  bool success = 1;
+  repeated string conflicts = 2;  // 冲突的文件 ID
+}
+
+// 请求文件同步
+message RequestFileSyncRequest {
+  string node_id = 1;
+  repeated string file_ids = 2;  // 需要同步的文件 ID 列表
+}
+
+message RequestFileSyncResponse {
+  bool success = 1;
+  int32 synced_count = 2;
+}
+
+// 获取同步状态
+message GetSyncStatusRequest {
+  string node_id = 1;
+}
+
+message GetSyncStatusResponse {
+  int32 total_files = 1;
+  int32 synced_files = 2;
+  int32 pending_files = 3;
+  int64 last_sync_time = 4;
+}

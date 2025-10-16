@@ -2,6 +2,7 @@ mod auth;
 mod config;
 mod error;
 mod models;
+mod node_sync;
 mod notify;
 mod rpc;
 mod s3;

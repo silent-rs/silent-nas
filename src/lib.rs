@@ -6,6 +6,7 @@ pub mod error;
 pub mod models;
 pub mod notify;
 pub mod s3;
+pub mod search;
 pub mod storage;
 pub mod version;
 

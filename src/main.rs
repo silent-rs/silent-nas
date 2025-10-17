@@ -79,6 +79,9 @@ async fn main() -> Result<()> {
         .unwrap_or_else(|| config.server.host.clone());
     let source_http_addr = format!("http://{}:{}", advertise_host, config.server.http_port);
 
+    // 创建退出信号通道
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+
     // 启动事件监听器（仅在 NATS 连接成功时）
     if let Some(ref nats_notifier) = notifier {
         let event_listener = EventListener::new(
@@ -88,9 +91,17 @@ async fn main() -> Result<()> {
             storage.clone(),
             config.storage.chunk_size,
         );
+        let mut shutdown_rx_clone = shutdown_rx.clone();
         tokio::spawn(async move {
-            if let Err(e) = event_listener.start().await {
-                error!("事件监听器错误: {}", e);
+            tokio::select! {
+                result = event_listener.start() => {
+                    if let Err(e) = result {
+                        error!("事件监听器错误: {}", e);
+                    }
+                }
+                _ = shutdown_rx_clone.changed() => {
+                    info!("事件监听器收到退出信号");
+                }
             }
         });
         info!("事件监听器已启动");
@@ -124,40 +135,48 @@ async fn main() -> Result<()> {
     // 启动定期巡检补拉任务
     let storage_reconcile = storage.clone();
     let sync_reconcile = sync_manager.clone();
+    let mut shutdown_rx_reconcile = shutdown_rx.clone();
     tokio::spawn(async move {
         use tokio::time::{Duration, sleep};
         loop {
-            sleep(Duration::from_secs(30)).await;
-            let states = sync_reconcile.get_all_sync_states().await;
-            for st in states {
-                if st.is_deleted() {
-                    continue;
-                }
-                if let Some(meta) = st.get_metadata().cloned() {
-                    let need_fetch = match storage_reconcile.get_metadata(&st.file_id).await {
-                        Ok(local) => local.hash != meta.hash || local.size != meta.size,
-                        Err(_) => true,
-                    };
-                    if need_fetch
-                        && let Some(src) = sync_reconcile.get_last_source(&st.file_id).await
-                    {
-                        let url = format!("{}/api/files/{}", src.trim_end_matches('/'), st.file_id);
-                        match reqwest::get(&url).await {
-                            Ok(resp) if resp.status().is_success() => {
-                                if let Ok(bytes) = resp.bytes().await {
-                                    if let Err(e) =
-                                        storage_reconcile.save_file(&st.file_id, &bytes).await
-                                    {
-                                        error!("补拉保存失败: {} - {}", st.file_id, e);
-                                    } else {
-                                        info!("📥 补拉已完成: {}", st.file_id);
+            tokio::select! {
+                _ = sleep(Duration::from_secs(30)) => {
+                    let states = sync_reconcile.get_all_sync_states().await;
+                    for st in states {
+                        if st.is_deleted() {
+                            continue;
+                        }
+                        if let Some(meta) = st.get_metadata().cloned() {
+                            let need_fetch = match storage_reconcile.get_metadata(&st.file_id).await {
+                                Ok(local) => local.hash != meta.hash || local.size != meta.size,
+                                Err(_) => true,
+                            };
+                            if need_fetch
+                                && let Some(src) = sync_reconcile.get_last_source(&st.file_id).await
+                            {
+                                let url = format!("{}/api/files/{}", src.trim_end_matches('/'), st.file_id);
+                                match reqwest::get(&url).await {
+                                    Ok(resp) if resp.status().is_success() => {
+                                        if let Ok(bytes) = resp.bytes().await {
+                                            if let Err(e) =
+                                                storage_reconcile.save_file(&st.file_id, &bytes).await
+                                            {
+                                                error!("补拉保存失败: {} - {}", st.file_id, e);
+                                            } else {
+                                                info!("📥 补拉已完成: {}", st.file_id);
+                                            }
+                                        }
                                     }
+                                    Ok(resp) => warn!("补拉HTTP失败: {} - {}", st.file_id, resp.status()),
+                                    Err(e) => warn!("补拉请求失败: {} - {}", st.file_id, e),
                                 }
                             }
-                            Ok(resp) => warn!("补拉HTTP失败: {} - {}", st.file_id, resp.status()),
-                            Err(e) => warn!("补拉请求失败: {} - {}", st.file_id, e),
                         }
                     }
+                }
+                _ = shutdown_rx_reconcile.changed() => {
+                    info!("巡检补拉任务收到退出信号");
+                    break;
                 }
             }
         }
@@ -277,6 +296,14 @@ async fn main() -> Result<()> {
         tokio::signal::ctrl_c().await.expect("监听 Ctrl+C 失败");
         info!("收到关闭信号，正在退出...");
     }
+
+    // 发送退出信号给所有后台任务
+    let _ = shutdown_tx.send(true);
+    info!("已通知所有后台任务退出");
+
+    // 等待一小段时间让任务清理
+    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+    info!("应用已退出");
 
     Ok(())
 }

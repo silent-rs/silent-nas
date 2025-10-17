@@ -7,6 +7,7 @@ mod models;
 mod notify;
 mod rpc;
 mod s3;
+mod search;
 mod storage;
 mod sync;
 mod transfer;
@@ -71,6 +72,11 @@ async fn main() -> Result<()> {
     version_manager.init().await?;
     info!("版本管理器已初始化");
 
+    // 初始化搜索引擎
+    let index_path = std::path::PathBuf::from(&config.storage.root_path).join("index");
+    let search_engine = Arc::new(crate::search::SearchEngine::new(index_path)?);
+    info!("搜索引擎已初始化");
+
     // 计算对外 HTTP 基址（优先 ADVERTISE_HOST，否则容器 HOSTNAME），用于事件携带源地址
     let advertise_host = std::env::var("ADVERTISE_HOST")
         .ok()
@@ -118,6 +124,7 @@ async fn main() -> Result<()> {
     let notifier_clone = notifier.clone();
     let sync_clone = sync_manager.clone();
     let version_clone = version_manager.clone();
+    let search_clone = search_engine.clone();
     // source_http_addr 已用于 HTTP/WebDAV/S3 三处，不再单独复制
 
     let http_handle = tokio::spawn(async move {
@@ -127,6 +134,7 @@ async fn main() -> Result<()> {
             notifier_clone,
             sync_clone,
             version_clone,
+            search_clone,
         )
         .await
         {

@@ -5,6 +5,7 @@
 use crate::error::Result;
 use crate::models::{EventType, FileEvent};
 use crate::notify::EventNotifier;
+use crate::search::SearchEngine;
 use crate::storage::StorageManager;
 use crate::version::VersionManager;
 use http::StatusCode;
@@ -26,6 +27,19 @@ use crate::sync::crdt::SyncManager;
 #[cfg(test)]
 use crate::sync::incremental::{FileSignature, IncrementalSyncHandler, api};
 
+/// 解析查询参数
+fn parse_query_param(uri: &http::Uri, key: &str) -> Option<String> {
+    uri.query()?.split('&').find_map(|pair| {
+        let mut parts = pair.splitn(2, '=');
+        if parts.next()? == key {
+            let value = parts.next()?;
+            Some(urlencoding::decode(value).ok()?.to_string())
+        } else {
+            None
+        }
+    })
+}
+
 /// 启动 HTTP 服务器（使用 Silent 框架）
 pub async fn start_http_server(
     addr: &str,
@@ -33,6 +47,7 @@ pub async fn start_http_server(
     notifier: Option<EventNotifier>,
     sync_manager: Arc<SyncManager>,
     version_manager: Arc<VersionManager>,
+    search_engine: Arc<SearchEngine>,
 ) -> Result<()> {
     let storage = Arc::new(storage);
     let notifier = notifier.map(Arc::new);
@@ -51,6 +66,7 @@ pub async fn start_http_server(
     // 上传文件
     let storage_upload = storage.clone();
     let notifier_upload = notifier.clone();
+    let search_upload = search_engine.clone();
     let advertise_host = std::env::var("ADVERTISE_HOST")
         .ok()
         .or_else(|| std::env::var("HOSTNAME").ok())
@@ -64,6 +80,7 @@ pub async fn start_http_server(
     let upload = move |mut req: Request| {
         let storage = storage_upload.clone();
         let notifier = notifier_upload.clone();
+        let search = search_upload.clone();
         let src_http = source_http_addr.clone();
         async move {
             let file_id = scru128::new_string();
@@ -96,6 +113,11 @@ pub async fn start_http_server(
                     format!("保存文件失败: {}", e),
                 )
             })?;
+
+            // 索引文件到搜索引擎
+            if let Err(e) = search.index_file(&metadata).await {
+                tracing::warn!("索引文件失败: {} - {}", file_id, e);
+            }
 
             let mut event =
                 FileEvent::new(EventType::Created, file_id.clone(), Some(metadata.clone()));
@@ -136,9 +158,11 @@ pub async fn start_http_server(
     // 删除文件
     let storage_delete = storage.clone();
     let notifier_delete = notifier.clone();
+    let search_delete = search_engine.clone();
     let delete = move |req: Request| {
         let storage = storage_delete.clone();
         let notifier = notifier_delete.clone();
+        let search = search_delete.clone();
         async move {
             let file_id: String = req.get_path_params("id")?;
 
@@ -148,6 +172,11 @@ pub async fn start_http_server(
                     format!("删除文件失败: {}", e),
                 )
             })?;
+
+            // 从搜索引擎删除索引
+            if let Err(e) = search.delete_file(&file_id).await {
+                tracing::warn!("删除索引失败: {} - {}", file_id, e);
+            }
 
             let event = FileEvent::new(EventType::Deleted, file_id, None);
             if let Some(ref n) = notifier {
@@ -370,6 +399,62 @@ pub async fn start_http_server(
         }
     };
 
+    // 搜索 API
+    let search_query = search_engine.clone();
+    let search_files = move |req: Request| {
+        let search = search_query.clone();
+        async move {
+            // 获取查询参数
+            let query = parse_query_param(req.uri(), "q").unwrap_or_default();
+
+            let limit: usize = parse_query_param(req.uri(), "limit")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(20);
+
+            let offset: usize = parse_query_param(req.uri(), "offset")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0);
+
+            if query.is_empty() {
+                return Err(SilentError::business_error(
+                    StatusCode::BAD_REQUEST,
+                    "搜索查询不能为空",
+                ));
+            }
+
+            let results = search.search(&query, limit, offset).await.map_err(|e| {
+                SilentError::business_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("搜索失败: {}", e),
+                )
+            })?;
+
+            Ok(serde_json::to_value(results).unwrap())
+        }
+    };
+
+    let search_stats = search_engine.clone();
+    let get_search_stats = move |_req: Request| {
+        let search = search_stats.clone();
+        async move {
+            let stats = search.get_stats();
+            Ok(serde_json::to_value(stats).unwrap())
+        }
+    };
+
+    // 定期提交索引
+    let search_commit = search_engine.clone();
+    tokio::spawn(async move {
+        use tokio::time::{Duration, interval};
+        let mut timer = interval(Duration::from_secs(30));
+        loop {
+            timer.tick().await;
+            if let Err(e) = search_commit.commit().await {
+                tracing::warn!("定期提交索引失败: {}", e);
+            }
+        }
+    });
+
     let route = Route::new_root().append(
         Route::new("api")
             .append(Route::new("files").post(upload).get(list))
@@ -387,6 +472,8 @@ pub async fn start_http_server(
             .append(Route::new("sync/conflicts").get(get_conflicts))
             .append(Route::new("sync/signature/<id>").get(get_file_signature))
             .append(Route::new("sync/delta/<id>").post(get_file_delta))
+            .append(Route::new("search").get(search_files))
+            .append(Route::new("search/stats").get(get_search_stats))
             .append(Route::new("health").get(health)),
     );
 

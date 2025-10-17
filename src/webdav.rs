@@ -15,6 +15,10 @@ const METHOD_PROPFIND: &[u8] = b"PROPFIND";
 const METHOD_MKCOL: &[u8] = b"MKCOL";
 const METHOD_MOVE: &[u8] = b"MOVE";
 const METHOD_COPY: &[u8] = b"COPY";
+#[allow(dead_code)]
+const METHOD_VERSION_CONTROL: &[u8] = b"VERSION-CONTROL";
+#[allow(dead_code)]
+const METHOD_REPORT: &[u8] = b"REPORT";
 
 // WebDAV XML 命名空间
 const XML_HEADER: &str = r#"<?xml version="1.0" encoding="utf-8"?>"#;
@@ -23,8 +27,9 @@ const XML_MULTISTATUS_END: &str = "</D:multistatus>";
 
 // HTTP 头常量
 const HEADER_DAV: &str = "dav";
-const HEADER_DAV_VALUE: &str = "1, 2";
-const HEADER_ALLOW_VALUE: &str = "OPTIONS, GET, HEAD, PUT, DELETE, PROPFIND, MKCOL, MOVE, COPY";
+const HEADER_DAV_VALUE: &str = "1, 2, version-control";
+const HEADER_ALLOW_VALUE: &str =
+    "OPTIONS, GET, HEAD, PUT, DELETE, PROPFIND, MKCOL, MOVE, COPY, VERSION-CONTROL, REPORT";
 const CONTENT_TYPE_XML: &str = "application/xml; charset=utf-8";
 const CONTENT_TYPE_HTML: &str = "text/html; charset=utf-8";
 
@@ -36,6 +41,8 @@ pub struct WebDavHandler {
     pub sync_manager: Arc<SyncManager>,
     pub base_path: String,
     pub source_http_addr: String,
+    #[allow(dead_code)]
+    pub version_manager: Arc<crate::version::VersionManager>,
 }
 
 impl WebDavHandler {
@@ -45,6 +52,7 @@ impl WebDavHandler {
         sync_manager: Arc<SyncManager>,
         base_path: String,
         source_http_addr: String,
+        version_manager: Arc<crate::version::VersionManager>,
     ) -> Self {
         Self {
             storage,
@@ -52,6 +60,7 @@ impl WebDavHandler {
             sync_manager,
             base_path,
             source_http_addr,
+            version_manager,
         }
     }
 
@@ -696,6 +705,7 @@ pub fn create_webdav_routes(
     notifier: Arc<EventNotifier>,
     sync_manager: Arc<SyncManager>,
     source_http_addr: String,
+    version_manager: Arc<crate::version::VersionManager>,
 ) -> Route {
     let handler = Arc::new(WebDavHandler::new(
         storage,
@@ -703,6 +713,7 @@ pub fn create_webdav_routes(
         sync_manager,
         "".to_string(),
         source_http_addr,
+        version_manager,
     ));
 
     // 将 WebDAV 服务挂载在根路径，客户端直接以根访问
@@ -734,9 +745,11 @@ mod tests {
     #[test]
     fn test_header_constants() {
         assert_eq!(HEADER_DAV, "dav");
-        assert_eq!(HEADER_DAV_VALUE, "1, 2");
+        assert_eq!(HEADER_DAV_VALUE, "1, 2, version-control");
         assert!(HEADER_ALLOW_VALUE.contains("OPTIONS"));
         assert!(HEADER_ALLOW_VALUE.contains("PROPFIND"));
+        assert!(HEADER_ALLOW_VALUE.contains("VERSION-CONTROL"));
+        assert!(HEADER_ALLOW_VALUE.contains("REPORT"));
     }
 
     #[test]

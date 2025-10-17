@@ -214,9 +214,24 @@ impl S3Service {
             );
         }
 
-        // 生成XML响应（默认未启用版本控制）
-        let xml = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
-                   <VersioningConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"/>";
+        // 获取版本控制配置
+        let versioning = self.versioning_manager.get_versioning(&bucket).await;
+        let status = versioning.status.to_string();
+
+        // 生成XML响应
+        let xml = if status.is_empty() {
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+             <VersioningConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"/>"
+                .to_string()
+        } else {
+            format!(
+                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+                 <VersioningConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\n\
+                   <Status>{}</Status>\n\
+                 </VersioningConfiguration>",
+                status
+            )
+        };
 
         let mut resp = Response::empty();
         resp.headers_mut().insert(
@@ -227,7 +242,64 @@ impl S3Service {
             "x-amz-request-id",
             http::HeaderValue::from_static("silent-nas-014"),
         );
-        resp.set_body(full(xml.to_string().into_bytes()));
+        resp.set_body(full(xml.into_bytes()));
+        resp.set_status(StatusCode::OK);
+
+        Ok(resp)
+    }
+
+    /// PutBucketVersioning - 设置bucket版本控制状态
+    pub async fn put_bucket_versioning(&self, req: Request) -> silent::Result<Response> {
+        if !self.verify_request(&req) {
+            return self.error_response(StatusCode::FORBIDDEN, "AccessDenied", "Access Denied");
+        }
+
+        let bucket: String = req.get_path_params("bucket")?;
+
+        debug!("PutBucketVersioning: bucket={}", bucket);
+
+        // 检查bucket是否存在
+        if !self.storage.bucket_exists(&bucket).await {
+            return self.error_response(
+                StatusCode::NOT_FOUND,
+                "NoSuchBucket",
+                "The specified bucket does not exist",
+            );
+        }
+
+        // 读取请求体
+        let body = Self::read_body(req).await?;
+        let body_str = String::from_utf8(body)
+            .map_err(|_| SilentError::business_error(StatusCode::BAD_REQUEST, "请求体格式错误"))?;
+
+        debug!("PutBucketVersioning body: {}", body_str);
+
+        // 解析XML获取Status
+        use crate::s3::versioning::VersioningStatus;
+        let status = if body_str.contains("<Status>Enabled</Status>") {
+            VersioningStatus::Enabled
+        } else if body_str.contains("<Status>Suspended</Status>") {
+            VersioningStatus::Suspended
+        } else {
+            return self.error_response(
+                StatusCode::BAD_REQUEST,
+                "MalformedXML",
+                "Invalid versioning status",
+            );
+        };
+
+        // 设置版本控制状态
+        self.versioning_manager
+            .set_versioning(&bucket, status)
+            .await;
+
+        debug!("Bucket versioning updated: {}", bucket);
+
+        let mut resp = Response::empty();
+        resp.headers_mut().insert(
+            "x-amz-request-id",
+            http::HeaderValue::from_static("silent-nas-015"),
+        );
         resp.set_status(StatusCode::OK);
 
         Ok(resp)

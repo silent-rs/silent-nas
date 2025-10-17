@@ -39,7 +39,7 @@ Silent-NAS 是 Silent Odyssey 第六阶段的实验项目，旨在构建一个�
 - ✅ 并发更新保护（412 Precondition Failed）
 - ✅ 分片上传支持（Multipart Upload，大文件>5GB）
 - ✅ 跨节点文件同步（事件驱动 + 内容拉取）
-- 🚧 文件版本管理与冲突处理（规划中）
+- ✅ 文件版本管理（已完成，包含 HTTP API）
 - ❌ 元数据索引与全文检索（后续阶段）
 
 ### 分布式与高级特性
@@ -92,6 +92,13 @@ docs/
   - 版本恢复: 回退到指定历史版本
   - 版本清理: 自动清理过期和超量版本
   - 版本统计: 文件数、版本数、存储占用
+  - HTTP API: GET/DELETE /api/files/{id}/versions, POST /api/files/{id}/versions/{version_id}/restore, GET /api/versions/stats
+- **sync/incremental/**: 增量同步模块
+  - 文件块签名计算: SHA256强哈希 + Adler-32弱哈希
+  - 块级差异检测: 识别文件变化的块
+  - 增量传输: 仅传输变化的块
+  - 自动回退: 失败时自动使用全量下载
+  - HTTP API: GET /api/sync/signature/{id}, POST /api/sync/delta/{id}
 
 ## 快速开始
 

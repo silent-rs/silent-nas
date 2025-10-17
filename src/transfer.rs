@@ -67,7 +67,7 @@ impl QuicTransferServer {
             .map_err(|e| NasError::Transfer(format!("生成证书失败: {}", e)))?;
 
         let cert_der = CertificateDer::from(cert.cert);
-        let key_der = PrivateKeyDer::try_from(cert.key_pair.serialize_der())
+        let key_der = PrivateKeyDer::try_from(cert.signing_key.serialize_der())
             .map_err(|e| NasError::Transfer(format!("序列化私钥失败: {}", e)))?;
 
         let mut server_config = ServerConfig::with_single_cert(vec![cert_der], key_der)
@@ -398,7 +398,7 @@ mod tests {
 
         let cert = cert_result.unwrap();
         let cert_der = cert.cert.der();
-        let key_der = cert.key_pair.serialize_der();
+        let key_der = cert.signing_key.serialize_der();
 
         assert!(!cert_der.is_empty());
         assert!(!key_der.is_empty());

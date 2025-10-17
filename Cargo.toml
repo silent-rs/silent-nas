@@ -3,6 +3,14 @@ name = "silent-nas"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+name = "silent_nas"
+path = "src/lib.rs"
+
+[[bin]]
+name = "silent-nas"
+path = "src/main.rs"
+
 [dependencies]
 silent = { path = "./silent/silent" }
 silent-crdt = { path = "./silent-crdt" }
@@ -14,7 +22,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 chrono = { version = "0.4", features = ["serde"] }
 scru128 = "3"
-async-nats = "0.37"
+async-nats = "0.44"
 futures-util = "0.3"
 sha2 = "0.10"
 hex = "0.4"
@@ -22,21 +30,25 @@ anyhow = "1"
 thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-toml = "0.8"
+toml = "0.9"
 async-trait = "0.1"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "rustls-tls",
+] }
 
 # QUIC support
 quinn = "0.11"
 rustls = "0.23"
-rcgen = "0.13"
+rcgen = "0.14"
 
 # gRPC support
-tonic = "0.12"
-prost = "0.13"
+tonic = "0.14"
+prost = "0.14"
+tonic-prost = "0.14"
 
 # WebDAV support
-quick-xml = { version = "0.36", features = ["serialize"] }
+quick-xml = { version = "0.38", features = ["serialize"] }
 mime_guess = "2"
 urlencoding = "2"
 
@@ -44,7 +56,7 @@ urlencoding = "2"
 hmac = "0.12"
 
 [build-dependencies]
-tonic-build = "0.12"
+tonic-prost-build = "0.14"
 
 [dev-dependencies]
 tempfile = "3"

@@ -185,6 +185,7 @@ async fn main() -> Result<()> {
     let storage_webdav = storage.clone();
     let notifier_webdav = notifier.clone();
     let sync_webdav = sync_manager.clone();
+    let version_webdav = version_manager.clone();
 
     tokio::spawn(async move {
         let webdav_base = format!(
@@ -202,12 +203,17 @@ async fn main() -> Result<()> {
             notifier_webdav,
             sync_webdav,
             webdav_base,
+            version_webdav,
         )
         .await
         {
             error!("WebDAV 服务器错误: {}", e);
         }
     });
+
+    // 初始化 S3 版本控制管理器
+    let s3_versioning_manager = Arc::new(s3::VersioningManager::new());
+    info!("S3 版本控制管理器已初始化");
 
     // 启动 S3 服务器
     let s3_addr = format!("{}:{}", config.server.host, config.server.s3_port);
@@ -216,6 +222,8 @@ async fn main() -> Result<()> {
     let notifier_s3 = notifier.clone();
     let s3_config = config.s3.clone();
     let source_http_addr_for_s3 = source_http_addr.clone();
+    let s3_versioning_clone = s3_versioning_manager.clone();
+    let version_s3 = version_manager.clone();
 
     tokio::spawn(async move {
         if let Err(e) = start_s3_server(
@@ -224,6 +232,8 @@ async fn main() -> Result<()> {
             notifier_s3,
             s3_config,
             source_http_addr_for_s3,
+            s3_versioning_clone,
+            version_s3,
         )
         .await
         {
@@ -663,11 +673,18 @@ async fn start_webdav_server(
     notifier: EventNotifier,
     sync_manager: Arc<SyncManager>,
     source_http_addr: String,
+    version_manager: Arc<VersionManager>,
 ) -> Result<()> {
     let storage = Arc::new(storage);
     let notifier = Arc::new(notifier);
 
-    let route = webdav::create_webdav_routes(storage, notifier, sync_manager, source_http_addr);
+    let route = webdav::create_webdav_routes(
+        storage,
+        notifier,
+        sync_manager,
+        source_http_addr,
+        version_manager,
+    );
 
     info!("WebDAV 服务器启动: {}", addr);
     info!("  - WebDAV: http://{}/webdav", addr);
@@ -687,6 +704,8 @@ async fn start_s3_server(
     notifier: EventNotifier,
     s3_config: config::S3Config,
     source_http_addr: String,
+    versioning_manager: Arc<s3::VersioningManager>,
+    version_manager: Arc<VersionManager>,
 ) -> Result<()> {
     let storage = Arc::new(storage);
     let notifier = Arc::new(notifier);
@@ -698,7 +717,14 @@ async fn start_s3_server(
         None
     };
 
-    let route = s3::create_s3_routes(storage, notifier, auth, source_http_addr.clone());
+    let route = s3::create_s3_routes(
+        storage,
+        notifier,
+        auth,
+        source_http_addr.clone(),
+        versioning_manager,
+        version_manager,
+    );
 
     info!("S3 服务器启动: {}", addr);
     info!("  - S3 API: http://{}/", addr);

@@ -22,7 +22,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 chrono = { version = "0.4", features = ["serde"] }
 scru128 = "3"
-async-nats = "0.37"
+async-nats = "0.44"
 futures-util = "0.3"
 sha2 = "0.10"
 hex = "0.4"
@@ -30,21 +30,24 @@ anyhow = "1"
 thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-toml = "0.8"
+toml = "0.9"
 async-trait = "0.1"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "rustls-tls",
+] }
 
 # QUIC support
 quinn = "0.11"
 rustls = "0.23"
-rcgen = "0.13"
+rcgen = "0.14"
 
 # gRPC support
 tonic = "0.12"
 prost = "0.13"
 
 # WebDAV support
-quick-xml = { version = "0.36", features = ["serialize"] }
+quick-xml = { version = "0.38", features = ["serialize"] }
 mime_guess = "2"
 urlencoding = "2"
 

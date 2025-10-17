@@ -3,6 +3,14 @@ name = "silent-nas"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+name = "silent_nas"
+path = "src/lib.rs"
+
+[[bin]]
+name = "silent-nas"
+path = "src/main.rs"
+
 [dependencies]
 silent = { path = "./silent/silent" }
 silent-crdt = { path = "./silent-crdt" }

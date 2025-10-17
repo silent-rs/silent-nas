@@ -31,7 +31,7 @@ impl VersioningStatus {
     }
 
     #[allow(dead_code)]
-    pub fn from_str(s: &str) -> Self {
+    pub fn parse(s: &str) -> Self {
         match s {
             "Enabled" => Self::Enabled,
             "Suspended" => Self::Suspended,
@@ -64,11 +64,17 @@ pub struct VersioningManager {
     configs: Arc<RwLock<HashMap<String, BucketVersioning>>>,
 }
 
-impl VersioningManager {
-    pub fn new() -> Self {
+impl Default for VersioningManager {
+    fn default() -> Self {
         Self {
             configs: Arc::new(RwLock::new(HashMap::new())),
         }
+    }
+}
+
+impl VersioningManager {
+    pub fn new() -> Self {
+        Self::default()
     }
 
     /// 获取 bucket 的版本控制配置
@@ -109,18 +115,18 @@ mod tests {
     }
 
     #[test]
-    fn test_versioning_status_from_str() {
+    fn test_versioning_status_parse() {
         assert_eq!(
-            VersioningStatus::from_str("Enabled"),
+            VersioningStatus::parse("Enabled"),
             VersioningStatus::Enabled
         );
         assert_eq!(
-            VersioningStatus::from_str("Suspended"),
+            VersioningStatus::parse("Suspended"),
             VersioningStatus::Suspended
         );
-        assert_eq!(VersioningStatus::from_str(""), VersioningStatus::Disabled);
+        assert_eq!(VersioningStatus::parse(""), VersioningStatus::Disabled);
         assert_eq!(
-            VersioningStatus::from_str("Unknown"),
+            VersioningStatus::parse("Unknown"),
             VersioningStatus::Disabled
         );
     }

@@ -1,7 +1,9 @@
 use crate::notify::EventNotifier;
 use crate::s3::auth::S3Auth;
 use crate::s3::models::MultipartUpload;
+use crate::s3::versioning::VersioningManager;
 use crate::storage::StorageManager;
+use crate::version::VersionManager;
 use silent::prelude::*;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -13,6 +15,8 @@ pub struct S3Service {
     pub(crate) auth: Option<S3Auth>,
     pub(crate) multipart_uploads: Arc<RwLock<HashMap<String, MultipartUpload>>>,
     pub(crate) source_http_addr: String,
+    pub(crate) versioning_manager: Arc<VersioningManager>,
+    pub(crate) version_manager: Arc<VersionManager>,
 }
 
 impl S3Service {
@@ -21,6 +25,8 @@ impl S3Service {
         notifier: Arc<EventNotifier>,
         auth: Option<S3Auth>,
         source_http_addr: String,
+        versioning_manager: Arc<VersioningManager>,
+        version_manager: Arc<VersionManager>,
     ) -> Self {
         Self {
             storage,
@@ -28,6 +34,8 @@ impl S3Service {
             auth,
             multipart_uploads: Arc::new(RwLock::new(HashMap::new())),
             source_http_addr,
+            versioning_manager,
+            version_manager,
         }
     }
 

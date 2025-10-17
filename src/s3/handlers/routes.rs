@@ -1,7 +1,9 @@
 use crate::notify::EventNotifier;
 use crate::s3::auth::S3Auth;
 use crate::s3::service::S3Service;
+use crate::s3::versioning::VersioningManager;
 use crate::storage::StorageManager;
+use crate::version::VersionManager;
 use http::Method;
 use http::StatusCode;
 use silent::prelude::*;
@@ -14,8 +16,17 @@ pub fn create_s3_routes(
     notifier: Arc<EventNotifier>,
     auth: Option<S3Auth>,
     source_http_addr: String,
+    versioning_manager: Arc<VersioningManager>,
+    version_manager: Arc<VersionManager>,
 ) -> Route {
-    let service = Arc::new(S3Service::new(storage, notifier, auth, source_http_addr));
+    let service = Arc::new(S3Service::new(
+        storage,
+        notifier,
+        auth,
+        source_http_addr,
+        versioning_manager,
+        version_manager,
+    ));
 
     // Bucket操作 - 合并GET和HEAD
     let service_bucket = service.clone();
@@ -33,6 +44,8 @@ pub fn create_s3_routes(
                         service.get_bucket_location(req).await
                     } else if query.contains("versioning") {
                         service.get_bucket_versioning(req).await
+                    } else if query.contains("versions") {
+                        service.list_object_versions(req).await
                     } else {
                         service.list_objects(req).await
                     }
@@ -53,7 +66,15 @@ pub fn create_s3_routes(
     let service_put_bucket = service.clone();
     let put_bucket = move |req: Request| {
         let service = service_put_bucket.clone();
-        async move { service.put_bucket(req).await }
+        async move {
+            // 检查是否是 PutBucketVersioning 请求
+            let query = req.uri().query().unwrap_or("");
+            if query.contains("versioning") {
+                service.put_bucket_versioning(req).await
+            } else {
+                service.put_bucket(req).await
+            }
+        }
     };
 
     let service_delete_bucket = service.clone();

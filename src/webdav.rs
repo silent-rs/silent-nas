@@ -712,8 +712,9 @@ pub fn create_webdav_routes(
         source_http_addr,
     ));
 
-    let root_route = register_webdav_methods(Route::new(""), handler.clone());
-    let path_route = register_webdav_methods(Route::new("<path:**>"), handler);
+    // 将 WebDAV 服务挂载在 /webdav 前缀下，避免客户端在根目录看到一个名为"webdav"的目录
+    let root_route = register_webdav_methods(Route::new("webdav"), handler.clone());
+    let path_route = register_webdav_methods(Route::new("webdav/<path:**>"), handler);
 
     root_route.append(path_route)
 }

@@ -21,7 +21,7 @@ pub struct FileMetadata {
 }
 
 /// 文件事件类型
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EventType {
     Created,

@@ -55,6 +55,9 @@ urlencoding = "2"
 # S3 support
 hmac = "0.12"
 
+# Search engine
+tantivy = "0.22"
+
 [build-dependencies]
 tonic-prost-build = "0.14"
 

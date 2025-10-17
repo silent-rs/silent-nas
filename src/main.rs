@@ -2,10 +2,12 @@ mod auth;
 mod config;
 mod error;
 mod event_listener;
+mod http;
 mod models;
 mod notify;
 mod rpc;
 mod s3;
+mod search;
 mod storage;
 mod sync;
 mod transfer;
@@ -15,8 +17,6 @@ mod webdav;
 use config::Config;
 use error::Result;
 use event_listener::EventListener;
-use http_body_util::BodyExt;
-use models::{EventType, FileEvent};
 use notify::EventNotifier;
 use rpc::FileServiceImpl;
 use silent::prelude::*;
@@ -72,6 +72,11 @@ async fn main() -> Result<()> {
     version_manager.init().await?;
     info!("版本管理器已初始化");
 
+    // 初始化搜索引擎
+    let index_path = std::path::PathBuf::from(&config.storage.root_path).join("index");
+    let search_engine = Arc::new(crate::search::SearchEngine::new(index_path)?);
+    info!("搜索引擎已初始化");
+
     // 计算对外 HTTP 基址（优先 ADVERTISE_HOST，否则容器 HOSTNAME），用于事件携带源地址
     let advertise_host = std::env::var("ADVERTISE_HOST")
         .ok()
@@ -119,15 +124,17 @@ async fn main() -> Result<()> {
     let notifier_clone = notifier.clone();
     let sync_clone = sync_manager.clone();
     let version_clone = version_manager.clone();
+    let search_clone = search_engine.clone();
     // source_http_addr 已用于 HTTP/WebDAV/S3 三处，不再单独复制
 
     let http_handle = tokio::spawn(async move {
-        if let Err(e) = start_http_server(
+        if let Err(e) = http::start_http_server(
             &http_addr_clone,
             storage_clone,
             notifier_clone,
             sync_clone,
             version_clone,
+            search_clone,
         )
         .await
         {
@@ -331,383 +338,6 @@ async fn main() -> Result<()> {
     // 等待一小段时间让任务清理
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
     info!("应用已退出");
-
-    Ok(())
-}
-
-/// 启动 HTTP 服务器（使用 Silent 框架）
-async fn start_http_server(
-    addr: &str,
-    storage: StorageManager,
-    notifier: Option<EventNotifier>,
-    sync_manager: Arc<SyncManager>,
-    version_manager: Arc<VersionManager>,
-) -> Result<()> {
-    let storage = Arc::new(storage);
-    let notifier = notifier.map(Arc::new);
-
-    // 创建增量同步处理器
-    use sync::incremental::IncrementalSyncHandler;
-    let inc_sync_handler = Arc::new(IncrementalSyncHandler::new(
-        storage.clone(),
-        64 * 1024, // 使用64KB块大小
-    ));
-
-    // 健康检查
-    async fn health(_req: Request) -> silent::Result<&'static str> {
-        Ok("OK")
-    }
-
-    // 上传文件
-    let storage_upload = storage.clone();
-    let notifier_upload = notifier.clone();
-    let advertise_host = std::env::var("ADVERTISE_HOST")
-        .ok()
-        .or_else(|| std::env::var("HOSTNAME").ok())
-        .unwrap_or_else(|| "localhost".to_string());
-    let http_port: u16 = addr
-        .rsplit(':')
-        .next()
-        .and_then(|p| p.parse().ok())
-        .unwrap_or(8080);
-    let source_http_addr = std::sync::Arc::new(format!("http://{}:{}", advertise_host, http_port));
-    let upload = move |mut req: Request| {
-        let storage = storage_upload.clone();
-        let notifier = notifier_upload.clone();
-        let src_http = source_http_addr.clone();
-        async move {
-            let file_id = scru128::new_string();
-
-            let body = req.take_body();
-            let bytes = match body {
-                ReqBody::Incoming(body) => body
-                    .collect()
-                    .await
-                    .map_err(|e| {
-                        SilentError::business_error(
-                            StatusCode::BAD_REQUEST,
-                            format!("读取请求体失败: {}", e),
-                        )
-                    })?
-                    .to_bytes()
-                    .to_vec(),
-                ReqBody::Once(bytes) => bytes.to_vec(),
-                ReqBody::Empty => {
-                    return Err(SilentError::business_error(
-                        StatusCode::BAD_REQUEST,
-                        "请求体为空",
-                    ));
-                }
-            };
-
-            let metadata = storage.save_file(&file_id, &bytes).await.map_err(|e| {
-                SilentError::business_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("保存文件失败: {}", e),
-                )
-            })?;
-
-            let mut event =
-                FileEvent::new(EventType::Created, file_id.clone(), Some(metadata.clone()));
-            event.source_http_addr = Some((*src_http).clone());
-            if let Some(ref n) = notifier {
-                let _ = n.notify_created(event).await;
-            }
-
-            Ok(serde_json::json!({
-                "file_id": file_id,
-                "size": metadata.size,
-                "hash": metadata.hash,
-            }))
-        }
-    };
-
-    // 下载文件
-    let storage_download = storage.clone();
-    let download = move |req: Request| {
-        let storage = storage_download.clone();
-        async move {
-            let file_id: String = req.get_path_params("id")?;
-
-            let data = storage.read_file(&file_id).await.map_err(|e| {
-                SilentError::business_error(StatusCode::NOT_FOUND, format!("文件不存在: {}", e))
-            })?;
-
-            let mut resp = Response::empty();
-            resp.headers_mut().insert(
-                http::header::CONTENT_TYPE,
-                http::HeaderValue::from_static("application/octet-stream"),
-            );
-            resp.set_body(full(data));
-            Ok(resp)
-        }
-    };
-
-    // 删除文件
-    let storage_delete = storage.clone();
-    let notifier_delete = notifier.clone();
-    let delete = move |req: Request| {
-        let storage = storage_delete.clone();
-        let notifier = notifier_delete.clone();
-        async move {
-            let file_id: String = req.get_path_params("id")?;
-
-            storage.delete_file(&file_id).await.map_err(|e| {
-                SilentError::business_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("删除文件失败: {}", e),
-                )
-            })?;
-
-            let event = FileEvent::new(EventType::Deleted, file_id, None);
-            if let Some(ref n) = notifier {
-                let _ = n.notify_deleted(event).await;
-            }
-
-            Ok(serde_json::json!({"success": true}))
-        }
-    };
-
-    // 列出文件
-    let storage_list = storage.clone();
-    let list = move |_req: Request| {
-        let storage = storage_list.clone();
-        async move {
-            let files = storage.list_files().await.map_err(|e| {
-                SilentError::business_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("列出文件失败: {}", e),
-                )
-            })?;
-            Ok(files)
-        }
-    };
-
-    // 同步相关 API
-    let sync_get_state = sync_manager.clone();
-    let get_sync_state = move |req: Request| {
-        let sync = sync_get_state.clone();
-        async move {
-            let file_id: String = req.get_path_params("id")?;
-            match sync.get_sync_state(&file_id).await {
-                Some(state) => Ok(serde_json::to_value(state).unwrap()),
-                None => Err(SilentError::business_error(
-                    StatusCode::NOT_FOUND,
-                    "同步状态不存在",
-                )),
-            }
-        }
-    };
-
-    let sync_list_states = sync_manager.clone();
-    let list_sync_states = move |_req: Request| {
-        let sync = sync_list_states.clone();
-        async move {
-            let states = sync.get_all_sync_states().await;
-            Ok(serde_json::to_value(states).unwrap())
-        }
-    };
-
-    let sync_conflicts = sync_manager.clone();
-    let get_conflicts = move |_req: Request| {
-        let sync = sync_conflicts.clone();
-        async move {
-            let conflicts = sync.check_conflicts().await;
-            Ok(serde_json::to_value(conflicts).unwrap())
-        }
-    };
-
-    // 版本管理相关 API
-    let version_list = version_manager.clone();
-    let list_versions = move |req: Request| {
-        let vm = version_list.clone();
-        async move {
-            let file_id: String = req.get_path_params("id")?;
-            let versions = vm.list_versions(&file_id).await.map_err(|e| {
-                SilentError::business_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("获取版本列表失败: {}", e),
-                )
-            })?;
-            Ok(serde_json::to_value(versions).unwrap())
-        }
-    };
-
-    let version_get = version_manager.clone();
-    let get_version = move |req: Request| {
-        let vm = version_get.clone();
-        async move {
-            let version_id: String = req.get_path_params("version_id")?;
-            let data = vm.read_version(&version_id).await.map_err(|e| {
-                SilentError::business_error(StatusCode::NOT_FOUND, format!("版本不存在: {}", e))
-            })?;
-            let mut resp = Response::empty();
-            resp.headers_mut().insert(
-                http::header::CONTENT_TYPE,
-                http::HeaderValue::from_static("application/octet-stream"),
-            );
-            resp.set_body(full(data));
-            Ok(resp)
-        }
-    };
-
-    let version_restore = version_manager.clone();
-    let storage_restore = storage.clone();
-    let notifier_restore = notifier.clone();
-    let restore_version = move |req: Request| {
-        let vm = version_restore.clone();
-        let storage = storage_restore.clone();
-        let notifier = notifier_restore.clone();
-        async move {
-            let file_id: String = req.get_path_params("id")?;
-            let version_id: String = req.get_path_params("version_id")?;
-
-            let version = vm
-                .restore_version(&file_id, &version_id)
-                .await
-                .map_err(|e| {
-                    SilentError::business_error(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        format!("恢复版本失败: {}", e),
-                    )
-                })?;
-
-            // 发送修改事件
-            if let Ok(metadata) = storage.get_metadata(&file_id).await {
-                let event = FileEvent::new(EventType::Modified, file_id.clone(), Some(metadata));
-                if let Some(ref n) = notifier {
-                    let _ = n.notify_modified(event).await;
-                }
-            }
-
-            Ok(serde_json::to_value(version).unwrap())
-        }
-    };
-
-    let version_delete = version_manager.clone();
-    let delete_version = move |req: Request| {
-        let vm = version_delete.clone();
-        async move {
-            let version_id: String = req.get_path_params("version_id")?;
-            vm.delete_version(&version_id).await.map_err(|e| {
-                SilentError::business_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("删除版本失败: {}", e),
-                )
-            })?;
-            Ok(serde_json::json!({"success": true}))
-        }
-    };
-
-    let version_stats = version_manager.clone();
-    let get_version_stats = move |_req: Request| {
-        let vm = version_stats.clone();
-        async move {
-            let stats = vm.get_stats().await;
-            Ok(serde_json::to_value(stats).unwrap())
-        }
-    };
-
-    // 增量同步 API（使用独立模块）
-    let inc_sync_signature = inc_sync_handler.clone();
-    let get_file_signature = move |req: Request| {
-        let handler = inc_sync_signature.clone();
-        async move {
-            let file_id: String = req.get_path_params("id")?;
-            let signature = sync::incremental::api::handle_get_signature(&handler, &file_id)
-                .await
-                .map_err(|e| {
-                    SilentError::business_error(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        format!("计算文件签名失败: {}", e),
-                    )
-                })?;
-            Ok(serde_json::to_value(signature).unwrap())
-        }
-    };
-
-    let inc_sync_delta = inc_sync_handler.clone();
-    let get_file_delta = move |mut req: Request| {
-        let handler = inc_sync_delta.clone();
-        async move {
-            let file_id: String = req.get_path_params("id")?;
-
-            // 从请求体中读取目标签名
-            let body = req.take_body();
-            let body_bytes = match body {
-                ReqBody::Incoming(body) => body
-                    .collect()
-                    .await
-                    .map_err(|e| {
-                        SilentError::business_error(
-                            StatusCode::BAD_REQUEST,
-                            format!("读取请求体失败: {}", e),
-                        )
-                    })?
-                    .to_bytes()
-                    .to_vec(),
-                ReqBody::Once(bytes) => bytes.to_vec(),
-                ReqBody::Empty => {
-                    return Err(SilentError::business_error(
-                        StatusCode::BAD_REQUEST,
-                        "请求体为空",
-                    ));
-                }
-            };
-
-            let request: serde_json::Value = serde_json::from_slice(&body_bytes).map_err(|e| {
-                SilentError::business_error(StatusCode::BAD_REQUEST, format!("解析请求失败: {}", e))
-            })?;
-
-            let target_sig: sync::incremental::FileSignature =
-                serde_json::from_value(request["target_signature"].clone()).map_err(|e| {
-                    SilentError::business_error(
-                        StatusCode::BAD_REQUEST,
-                        format!("解析目标签名失败: {}", e),
-                    )
-                })?;
-
-            let delta_chunks =
-                sync::incremental::api::handle_get_delta(&handler, &file_id, &target_sig)
-                    .await
-                    .map_err(|e| {
-                        SilentError::business_error(
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            format!("生成差异块失败: {}", e),
-                        )
-                    })?;
-
-            Ok(serde_json::to_value(delta_chunks).unwrap())
-        }
-    };
-
-    let route = Route::new_root().append(
-        Route::new("api")
-            .append(Route::new("files").post(upload).get(list))
-            .append(Route::new("files/<id>").get(download).delete(delete))
-            .append(Route::new("files/<id>/versions").get(list_versions))
-            .append(
-                Route::new("files/<id>/versions/<version_id>")
-                    .get(get_version)
-                    .delete(delete_version),
-            )
-            .append(Route::new("files/<id>/versions/<version_id>/restore").post(restore_version))
-            .append(Route::new("versions/stats").get(get_version_stats))
-            .append(Route::new("sync/states").get(list_sync_states))
-            .append(Route::new("sync/states/<id>").get(get_sync_state))
-            .append(Route::new("sync/conflicts").get(get_conflicts))
-            .append(Route::new("sync/signature/<id>").get(get_file_signature))
-            .append(Route::new("sync/delta/<id>").post(get_file_delta))
-            .append(Route::new("health").get(health)),
-    );
-
-    info!("HTTP 服务器启动: {}", addr);
-    info!("  - REST API: http://{}/api", addr);
-
-    Server::new()
-        .bind(addr.parse().expect("无效的 HTTP 地址"))
-        .serve(route)
-        .await;
 
     Ok(())
 }

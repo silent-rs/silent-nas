@@ -58,6 +58,11 @@ hmac = "0.12"
 # Search engine
 tantivy = "0.22"
 
+# Performance and monitoring
+prometheus = "0.13"
+lazy_static = "1.4"
+moka = { version = "0.12", features = ["future"] }
+
 [build-dependencies]
 tonic-prost-build = "0.14"
 

@@ -3,6 +3,7 @@
 //! 提供 REST API 服务，使用中间件和萃取器模式
 
 use crate::error::Result;
+use crate::metrics;
 use crate::models::{EventType, FileEvent};
 use crate::notify::EventNotifier;
 use crate::search::SearchEngine;
@@ -61,6 +62,25 @@ fn default_limit() -> usize {
 /// 健康检查
 async fn health(_req: Request) -> silent::Result<&'static str> {
     Ok("OK")
+}
+
+/// Prometheus metrics 端点
+async fn get_metrics(_req: Request) -> silent::Result<Response> {
+    match metrics::export_metrics() {
+        Ok(metrics_text) => {
+            let mut resp = Response::empty();
+            resp.headers_mut().insert(
+                http::header::CONTENT_TYPE,
+                http::HeaderValue::from_static("text/plain; version=0.0.4"),
+            );
+            resp.set_body(full(metrics_text.into_bytes()));
+            Ok(resp)
+        }
+        Err(e) => Err(SilentError::business_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("导出metrics失败: {}", e),
+        )),
+    }
 }
 
 /// 上传文件
@@ -476,7 +496,8 @@ pub async fn start_http_server(
             .append(Route::new("sync/delta/<id>").post(get_file_delta))
             .append(Route::new("search").get(search_files))
             .append(Route::new("search/stats").get(get_search_stats))
-            .append(Route::new("health").get(health)),
+            .append(Route::new("health").get(health))
+            .append(Route::new("metrics").get(get_metrics)),
     );
 
     info!("HTTP 服务器启动: {}", addr);

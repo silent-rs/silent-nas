@@ -1,6 +1,7 @@
 //! HTTP 服务器状态和配置
 
 use crate::audit::AuditLogger;
+use crate::auth::AuthManager;
 use crate::notify::EventNotifier;
 use crate::search::SearchEngine;
 use crate::storage::StorageManager;
@@ -31,6 +32,7 @@ pub struct AppState {
     pub inc_sync_handler: Arc<IncrementalSyncHandler>,
     pub source_http_addr: Arc<String>,
     pub audit_logger: Option<Arc<AuditLogger>>,
+    pub auth_manager: Option<Arc<AuthManager>>,
 }
 
 /// 搜索查询参数

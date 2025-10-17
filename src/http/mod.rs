@@ -3,6 +3,7 @@
 //! 提供 REST API 服务，使用中间件和萃取器模式
 
 mod audit_api;
+mod auth_handlers;
 mod files;
 mod health;
 mod incremental_sync;
@@ -57,6 +58,26 @@ pub async fn start_http_server(
         None
     };
 
+    // 创建认证管理器（可选，通过环境变量启用）
+    let auth_manager = if std::env::var("ENABLE_AUTH").is_ok() {
+        let db_path = std::env::var("AUTH_DB_PATH").unwrap_or_else(|_| "./data/auth.db".to_string());
+        match crate::auth::AuthManager::new(&db_path) {
+            Ok(manager) => {
+                // 初始化默认管理员
+                if let Err(e) = manager.init_default_admin() {
+                    tracing::warn!("初始化默认管理员失败: {}", e);
+                }
+                Some(Arc::new(manager))
+            }
+            Err(e) => {
+                tracing::error!("创建认证管理器失败: {}", e);
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     // 计算源 HTTP 地址
     let advertise_host = std::env::var("ADVERTISE_HOST")
         .ok()
@@ -79,6 +100,7 @@ pub async fn start_http_server(
         inc_sync_handler,
         source_http_addr,
         audit_logger,
+        auth_manager,
     };
 
     // 定期提交索引
@@ -96,6 +118,14 @@ pub async fn start_http_server(
     // 构建路由
     let route = Route::new_root().hook(state_injector(app_state)).append(
         Route::new("api")
+            .append(
+                Route::new("auth")
+                    .append(Route::new("register").post(auth_handlers::register_handler))
+                    .append(Route::new("login").post(auth_handlers::login_handler))
+                    .append(Route::new("refresh").post(auth_handlers::refresh_handler))
+                    .append(Route::new("me").get(auth_handlers::me_handler))
+                    .append(Route::new("password").put(auth_handlers::change_password_handler)),
+            )
             .append(
                 Route::new("files")
                     .post(files::upload_file)

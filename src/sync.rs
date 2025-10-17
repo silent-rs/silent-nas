@@ -98,6 +98,8 @@ pub struct SyncManager {
     notifier: Arc<EventNotifier>,
     /// 文件同步状态缓存
     sync_states: Arc<RwLock<HashMap<String, FileSync>>>,
+    /// 每个文件最近一次已知的源HTTP地址（用于补拉）
+    last_sources: Arc<RwLock<HashMap<String, String>>>,
 }
 
 impl SyncManager {
@@ -111,6 +113,7 @@ impl SyncManager {
             storage,
             notifier,
             sync_states: Arc::new(RwLock::new(HashMap::new())),
+            last_sources: Arc::new(RwLock::new(HashMap::new())),
         })
     }
 
@@ -262,6 +265,18 @@ impl SyncManager {
         debug!("广播文件变更: {}", file_sync.file_id);
 
         Ok(())
+    }
+
+    /// 记录文件的最后已知源地址
+    pub async fn set_last_source(&self, file_id: &str, source_http_addr: &str) {
+        let mut map = self.last_sources.write().await;
+        map.insert(file_id.to_string(), source_http_addr.to_string());
+    }
+
+    /// 获取文件的最后已知源地址
+    pub async fn get_last_source(&self, file_id: &str) -> Option<String> {
+        let map = self.last_sources.read().await;
+        map.get(file_id).cloned()
     }
 }
 

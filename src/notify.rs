@@ -24,6 +24,17 @@ impl EventNotifier {
         })
     }
 
+    /// 获取 NATS 客户端（用于事件监听器）
+    pub fn get_client(&self) -> Client {
+        self.client.clone()
+    }
+
+    /// 获取主题前缀
+    #[allow(dead_code)]
+    pub fn get_topic_prefix(&self) -> &str {
+        &self.topic_prefix
+    }
+
     /// 获取主题名称
     fn get_topic(&self, event_type: &EventType) -> String {
         match event_type {

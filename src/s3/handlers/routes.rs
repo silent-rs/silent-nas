@@ -13,8 +13,9 @@ pub fn create_s3_routes(
     storage: Arc<StorageManager>,
     notifier: Arc<EventNotifier>,
     auth: Option<S3Auth>,
+    source_http_addr: String,
 ) -> Route {
-    let service = Arc::new(S3Service::new(storage, notifier, auth));
+    let service = Arc::new(S3Service::new(storage, notifier, auth, source_http_addr));
 
     // Bucket操作 - 合并GET和HEAD
     let service_bucket = service.clone();

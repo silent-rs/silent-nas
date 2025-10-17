@@ -25,7 +25,11 @@
 - ✅ 跨节点同步 gRPC 客户端实现 (2025-10-16 完成)
 
 ### 进行中 (Phase 4) 🚧
-- 🚧 完整文件内容传输和增量同步
+- ✅ 事件驱动的内容同步（HTTP + WebDAV 回退）
+  - [x] 监听 NATS 事件，按 source_http_addr 拉取内容
+  - [x] 成功后按 metadata.path 落盘，保持多协议共享同一存储
+  - [x] 定期巡检补拉，修正短时失败
+  - [ ] 增量同步（按块/差异）
 
 ---
 
@@ -88,7 +92,7 @@
   - [x] `POST /api/conflicts/{id}/resolve` - 解决冲突
   - [x] `GET /api/sync/status` - 同步状态
   - [ ] 设计文件元数据 CRDT 结构
-- [ ] 实现文件同步模块 (`sync.rs`)
+- [x] 实现文件同步模块 (`sync.rs`)
   - [ ] 文件状态追踪（LWW-Register）
   - [ ] 元数据合并策略
   - [ ] 内容冲突检测
@@ -97,14 +101,14 @@
   - [ ] LWW（Last-Write-Wins）基于时间戳
   - [ ] 保留冲突副本（.conflict 文件）
   - [ ] 用户手动合并接口
-- [ ] NATS 事件集成
+- [x] NATS 事件集成
   - [ ] 监听文件变更事件
-  - [ ] 触发 CRDT 同步
+- [x] 触发 CRDT 同步
   - [ ] 广播合并结果
 - [ ] 冲突解决 API
   - [ ] `GET /api/conflicts` - 列出冲突
   - [ ] `POST /api/conflicts/{id}/resolve` - 解决冲突
-  - [ ] `GET /api/sync/status` - 同步状态
+- [x] `GET /api/sync/status` - 同步状态
 
 **预计工期**: 2-3周
 **依赖**: silent-crdt 项目
@@ -288,7 +292,7 @@
   - [ ] 分片元数据管理
 - [ ] 副本管理
   - [ ] 多副本存储
-  - [ ] 副本同步
+- [ ] 副本同步（分布式分散存储，后续）
   - [ ] 副本恢复
 - [ ] 容错机制
   - [ ] 节点故障检测

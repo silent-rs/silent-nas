@@ -78,6 +78,7 @@ services:
       # Rust 日志
       RUST_LOG: info
       RUST_BACKTRACE: 1
+      ADVERTISE_HOST: node1
     ports:
       - "9000:9000"  # gRPC 同步
       - "8080:8080"  # HTTP API
@@ -130,6 +131,7 @@ services:
       RETENTION_DAYS: 30
       RUST_LOG: info
       RUST_BACKTRACE: 1
+      ADVERTISE_HOST: node2
     ports:
       - "9010:9000"
       - "8090:8080"
@@ -183,6 +185,7 @@ services:
       RETENTION_DAYS: 30
       RUST_LOG: info
       RUST_BACKTRACE: 1
+      ADVERTISE_HOST: node3
     ports:
       - "9020:9000"
       - "8100:8080"

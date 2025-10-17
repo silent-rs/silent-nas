@@ -1,6 +1,7 @@
 mod auth;
 mod config;
 mod error;
+mod event_listener;
 mod models;
 mod node_sync;
 mod node_sync_client;
@@ -16,6 +17,7 @@ mod webdav;
 
 use config::Config;
 use error::Result;
+use event_listener::EventListener;
 use http_body_util::BodyExt;
 use models::{EventType, FileEvent};
 use notify::EventNotifier;
@@ -26,7 +28,8 @@ use std::sync::Arc;
 use storage::StorageManager;
 use sync::SyncManager;
 use tonic::transport::Server as TonicServer;
-use tracing::{error, info};
+use tracing::{Level, error, info};
+use tracing_subscriber as logger;
 use version::{VersionConfig, VersionManager};
 
 #[tokio::main]
@@ -71,6 +74,26 @@ async fn main() -> Result<()> {
     version_manager.init().await?;
     info!("版本管理器已初始化");
 
+    // 计算对外 HTTP 基址（优先 ADVERTISE_HOST，否则容器 HOSTNAME），用于事件携带源地址
+    let advertise_host = std::env::var("ADVERTISE_HOST")
+        .ok()
+        .or_else(|| std::env::var("HOSTNAME").ok())
+        .unwrap_or_else(|| config.server.host.clone());
+    let source_http_addr = format!("http://{}:{}", advertise_host, config.server.http_port);
+
+    // 启动事件监听器（监听其他节点的文件变更）
+    let event_listener = EventListener::new(
+        sync_manager.clone(),
+        notifier.get_client(),
+        config.nats.topic_prefix.clone(),
+        storage.clone(),
+    );
+    tokio::spawn(async move {
+        if let Err(e) = event_listener.start().await {
+            error!("事件监听器错误: {}", e);
+        }
+    });
+
     // 启动 HTTP 服务器（使用 Silent 框架）
     let http_addr = format!("{}:{}", config.server.host, config.server.http_port);
     let http_addr_clone = http_addr.clone();
@@ -78,6 +101,7 @@ async fn main() -> Result<()> {
     let notifier_clone = notifier.clone();
     let sync_clone = sync_manager.clone();
     let version_clone = version_manager.clone();
+    // source_http_addr 已用于 HTTP/WebDAV/S3 三处，不再单独复制
 
     tokio::spawn(async move {
         if let Err(e) = start_http_server(
@@ -93,6 +117,48 @@ async fn main() -> Result<()> {
         }
     });
 
+    // 启动定期巡检补拉任务
+    let storage_reconcile = storage.clone();
+    let sync_reconcile = sync_manager.clone();
+    tokio::spawn(async move {
+        use tokio::time::{Duration, sleep};
+        loop {
+            sleep(Duration::from_secs(30)).await;
+            let states = sync_reconcile.get_all_sync_states().await;
+            for st in states {
+                if st.is_deleted() {
+                    continue;
+                }
+                if let Some(meta) = st.get_metadata().cloned() {
+                    let need_fetch = match storage_reconcile.get_metadata(&st.file_id).await {
+                        Ok(local) => local.hash != meta.hash || local.size != meta.size,
+                        Err(_) => true,
+                    };
+                    if need_fetch
+                        && let Some(src) = sync_reconcile.get_last_source(&st.file_id).await
+                    {
+                        let url = format!("{}/api/files/{}", src.trim_end_matches('/'), st.file_id);
+                        match reqwest::get(&url).await {
+                            Ok(resp) if resp.status().is_success() => {
+                                if let Ok(bytes) = resp.bytes().await {
+                                    if let Err(e) =
+                                        storage_reconcile.save_file(&st.file_id, &bytes).await
+                                    {
+                                        error!("补拉保存失败: {} - {}", st.file_id, e);
+                                    } else {
+                                        info!("📥 补拉已完成: {}", st.file_id);
+                                    }
+                                }
+                            }
+                            Ok(resp) => warn!("补拉HTTP失败: {} - {}", st.file_id, resp.status()),
+                            Err(e) => warn!("补拉请求失败: {} - {}", st.file_id, e),
+                        }
+                    }
+                }
+            }
+        }
+    });
+
     // 启动 gRPC 服务器
     let grpc_addr: SocketAddr = format!("{}:{}", config.server.host, config.server.grpc_port)
         .parse()
@@ -100,9 +166,17 @@ async fn main() -> Result<()> {
 
     let storage_clone = storage.clone();
     let notifier_clone = notifier.clone();
+    let source_http_addr_clone = source_http_addr.clone();
 
     tokio::spawn(async move {
-        if let Err(e) = start_grpc_server(grpc_addr, storage_clone, notifier_clone).await {
+        if let Err(e) = start_grpc_server(
+            grpc_addr,
+            storage_clone,
+            notifier_clone,
+            source_http_addr_clone,
+        )
+        .await
+        {
             error!("gRPC 服务器错误: {}", e);
         }
     });
@@ -112,10 +186,26 @@ async fn main() -> Result<()> {
     let webdav_addr_clone = webdav_addr.clone();
     let storage_webdav = storage.clone();
     let notifier_webdav = notifier.clone();
+    let sync_webdav = sync_manager.clone();
 
     tokio::spawn(async move {
-        if let Err(e) =
-            start_webdav_server(&webdav_addr_clone, storage_webdav, notifier_webdav).await
+        let webdav_base = format!(
+            "http://{}:{}",
+            advertise_host,
+            // 从监听地址中提取端口以确保一致
+            webdav_addr_clone
+                .rsplit(':')
+                .next()
+                .unwrap_or(&config.server.webdav_port.to_string())
+        );
+        if let Err(e) = start_webdav_server(
+            &webdav_addr_clone,
+            storage_webdav,
+            notifier_webdav,
+            sync_webdav,
+            webdav_base,
+        )
+        .await
         {
             error!("WebDAV 服务器错误: {}", e);
         }
@@ -127,9 +217,18 @@ async fn main() -> Result<()> {
     let storage_s3 = storage.clone();
     let notifier_s3 = notifier.clone();
     let s3_config = config.s3.clone();
+    let source_http_addr_for_s3 = source_http_addr.clone();
 
     tokio::spawn(async move {
-        if let Err(e) = start_s3_server(&s3_addr_clone, storage_s3, notifier_s3, s3_config).await {
+        if let Err(e) = start_s3_server(
+            &s3_addr_clone,
+            storage_s3,
+            notifier_s3,
+            s3_config,
+            source_http_addr_for_s3,
+        )
+        .await
+        {
             error!("S3 服务器错误: {}", e);
         }
     });
@@ -187,9 +286,20 @@ async fn start_http_server(
     // 上传文件
     let storage_upload = storage.clone();
     let notifier_upload = notifier.clone();
+    let advertise_host = std::env::var("ADVERTISE_HOST")
+        .ok()
+        .or_else(|| std::env::var("HOSTNAME").ok())
+        .unwrap_or_else(|| "localhost".to_string());
+    let http_port: u16 = addr
+        .rsplit(':')
+        .next()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(8080);
+    let source_http_addr = std::sync::Arc::new(format!("http://{}:{}", advertise_host, http_port));
     let upload = move |mut req: Request| {
         let storage = storage_upload.clone();
         let notifier = notifier_upload.clone();
+        let src_http = source_http_addr.clone();
         async move {
             let file_id = scru128::new_string();
 
@@ -222,7 +332,9 @@ async fn start_http_server(
                 )
             })?;
 
-            let event = FileEvent::new(EventType::Created, file_id.clone(), Some(metadata.clone()));
+            let mut event =
+                FileEvent::new(EventType::Created, file_id.clone(), Some(metadata.clone()));
+            event.source_http_addr = Some((*src_http).clone());
             let _ = notifier.notify_created(event).await;
 
             Ok(serde_json::json!({
@@ -449,8 +561,9 @@ async fn start_grpc_server(
     addr: SocketAddr,
     storage: StorageManager,
     notifier: EventNotifier,
+    source_http_addr: String,
 ) -> Result<()> {
-    let file_service = FileServiceImpl::new(storage, notifier);
+    let file_service = FileServiceImpl::new(storage, notifier, Some(source_http_addr));
 
     info!("gRPC 服务器启动: {}", addr);
 
@@ -468,11 +581,13 @@ async fn start_webdav_server(
     addr: &str,
     storage: StorageManager,
     notifier: EventNotifier,
+    sync_manager: Arc<SyncManager>,
+    source_http_addr: String,
 ) -> Result<()> {
     let storage = Arc::new(storage);
     let notifier = Arc::new(notifier);
 
-    let route = webdav::create_webdav_routes(storage, notifier);
+    let route = webdav::create_webdav_routes(storage, notifier, sync_manager, source_http_addr);
 
     info!("WebDAV 服务器启动: {}", addr);
     info!("  - WebDAV: http://{}/webdav", addr);
@@ -491,6 +606,7 @@ async fn start_s3_server(
     storage: StorageManager,
     notifier: EventNotifier,
     s3_config: config::S3Config,
+    source_http_addr: String,
 ) -> Result<()> {
     let storage = Arc::new(storage);
     let notifier = Arc::new(notifier);
@@ -502,7 +618,7 @@ async fn start_s3_server(
         None
     };
 
-    let route = s3::create_s3_routes(storage, notifier, auth);
+    let route = s3::create_s3_routes(storage, notifier, auth, source_http_addr.clone());
 
     info!("S3 服务器启动: {}", addr);
     info!("  - S3 API: http://{}/", addr);

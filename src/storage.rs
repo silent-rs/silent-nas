@@ -22,30 +22,47 @@ impl StorageManager {
         }
     }
 
+    /// 获取根目录路径
+    #[allow(dead_code)]
+    pub fn root_dir(&self) -> &Path {
+        &self.root_path
+    }
+
     /// 初始化存储目录
     pub async fn init(&self) -> Result<()> {
+        // 根目录
         fs::create_dir_all(&self.root_path).await?;
-        info!("存储目录初始化完成: {:?}", self.root_path);
+        // 数据目录（用于实际文件存储）
+        fs::create_dir_all(self.data_root()).await?;
+        // 版本目录
+        fs::create_dir_all(self.root_path.join("versions")).await?;
+        info!(
+            "存储目录初始化完成: root={:?}, data={:?}",
+            self.root_path,
+            self.data_root()
+        );
         Ok(())
+    }
+
+    /// 数据根目录（root/data）
+    fn data_root(&self) -> PathBuf {
+        self.root_path.join("data")
     }
 
     /// 获取文件的完整路径（基于 file_id）
     fn get_file_path(&self, file_id: &str) -> PathBuf {
-        // 如果file_id包含斜杠，说明是bucket/key格式，直接使用
-        if file_id.contains('/') {
-            self.root_path.join(file_id)
-        } else {
-            // 使用前2个字符作为子目录，避免单目录文件过多
-            let prefix = &file_id[..2.min(file_id.len())];
-            self.root_path.join(prefix).join(file_id)
-        }
+        // 所有ID统一直接映射到 data/<id>，不再使用哈希前缀目录
+        // 若file_id包含路径分隔符（如S3 bucket/key），保持相对路径写入 data/<bucket>/<key>
+        // 若包含分隔符，视为相对路径；否则视为ID，均直接放在 data/ 下（路径保持相对结构）
+        self.data_root().join(file_id)
     }
 
     /// 获取文件的完整路径（基于相对路径，用于 WebDAV）
     #[allow(dead_code)]
     pub fn get_full_path(&self, relative_path: &str) -> PathBuf {
         let path = relative_path.trim_start_matches('/');
-        self.root_path.join(path)
+        // 将对外路径映射到 data/ 下
+        self.data_root().join(path)
     }
 
     /// 保存文件
@@ -82,29 +99,90 @@ impl StorageManager {
         })
     }
 
+    /// 按相对路径保存文件（用于 WebDAV/S3 路径语义）
+    pub async fn save_at_path(&self, relative_path: &str, data: &[u8]) -> Result<FileMetadata> {
+        let rel = relative_path.trim_start_matches('/');
+        let file_path = self.data_root().join(rel);
+
+        if let Some(parent) = file_path.parent() {
+            fs::create_dir_all(parent).await?;
+        }
+
+        let mut file = fs::File::create(&file_path).await?;
+        file.write_all(data).await?;
+        file.flush().await?;
+
+        debug!("按路径保存文件: {:?}", file_path);
+
+        let hash = self.calculate_hash(data);
+        let metadata = fs::metadata(&file_path).await?;
+        let now = chrono::Local::now().naive_local();
+
+        Ok(FileMetadata {
+            id: rel.to_string(),
+            name: file_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(rel)
+                .to_string(),
+            path: format!("/{}", rel),
+            size: metadata.len(),
+            hash,
+            created_at: now,
+            modified_at: now,
+        })
+    }
+
     /// 读取文件
     pub async fn read_file(&self, file_id: &str) -> Result<Vec<u8>> {
         let file_path = self.get_file_path(file_id);
+        // 兼容旧布局：若 data/ 下不存在，则尝试 root/<prefix>/<id>
+        let real_path = if file_path.exists() {
+            file_path
+        } else {
+            // 兼容旧布局：data/<prefix>/<id>
+            let prefix = &file_id[..2.min(file_id.len())];
+            let legacy_data = self.data_root().join(prefix).join(file_id);
+            if legacy_data.exists() {
+                legacy_data
+            } else {
+                // 更早的旧布局：root/<prefix>/<id>
+                let legacy_root = self.root_path.join(prefix).join(file_id);
+                if legacy_root.exists() {
+                    legacy_root
+                } else {
+                    return Err(NasError::FileNotFound(file_id.to_string()));
+                }
+            }
+        };
 
-        if !file_path.exists() {
-            return Err(NasError::FileNotFound(file_id.to_string()));
-        }
-
-        let data = fs::read(&file_path).await?;
-        debug!("文件已读取: {:?}, 大小: {} 字节", file_path, data.len());
+        let data = fs::read(&real_path).await?;
+        debug!("文件已读取: {:?}, 大小: {} 字节", real_path, data.len());
         Ok(data)
     }
 
     /// 删除文件
     pub async fn delete_file(&self, file_id: &str) -> Result<()> {
         let file_path = self.get_file_path(file_id);
+        let real_path = if file_path.exists() {
+            file_path
+        } else {
+            let prefix = &file_id[..2.min(file_id.len())];
+            let legacy_data = self.data_root().join(prefix).join(file_id);
+            if legacy_data.exists() {
+                legacy_data
+            } else {
+                let legacy_root = self.root_path.join(prefix).join(file_id);
+                if legacy_root.exists() {
+                    legacy_root
+                } else {
+                    return Err(NasError::FileNotFound(file_id.to_string()));
+                }
+            }
+        };
 
-        if !file_path.exists() {
-            return Err(NasError::FileNotFound(file_id.to_string()));
-        }
-
-        fs::remove_file(&file_path).await?;
-        info!("文件已删除: {:?}", file_path);
+        fs::remove_file(&real_path).await?;
+        info!("文件已删除: {:?}", real_path);
         Ok(())
     }
 
@@ -117,7 +195,7 @@ impl StorageManager {
 
     /// 创建bucket目录
     pub async fn create_bucket(&self, bucket_name: &str) -> Result<()> {
-        let bucket_path = self.root_path.join(bucket_name);
+        let bucket_path = self.data_root().join(bucket_name);
         if bucket_path.exists() {
             return Err(NasError::Storage("Bucket已存在".to_string()));
         }
@@ -128,7 +206,7 @@ impl StorageManager {
 
     /// 删除bucket目录
     pub async fn delete_bucket(&self, bucket_name: &str) -> Result<()> {
-        let bucket_path = self.root_path.join(bucket_name);
+        let bucket_path = self.data_root().join(bucket_name);
         if !bucket_path.exists() {
             return Err(NasError::Storage("Bucket不存在".to_string()));
         }
@@ -146,7 +224,7 @@ impl StorageManager {
 
     /// 检查bucket是否存在
     pub async fn bucket_exists(&self, bucket_name: &str) -> bool {
-        let bucket_path = self.root_path.join(bucket_name);
+        let bucket_path = self.data_root().join(bucket_name);
         let exists = bucket_path.exists();
         let is_dir = if exists { bucket_path.is_dir() } else { false };
         debug!(
@@ -159,7 +237,7 @@ impl StorageManager {
     /// 列出所有buckets
     pub async fn list_buckets(&self) -> Result<Vec<String>> {
         let mut buckets = Vec::new();
-        let mut entries = fs::read_dir(&self.root_path).await?;
+        let mut entries = fs::read_dir(self.data_root()).await?;
 
         while let Some(entry) = entries.next_entry().await? {
             if let Ok(metadata) = entry.metadata().await
@@ -180,7 +258,7 @@ impl StorageManager {
         bucket_name: &str,
         prefix: &str,
     ) -> Result<Vec<String>> {
-        let bucket_path = self.root_path.join(bucket_name);
+        let bucket_path = self.data_root().join(bucket_name);
         if !bucket_path.exists() {
             return Ok(Vec::new());
         }
@@ -231,13 +309,26 @@ impl StorageManager {
     /// 获取文件元数据
     pub async fn get_metadata(&self, file_id: &str) -> Result<FileMetadata> {
         let file_path = self.get_file_path(file_id);
+        // 兼容旧布局
+        let real_path = if file_path.exists() {
+            file_path
+        } else {
+            let prefix = &file_id[..2.min(file_id.len())];
+            let legacy_data = self.data_root().join(prefix).join(file_id);
+            if legacy_data.exists() {
+                legacy_data
+            } else {
+                let legacy_root = self.root_path.join(prefix).join(file_id);
+                if legacy_root.exists() {
+                    legacy_root
+                } else {
+                    return Err(NasError::FileNotFound(file_id.to_string()));
+                }
+            }
+        };
 
-        if !file_path.exists() {
-            return Err(NasError::FileNotFound(file_id.to_string()));
-        }
-
-        let metadata = fs::metadata(&file_path).await?;
-        let data = fs::read(&file_path).await?;
+        let metadata = fs::metadata(&real_path).await?;
+        let data = fs::read(&real_path).await?;
         let hash = self.calculate_hash(&data);
 
         let now = chrono::Local::now().naive_local();
@@ -245,7 +336,7 @@ impl StorageManager {
         Ok(FileMetadata {
             id: file_id.to_string(),
             name: file_id.to_string(),
-            path: file_path.to_string_lossy().to_string(),
+            path: real_path.to_string_lossy().to_string(),
             size: metadata.len(),
             hash,
             created_at: now,
@@ -256,7 +347,7 @@ impl StorageManager {
     /// 列出所有文件
     pub async fn list_files(&self) -> Result<Vec<FileMetadata>> {
         let mut files = Vec::new();
-        self.scan_directory(&self.root_path, &mut files).await?;
+        self.scan_directory(&self.data_root(), &mut files).await?;
         Ok(files)
     }
 

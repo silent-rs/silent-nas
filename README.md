@@ -38,7 +38,7 @@ Silent-NAS 是 Silent Odyssey 第六阶段的实验项目，旨在构建一个�
 - ✅ 缓存优化（304 Not Modified）
 - ✅ 并发更新保护（412 Precondition Failed）
 - ✅ 分片上传支持（Multipart Upload，大文件>5GB）
-- 🚧 跨节点文件同步支持（规划中）
+- ✅ 跨节点文件同步（事件驱动 + 内容拉取）
 - 🚧 文件版本管理与冲突处理（规划中）
 - ❌ 元数据索引与全文检索（后续阶段）
 
@@ -155,7 +155,7 @@ curl http://127.0.0.1:8080/api/health
 ### 5. 测试 WebDAV
 使用任意 WebDAV 客户端连接：
 ```
-WebDAV URL: http://127.0.0.1:8080/webdav
+WebDAV URL: http://127.0.0.1:8081/
 ```
 
 **推荐的客户端：**
@@ -167,16 +167,16 @@ WebDAV URL: http://127.0.0.1:8080/webdav
 **命令行测试：**
 ```bash
 # 上传文件
-curl -X PUT -T example.txt http://127.0.0.1:8080/webdav/example.txt
+curl -X PUT -T example.txt http://127.0.0.1:8081/example.txt
 
 # 列出文件
-curl -X PROPFIND http://127.0.0.1:8080/webdav/ -H "Depth: 1"
+curl -X PROPFIND http://127.0.0.1:8081/ -H "Depth: 1"
 
 # 下载文件
-curl http://127.0.0.1:8080/webdav/example.txt -o downloaded.txt
+curl http://127.0.0.1:8081/example.txt -o downloaded.txt
 
 # 删除文件
-curl -X DELETE http://127.0.0.1:8080/webdav/example.txt
+curl -X DELETE http://127.0.0.1:8081/example.txt
 ```
 
 ### 6. 测试 S3 API

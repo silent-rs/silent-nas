@@ -1,8 +1,8 @@
 // NodeSyncService gRPC 服务端实现
 #![allow(dead_code)]
 
-use crate::node_sync::{NodeManager, NodeSyncCoordinator};
-use crate::sync::SyncManager;
+use crate::sync::crdt::SyncManager;
+use crate::sync::node::{NodeManager, NodeSyncCoordinator};
 use chrono::{DateTime, Utc};
 use std::sync::Arc;
 use tonic::{Request, Response, Status};
@@ -201,7 +201,7 @@ impl NodeSyncService for NodeSyncServiceImpl {
 // ========== 辅助函数 ==========
 
 /// 将内部 NodeInfo 转换为 protobuf NodeInfo
-fn convert_to_proto_node(node: &crate::node_sync::NodeInfo) -> crate::rpc::file_service::NodeInfo {
+fn convert_to_proto_node(node: &crate::sync::node::NodeInfo) -> crate::rpc::file_service::NodeInfo {
     crate::rpc::file_service::NodeInfo {
         node_id: node.node_id.clone(),
         address: node.address.clone(),
@@ -214,19 +214,21 @@ fn convert_to_proto_node(node: &crate::node_sync::NodeInfo) -> crate::rpc::file_
 /// 将 protobuf NodeInfo 转换为内部 NodeInfo
 fn convert_from_proto_node(
     proto: &crate::rpc::file_service::NodeInfo,
-) -> Result<crate::node_sync::NodeInfo, String> {
+) -> Result<crate::sync::node::NodeInfo, String> {
+    use crate::sync::node::manager::NodeStatus;
+
     // 使用新的 DateTime API 进行转换
     let datetime = DateTime::<Utc>::from_timestamp_millis(proto.last_seen)
         .ok_or_else(|| "无效的时间戳".to_string())?;
     let last_seen = datetime.naive_utc();
 
-    Ok(crate::node_sync::NodeInfo {
+    Ok(crate::sync::node::NodeInfo {
         node_id: proto.node_id.clone(),
         address: proto.address.clone(),
         last_seen,
         version: proto.version.clone(),
         metadata: proto.metadata.clone(),
-        status: crate::node_sync::NodeStatus::Online,
+        status: NodeStatus::Online,
     })
 }
 
@@ -236,7 +238,7 @@ mod tests {
 
     #[test]
     fn test_convert_node_info() {
-        let internal_node = crate::node_sync::NodeInfo::new(
+        let internal_node = crate::sync::node::NodeInfo::new(
             "node-1".to_string(),
             "127.0.0.1:9000".to_string(),
             "1.0.0".to_string(),

@@ -3,9 +3,6 @@ mod config;
 mod error;
 mod event_listener;
 mod models;
-mod node_sync;
-mod node_sync_client;
-mod node_sync_service;
 mod notify;
 mod rpc;
 mod s3;
@@ -26,7 +23,7 @@ use silent::prelude::*;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use storage::StorageManager;
-use sync::SyncManager;
+use sync::crdt::SyncManager;
 use tonic::transport::Server as TonicServer;
 use tracing::{Level, error, info};
 use tracing_subscriber as logger;
@@ -87,6 +84,7 @@ async fn main() -> Result<()> {
         notifier.get_client(),
         config.nats.topic_prefix.clone(),
         storage.clone(),
+        config.storage.chunk_size,
     );
     tokio::spawn(async move {
         if let Err(e) = event_listener.start().await {
@@ -277,6 +275,13 @@ async fn start_http_server(
 ) -> Result<()> {
     let storage = Arc::new(storage);
     let notifier = Arc::new(notifier);
+
+    // 创建增量同步处理器
+    use sync::incremental::IncrementalSyncHandler;
+    let inc_sync_handler = Arc::new(IncrementalSyncHandler::new(
+        storage.clone(),
+        64 * 1024, // 使用64KB块大小
+    ));
 
     // 健康检查
     async fn health(_req: Request) -> silent::Result<&'static str> {
@@ -527,6 +532,79 @@ async fn start_http_server(
         }
     };
 
+    // 增量同步 API（使用独立模块）
+    let inc_sync_signature = inc_sync_handler.clone();
+    let get_file_signature = move |req: Request| {
+        let handler = inc_sync_signature.clone();
+        async move {
+            let file_id: String = req.get_path_params("id")?;
+            let signature = sync::incremental::api::handle_get_signature(&handler, &file_id)
+                .await
+                .map_err(|e| {
+                    SilentError::business_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("计算文件签名失败: {}", e),
+                    )
+                })?;
+            Ok(serde_json::to_value(signature).unwrap())
+        }
+    };
+
+    let inc_sync_delta = inc_sync_handler.clone();
+    let get_file_delta = move |mut req: Request| {
+        let handler = inc_sync_delta.clone();
+        async move {
+            let file_id: String = req.get_path_params("id")?;
+
+            // 从请求体中读取目标签名
+            let body = req.take_body();
+            let body_bytes = match body {
+                ReqBody::Incoming(body) => body
+                    .collect()
+                    .await
+                    .map_err(|e| {
+                        SilentError::business_error(
+                            StatusCode::BAD_REQUEST,
+                            format!("读取请求体失败: {}", e),
+                        )
+                    })?
+                    .to_bytes()
+                    .to_vec(),
+                ReqBody::Once(bytes) => bytes.to_vec(),
+                ReqBody::Empty => {
+                    return Err(SilentError::business_error(
+                        StatusCode::BAD_REQUEST,
+                        "请求体为空",
+                    ));
+                }
+            };
+
+            let request: serde_json::Value = serde_json::from_slice(&body_bytes).map_err(|e| {
+                SilentError::business_error(StatusCode::BAD_REQUEST, format!("解析请求失败: {}", e))
+            })?;
+
+            let target_sig: sync::incremental::FileSignature =
+                serde_json::from_value(request["target_signature"].clone()).map_err(|e| {
+                    SilentError::business_error(
+                        StatusCode::BAD_REQUEST,
+                        format!("解析目标签名失败: {}", e),
+                    )
+                })?;
+
+            let delta_chunks =
+                sync::incremental::api::handle_get_delta(&handler, &file_id, &target_sig)
+                    .await
+                    .map_err(|e| {
+                        SilentError::business_error(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            format!("生成差异块失败: {}", e),
+                        )
+                    })?;
+
+            Ok(serde_json::to_value(delta_chunks).unwrap())
+        }
+    };
+
     let route = Route::new_root().append(
         Route::new("api")
             .append(Route::new("files").post(upload).get(list))
@@ -542,6 +620,8 @@ async fn start_http_server(
             .append(Route::new("sync/states").get(list_sync_states))
             .append(Route::new("sync/states/<id>").get(get_sync_state))
             .append(Route::new("sync/conflicts").get(get_conflicts))
+            .append(Route::new("sync/signature/<id>").get(get_file_signature))
+            .append(Route::new("sync/delta/<id>").post(get_file_delta))
             .append(Route::new("health").get(health)),
     );
 

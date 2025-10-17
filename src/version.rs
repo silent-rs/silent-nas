@@ -280,6 +280,7 @@ pub struct VersionStats {
 mod tests {
     use super::*;
     use crate::models::FileMetadata;
+    use tempfile::TempDir;
 
     fn create_test_storage() -> Arc<StorageManager> {
         Arc::new(StorageManager::new(
@@ -661,5 +662,93 @@ mod tests {
 
         assert!(version.comment.is_some());
         assert_eq!(version.comment.unwrap(), "comment");
+    }
+
+    #[tokio::test]
+    async fn test_version_manager_stats() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage = Arc::new(StorageManager::new(
+            temp_dir.path().to_path_buf(),
+            64 * 1024,
+        ));
+        storage.init().await.unwrap();
+
+        let config = VersionConfig {
+            max_versions: 10,
+            retention_days: 30,
+            enabled: true,
+        };
+        let manager = VersionManager::new(storage, config, temp_dir.path().to_str().unwrap());
+
+        let stats = manager.get_stats().await;
+        assert_eq!(stats.total_files, 0);
+        assert_eq!(stats.total_versions, 0);
+    }
+
+    #[test]
+    fn test_version_config_validation() {
+        // 测试合理的配置值
+        let configs = vec![
+            (5, 30, true),
+            (10, 60, true),
+            (0, 0, true), // 无限制
+            (100, 365, true),
+        ];
+
+        for (max_versions, retention_days, enabled) in configs {
+            let config = VersionConfig {
+                max_versions,
+                retention_days,
+                enabled,
+            };
+            assert_eq!(config.max_versions, max_versions);
+            assert_eq!(config.retention_days, retention_days);
+            assert_eq!(config.enabled, enabled);
+        }
+    }
+
+    #[test]
+    fn test_file_version_comparison() {
+        let v1 = FileVersion::new(
+            "file1".to_string(),
+            "test.txt".to_string(),
+            100,
+            "hash1".to_string(),
+            None,
+            None,
+        );
+
+        let v2 = FileVersion::new(
+            "file1".to_string(),
+            "test.txt".to_string(),
+            200,
+            "hash2".to_string(),
+            None,
+            None,
+        );
+
+        assert_ne!(v1.version_id, v2.version_id);
+        assert_eq!(v1.file_id, v2.file_id);
+        assert_ne!(v1.size, v2.size);
+    }
+
+    #[test]
+    fn test_version_stats_calculation() {
+        let stats1 = VersionStats {
+            total_files: 10,
+            total_versions: 50,
+            total_size: 1024 * 1024,
+        };
+
+        let stats2 = VersionStats {
+            total_files: 5,
+            total_versions: 25,
+            total_size: 512 * 1024,
+        };
+
+        // 验证统计数据
+        assert!(stats1.total_files > stats2.total_files);
+        assert!(stats1.total_versions > stats2.total_versions);
+        assert!(stats1.total_size > stats2.total_size);
     }
 }

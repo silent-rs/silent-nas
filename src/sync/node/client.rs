@@ -2,9 +2,9 @@
 #![allow(dead_code)]
 
 use crate::error::{NasError, Result};
-use crate::node_sync::NodeInfo;
 use crate::rpc::file_service::node_sync_service_client::NodeSyncServiceClient;
 use crate::rpc::file_service::*;
+use crate::sync::node::{NodeInfo, manager::NodeStatus};
 use chrono::{DateTime, Utc};
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -277,7 +277,7 @@ fn convert_from_proto_node(proto: &crate::rpc::file_service::NodeInfo) -> Result
         last_seen,
         version: proto.version.clone(),
         metadata: proto.metadata.clone(),
-        status: crate::node_sync::NodeStatus::Online,
+        status: NodeStatus::Online,
     })
 }
 
@@ -333,6 +333,6 @@ mod tests {
         assert_eq!(node.node_id, "test-node");
         assert_eq!(node.address, "192.168.1.10:9000");
         assert_eq!(node.version, "1.0.0");
-        assert_eq!(node.status, crate::node_sync::NodeStatus::Online);
+        assert_eq!(node.status, NodeStatus::Online);
     }
 }

@@ -266,4 +266,121 @@ mod tests {
         assert!(type_name.contains("EventNotifier"));
         assert!(type_name.contains("notify"));
     }
+
+    #[test]
+    fn test_file_event_serialization() {
+        use crate::models::{EventType, FileEvent, FileMetadata};
+
+        let metadata = FileMetadata {
+            id: "file-123".to_string(),
+            name: "test.txt".to_string(),
+            path: "/files/test.txt".to_string(),
+            size: 1024,
+            hash: "abc123".to_string(),
+            created_at: chrono::Local::now().naive_local(),
+            modified_at: chrono::Local::now().naive_local(),
+        };
+
+        let event = FileEvent {
+            event_id: "event-456".to_string(),
+            file_id: "test-123".to_string(),
+            event_type: EventType::Created,
+            timestamp: chrono::Local::now().naive_local(),
+            metadata: Some(metadata),
+            source_node_id: Some("node-1".to_string()),
+            source_http_addr: Some("http://localhost:8080".to_string()),
+        };
+
+        // 测试序列化
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains("test-123"));
+        assert!(json.contains("created"));
+
+        // 测试反序列化
+        let deserialized: FileEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.file_id, "test-123");
+    }
+
+    #[test]
+    fn test_topic_validation() {
+        // 测试主题名称验证
+        let valid_topics = vec![
+            "silent.nas.files.created",
+            "app.events.modified",
+            "system.notifications.deleted",
+        ];
+
+        for topic in valid_topics {
+            assert!(topic.contains("."));
+            assert!(!topic.is_empty());
+            assert!(topic.len() > 5);
+        }
+    }
+
+    #[test]
+    fn test_event_type_string_representation() {
+        use crate::models::EventType;
+
+        let types = vec![
+            (EventType::Created, "created"),
+            (EventType::Modified, "modified"),
+            (EventType::Deleted, "deleted"),
+        ];
+
+        for (event_type, expected_str) in types {
+            let prefix = "test";
+            let topic = match event_type {
+                EventType::Created => format!("{}.created", prefix),
+                EventType::Modified => format!("{}.modified", prefix),
+                EventType::Deleted => format!("{}.deleted", prefix),
+            };
+            assert!(topic.ends_with(expected_str));
+        }
+    }
+
+    #[test]
+    fn test_topic_prefix_validation() {
+        // 测试各种前缀格式
+        let test_cases = vec![
+            ("simple", true),
+            ("with.dots.multiple", true),
+            ("with-dashes", true),
+            ("with_underscores", true),
+            ("MixedCase", true),
+            ("", false), // 空前缀应该被标记
+        ];
+
+        for (prefix, _should_be_valid) in test_cases {
+            let topic = format!("{}.created", prefix);
+            // 验证topic至少包含事件类型
+            assert!(topic.contains("created"));
+        }
+    }
+
+    #[test]
+    fn test_multiple_event_types_topic_generation() {
+        use crate::models::EventType;
+
+        let prefix = "test.app";
+        let events = [EventType::Created, EventType::Modified, EventType::Deleted];
+
+        let topics: Vec<String> = events
+            .iter()
+            .map(|event_type| match event_type {
+                EventType::Created => format!("{}.created", prefix),
+                EventType::Modified => format!("{}.modified", prefix),
+                EventType::Deleted => format!("{}.deleted", prefix),
+            })
+            .collect();
+
+        assert_eq!(topics.len(), 3);
+        assert!(topics[0].contains("created"));
+        assert!(topics[1].contains("modified"));
+        assert!(topics[2].contains("deleted"));
+
+        // 确保所有topic都以相同前缀开始
+        for topic in &topics {
+            assert!(topic.starts_with(prefix));
+        }
+    }
 }

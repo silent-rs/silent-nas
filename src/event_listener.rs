@@ -1,7 +1,8 @@
 use crate::error::Result;
 use crate::models::FileEvent;
 use crate::storage::StorageManager;
-use crate::sync::{FileSync, SyncManager};
+use crate::sync::crdt::{FileSync, SyncManager};
+use crate::sync::incremental::IncrementalSyncHandler;
 use futures_util::StreamExt;
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
@@ -13,6 +14,7 @@ pub struct EventListener {
     nats_client: async_nats::Client,
     topic_prefix: String,
     storage: Arc<StorageManager>,
+    inc_sync_handler: Arc<IncrementalSyncHandler>,
 }
 
 impl EventListener {
@@ -22,12 +24,18 @@ impl EventListener {
         nats_client: async_nats::Client,
         topic_prefix: String,
         storage: StorageManager,
+        chunk_size: usize,
     ) -> Self {
+        let storage_arc = Arc::new(storage);
+        let inc_sync_handler =
+            Arc::new(IncrementalSyncHandler::new(storage_arc.clone(), chunk_size));
+
         Self {
             sync_manager,
             nats_client,
             topic_prefix,
-            storage: Arc::new(storage),
+            storage: storage_arc,
+            inc_sync_handler,
         }
     }
 
@@ -100,6 +108,45 @@ impl EventListener {
                             };
 
                             if need_fetch {
+                                // 优先尝试增量同步
+                                info!("尝试增量同步文件: {}", event.file_id);
+                                match self
+                                    .inc_sync_handler
+                                    .pull_incremental(&event.file_id, &source_http)
+                                    .await
+                                {
+                                    Ok(data) => {
+                                        // 优先按元数据路径保存
+                                        let save_res = if let Some(meta) = event.metadata.as_ref() {
+                                            if !meta.path.is_empty() {
+                                                self.storage.save_at_path(&meta.path, &data).await
+                                            } else {
+                                                self.storage.save_file(&event.file_id, &data).await
+                                            }
+                                        } else {
+                                            self.storage.save_file(&event.file_id, &data).await
+                                        };
+
+                                        if let Err(e) = save_res {
+                                            error!(
+                                                "保存增量同步内容失败: {} - {}",
+                                                event.file_id, e
+                                            );
+                                        } else {
+                                            info!("✅ 增量同步完成并保存: {}", event.file_id);
+                                        }
+                                        return Ok(()); // 增量同步成功，提前返回
+                                    }
+                                    Err(e) => {
+                                        warn!(
+                                            "增量同步失败，回退到全量下载: {} - {}",
+                                            event.file_id, e
+                                        );
+                                        // 继续执行全量下载逻辑
+                                    }
+                                }
+
+                                // Fallback: 全量下载
                                 let url = format!(
                                     "{}/api/files/{}",
                                     source_http.trim_end_matches('/'),

@@ -2,7 +2,7 @@
 #![allow(dead_code)]
 
 use crate::error::{NasError, Result};
-use crate::sync::SyncManager;
+use crate::sync::crdt::SyncManager;
 use chrono::{Local, NaiveDateTime};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -198,7 +198,7 @@ impl NodeManager {
 
     /// 连接到种子节点
     pub async fn connect_to_seeds(&self) -> Result<()> {
-        use crate::node_sync_client::{ClientConfig, NodeSyncClient};
+        use crate::sync::node::client::{ClientConfig, NodeSyncClient};
 
         for seed_addr in &self.config.seed_nodes {
             info!("连接到种子节点: {}", seed_addr);
@@ -246,7 +246,7 @@ impl NodeManager {
 
     /// 向指定节点发送心跳
     pub async fn send_heartbeat_to_node(&self, _node_id: &str, address: &str) -> Result<()> {
-        use crate::node_sync_client::{ClientConfig, NodeSyncClient};
+        use crate::sync::node::{client::ClientConfig, client::NodeSyncClient};
 
         let client = NodeSyncClient::new(address.to_string(), ClientConfig::default());
         client.connect().await?;

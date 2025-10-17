@@ -1,7 +1,7 @@
 use crate::models::{EventType, FileEvent, FileMetadata};
 use crate::notify::EventNotifier;
 use crate::storage::StorageManager;
-use crate::sync::SyncManager;
+use crate::sync::crdt::SyncManager;
 use async_trait::async_trait;
 use http_body_util::BodyExt;
 use silent::prelude::*;

@@ -297,4 +297,82 @@ mod tests {
         assert_eq!(signature.file_size, data.len() as u64);
         assert!(!signature.chunks.is_empty());
     }
+
+    #[tokio::test]
+    async fn test_generate_delta_chunks() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage = Arc::new(StorageManager::new(
+            PathBuf::from(temp_dir.path()),
+            64 * 1024,
+        ));
+        storage.init().await.unwrap();
+
+        // 创建源文件
+        let file_id = "test_file";
+        let data = b"Source content with modifications";
+        storage.save_file(file_id, data).await.unwrap();
+
+        let handler = IncrementalSyncHandler::new(storage, 64 * 1024);
+
+        // 创建一个假的目标签名（空文件）
+        let target_sig = FileSignature {
+            file_id: file_id.to_string(),
+            file_size: 0,
+            chunk_size: 64 * 1024,
+            file_hash: "empty".to_string(),
+            chunks: vec![],
+        };
+
+        let delta_chunks = handler
+            .generate_delta_chunks(file_id, &target_sig)
+            .await
+            .unwrap();
+
+        // 应该返回差异块
+        assert!(!delta_chunks.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_generate_delta_chunks_identical() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage = Arc::new(StorageManager::new(
+            PathBuf::from(temp_dir.path()),
+            64 * 1024,
+        ));
+        storage.init().await.unwrap();
+
+        // 创建文件
+        let file_id = "test_file";
+        let data = b"Identical content";
+        storage.save_file(file_id, data).await.unwrap();
+
+        let handler = IncrementalSyncHandler::new(storage.clone(), 64 * 1024);
+
+        // 使用相同的内容创建目标签名
+        let target_sig = handler.calculate_local_signature(file_id).await.unwrap();
+
+        let delta_chunks = handler
+            .generate_delta_chunks(file_id, &target_sig)
+            .await
+            .unwrap();
+
+        // 相同内容应该返回空的差异块
+        assert!(delta_chunks.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_calculate_signature_file_not_found() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage = Arc::new(StorageManager::new(
+            PathBuf::from(temp_dir.path()),
+            64 * 1024,
+        ));
+        storage.init().await.unwrap();
+
+        let handler = IncrementalSyncHandler::new(storage, 64 * 1024);
+
+        // 尝试计算不存在文件的签名
+        let result = handler.calculate_local_signature("nonexistent").await;
+        assert!(result.is_err());
+    }
 }

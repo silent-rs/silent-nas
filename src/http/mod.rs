@@ -47,6 +47,7 @@ pub async fn start_http_server(
     sync_manager: Arc<SyncManager>,
     version_manager: Arc<VersionManager>,
     search_engine: Arc<SearchEngine>,
+    config: crate::config::Config,
 ) -> Result<()> {
     let storage = Arc::new(storage);
 
@@ -60,12 +61,17 @@ pub async fn start_http_server(
         None
     };
 
-    // 创建认证管理器（可选，通过环境变量启用）
-    let auth_manager = if std::env::var("ENABLE_AUTH").is_ok() {
-        let db_path =
-            std::env::var("AUTH_DB_PATH").unwrap_or_else(|_| "./data/auth.db".to_string());
-        match crate::auth::AuthManager::new(&db_path) {
+    // 创建认证管理器（使用配置）
+    let auth_manager = if config.auth.enable {
+        match crate::auth::AuthManager::new(&config.auth.db_path) {
             Ok(manager) => {
+                // 设置JWT配置
+                manager.set_jwt_config(crate::auth::JwtConfig {
+                    secret: config.auth.jwt_secret.clone(),
+                    access_token_exp: config.auth.access_token_exp,
+                    refresh_token_exp: config.auth.refresh_token_exp,
+                });
+
                 // 初始化默认管理员
                 if let Err(e) = manager.init_default_admin() {
                     tracing::warn!("初始化默认管理员失败: {}", e);

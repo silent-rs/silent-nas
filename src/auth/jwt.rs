@@ -8,11 +8,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// JWT 配置
 pub struct JwtConfig {
     /// JWT 签名密钥
-    secret: String,
+    pub secret: String,
     /// 访问令牌过期时间（秒）
-    access_token_exp: u64,
+    pub access_token_exp: u64,
     /// 刷新令牌过期时间（秒）
-    refresh_token_exp: u64,
+    pub refresh_token_exp: u64,
 }
 
 impl JwtConfig {

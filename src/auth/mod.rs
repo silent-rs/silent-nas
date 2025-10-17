@@ -9,6 +9,7 @@ pub mod models;
 pub mod password;
 pub mod storage;
 
+pub use jwt::JwtConfig;
 pub use models::{
     ChangePasswordRequest, LoginRequest, LoginResponse, RegisterRequest, User, UserInfo, UserRole,
     UserStatus,
@@ -16,18 +17,17 @@ pub use models::{
 
 use crate::error::{NasError, Result};
 use chrono::Local;
-use jwt::JwtConfig;
 use password::PasswordHandler;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use storage::UserStorage;
 use validator::Validate;
 
 /// 认证管理器
 #[derive(Clone)]
 pub struct AuthManager {
-    storage: Arc<UserStorage>,
-    jwt_config: Arc<JwtConfig>,
+    pub(crate) storage: Arc<UserStorage>,
+    jwt_config: Arc<RwLock<JwtConfig>>,
 }
 
 impl AuthManager {
@@ -38,8 +38,13 @@ impl AuthManager {
 
         Ok(Self {
             storage: Arc::new(storage),
-            jwt_config: Arc::new(jwt_config),
+            jwt_config: Arc::new(RwLock::new(jwt_config)),
         })
+    }
+
+    /// 设置JWT配置
+    pub fn set_jwt_config(&self, config: JwtConfig) {
+        *self.jwt_config.write().unwrap() = config;
     }
 
     /// 注册用户
@@ -104,14 +109,15 @@ impl AuthManager {
         }
 
         // 生成 Token
-        let access_token = self.jwt_config.generate_access_token(&user)?;
-        let refresh_token = self.jwt_config.generate_refresh_token(&user)?;
+        let jwt_config = self.jwt_config.read().unwrap();
+        let access_token = jwt_config.generate_access_token(&user)?;
+        let refresh_token = jwt_config.generate_refresh_token(&user)?;
 
         Ok(LoginResponse {
             access_token,
             refresh_token,
             token_type: "Bearer".to_string(),
-            expires_in: self.jwt_config.get_access_token_exp(),
+            expires_in: jwt_config.get_access_token_exp(),
             user: user.into(),
         })
     }
@@ -119,7 +125,11 @@ impl AuthManager {
     /// 刷新 Token
     pub fn refresh_token(&self, refresh_token: &str) -> Result<LoginResponse> {
         // 验证刷新令牌
-        let claims = self.jwt_config.verify_token(refresh_token)?;
+        let claims = self
+            .jwt_config
+            .read()
+            .unwrap()
+            .verify_token(refresh_token)?;
 
         // 获取用户
         let user = self
@@ -133,21 +143,22 @@ impl AuthManager {
         }
 
         // 生成新的 Token
-        let access_token = self.jwt_config.generate_access_token(&user)?;
-        let new_refresh_token = self.jwt_config.generate_refresh_token(&user)?;
+        let jwt_config = self.jwt_config.read().unwrap();
+        let access_token = jwt_config.generate_access_token(&user)?;
+        let new_refresh_token = jwt_config.generate_refresh_token(&user)?;
 
         Ok(LoginResponse {
             access_token,
             refresh_token: new_refresh_token,
             token_type: "Bearer".to_string(),
-            expires_in: self.jwt_config.get_access_token_exp(),
+            expires_in: jwt_config.get_access_token_exp(),
             user: user.into(),
         })
     }
 
     /// 验证 Token 并获取用户信息
     pub fn verify_token(&self, token: &str) -> Result<User> {
-        let claims = self.jwt_config.verify_token(token)?;
+        let claims = self.jwt_config.read().unwrap().verify_token(token)?;
 
         let user = self
             .storage

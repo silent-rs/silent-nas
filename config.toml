@@ -51,3 +51,21 @@ secret_key = "minioadmin"
 
 # 是否启用 S3 认证（false 表示允许匿名访问）
 enable_auth = false
+
+# ==================== 认证配置 ====================
+[auth]
+# 是否启用用户认证系统（false 表示无需认证，任何人都可访问）
+enable = false
+
+# 用户数据库路径（使用 Sled 嵌入式数据库）
+db_path = "./data/auth.db"
+
+# JWT 签名密钥（生产环境必须修改为强随机字符串！）
+# 可使用命令生成：openssl rand -base64 32
+jwt_secret = "silent-nas-secret-key-change-in-production"
+
+# 访问令牌过期时间（秒）默认 3600 秒（1小时）
+access_token_exp = 3600
+
+# 刷新令牌过期时间（秒）默认 604800 秒（7天）
+refresh_token_exp = 604800

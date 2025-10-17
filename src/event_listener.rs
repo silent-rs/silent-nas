@@ -308,4 +308,157 @@ mod tests {
         let _result: Result<()> = Ok(());
         // 测试通过意味着所有类型导入都正确
     }
+
+    #[tokio::test]
+    async fn test_event_listener_creation() {
+        // 测试可以创建EventListener（不启动）
+        let temp_dir = TempDir::new().unwrap();
+        let storage = StorageManager::new(PathBuf::from(temp_dir.path()), 64 * 1024);
+        let storage_arc = Arc::new(storage);
+
+        let _sync_manager = Arc::new(SyncManager::new(
+            "test-node".to_string(),
+            storage_arc.clone(),
+            None,
+        ));
+
+        // 创建模拟的NATS客户端需要真实服务器，这里只是验证类型
+        // 实际的EventListener创建需要集成测试环境
+    }
+
+    #[test]
+    fn test_file_event_parsing() {
+        use crate::models::{EventType, FileEvent, FileMetadata};
+
+        // 测试事件序列化和反序列化
+        let metadata = FileMetadata {
+            id: "test-id".to_string(),
+            name: "test.txt".to_string(),
+            path: "/test/path".to_string(),
+            size: 1024,
+            hash: "testhash".to_string(),
+            created_at: chrono::Local::now().naive_local(),
+            modified_at: chrono::Local::now().naive_local(),
+        };
+
+        let event = FileEvent::new(
+            EventType::Created,
+            "test-id".to_string(),
+            Some(metadata.clone()),
+        );
+
+        // 序列化
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(!json.is_empty());
+
+        // 反序列化
+        let parsed: FileEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.file_id, "test-id");
+        assert_eq!(parsed.event_type, EventType::Created);
+        assert!(parsed.metadata.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_storage_operations() {
+        // 测试存储操作的基本功能
+        let temp_dir = TempDir::new().unwrap();
+        let storage = StorageManager::new(PathBuf::from(temp_dir.path()), 64 * 1024);
+        storage.init().await.unwrap();
+
+        // 测试保存文件
+        let test_data = b"test content for event listener";
+        let metadata = storage.save_file("event-test", test_data).await.unwrap();
+        assert_eq!(metadata.size, test_data.len() as u64);
+
+        // 测试读取文件
+        let read_data = storage.read_file(&metadata.id).await.unwrap();
+        assert_eq!(read_data, test_data);
+
+        // 测试获取元数据
+        let meta = storage.get_metadata(&metadata.id).await.unwrap();
+        assert_eq!(meta.size, test_data.len() as u64);
+        assert!(!meta.hash.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_incremental_sync_handler() {
+        // 测试增量同步处理器的基本功能
+        let temp_dir = TempDir::new().unwrap();
+        let storage = StorageManager::new(PathBuf::from(temp_dir.path()), 64 * 1024);
+        storage.init().await.unwrap();
+        let storage_arc = Arc::new(storage);
+
+        let handler = IncrementalSyncHandler::new(storage_arc.clone(), 4096);
+
+        // 创建测试文件
+        let test_data = b"test content for incremental sync";
+        let metadata = storage_arc.save_file("inc-test", test_data).await.unwrap();
+
+        // 计算签名
+        let signature = handler
+            .calculate_local_signature(&metadata.id)
+            .await
+            .unwrap();
+
+        assert_eq!(signature.file_size, test_data.len() as u64);
+        assert!(!signature.chunks.is_empty());
+        assert_eq!(signature.chunk_size, 4096);
+    }
+
+    #[test]
+    fn test_topic_pattern_format() {
+        // 测试主题模式格式
+        let topic_prefix = "silent.nas.files";
+        let pattern = format!("{}.*", topic_prefix);
+        assert_eq!(pattern, "silent.nas.files.*");
+
+        // 测试不同的前缀
+        let custom_prefix = "custom.prefix";
+        let custom_pattern = format!("{}.*", custom_prefix);
+        assert_eq!(custom_pattern, "custom.prefix.*");
+    }
+
+    #[test]
+    fn test_url_formatting() {
+        // 测试URL格式化逻辑
+        let source_http = "http://example.com:8080";
+        let file_id = "test-file-id";
+
+        // API URL
+        let api_url = format!(
+            "{}/api/files/{}",
+            source_http.trim_end_matches('/'),
+            file_id
+        );
+        assert_eq!(api_url, "http://example.com:8080/api/files/test-file-id");
+
+        // 带尾部斜杠的情况
+        let source_with_slash = "http://example.com:8080/";
+        let api_url2 = format!(
+            "{}/api/files/{}",
+            source_with_slash.trim_end_matches('/'),
+            file_id
+        );
+        assert_eq!(api_url2, "http://example.com:8080/api/files/test-file-id");
+    }
+
+    #[test]
+    fn test_path_formatting() {
+        // 测试路径格式化逻辑
+        let path_without_slash = "test/path";
+        let formatted1 = if path_without_slash.starts_with('/') {
+            path_without_slash.to_string()
+        } else {
+            format!("/{}", path_without_slash)
+        };
+        assert_eq!(formatted1, "/test/path");
+
+        let path_with_slash = "/test/path";
+        let formatted2 = if path_with_slash.starts_with('/') {
+            path_with_slash.to_string()
+        } else {
+            format!("/{}", path_with_slash)
+        };
+        assert_eq!(formatted2, "/test/path");
+    }
 }

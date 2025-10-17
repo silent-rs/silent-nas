@@ -515,8 +515,272 @@ fn state_injector(state: AppState) -> StateInjector {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::storage::StorageManager;
+    use crate::sync::crdt::SyncManager;
+    use crate::version::VersionManager;
+    use tempfile::TempDir;
+
+    async fn create_test_storage() -> (StorageManager, TempDir) {
+        let temp_dir = TempDir::new().unwrap();
+        let storage = StorageManager::new(
+            temp_dir.path().to_path_buf(),
+            64 * 1024, // 64KB chunk size for tests
+        );
+        storage.init().await.unwrap();
+        (storage, temp_dir)
+    }
+
+    async fn create_test_app_state() -> (AppState, TempDir) {
+        let (storage, temp_dir) = create_test_storage().await;
+        let storage = Arc::new(storage);
+
+        let sync_manager = SyncManager::new("test-node".to_string(), storage.clone(), None);
+        let version_config = crate::version::VersionConfig::default();
+        let version_manager = VersionManager::new(
+            storage.clone(),
+            version_config,
+            temp_dir.path().to_str().unwrap(),
+        );
+        let search_engine =
+            Arc::new(SearchEngine::new(temp_dir.path().join("search_index")).unwrap());
+        let inc_sync_handler = Arc::new(IncrementalSyncHandler::new(storage.clone(), 64 * 1024));
+        let source_http_addr = Arc::new("http://localhost:8080".to_string());
+
+        let app_state = AppState {
+            storage,
+            notifier: None,
+            sync_manager,
+            version_manager,
+            search_engine,
+            inc_sync_handler,
+            source_http_addr,
+        };
+
+        (app_state, temp_dir)
+    }
+
+    #[tokio::test]
+    async fn test_app_state_creation() {
+        let (_app_state, _temp_dir) = create_test_app_state().await;
+        // 验证 AppState 可以成功创建
+    }
+
+    #[tokio::test]
+    async fn test_app_state_clone() {
+        let (app_state, _temp_dir) = create_test_app_state().await;
+        let cloned = app_state.clone();
+
+        // 验证克隆后的状态指向相同的资源
+        assert_eq!(
+            Arc::as_ptr(&app_state.storage),
+            Arc::as_ptr(&cloned.storage)
+        );
+        assert_eq!(
+            Arc::as_ptr(&app_state.sync_manager),
+            Arc::as_ptr(&cloned.sync_manager)
+        );
+    }
+
     #[test]
-    fn test_http_module_exists() {
-        // 确保模块可以编译通过
+    fn test_search_query_default() {
+        let query = SearchQuery {
+            q: String::new(),
+            limit: default_limit(),
+            offset: 0,
+        };
+
+        assert_eq!(query.q, "");
+        assert_eq!(query.limit, 20);
+        assert_eq!(query.offset, 0);
+    }
+
+    #[test]
+    fn test_search_query_custom() {
+        let query = SearchQuery {
+            q: "test query".to_string(),
+            limit: 50,
+            offset: 10,
+        };
+
+        assert_eq!(query.q, "test query");
+        assert_eq!(query.limit, 50);
+        assert_eq!(query.offset, 10);
+    }
+
+    #[test]
+    fn test_default_limit() {
+        assert_eq!(default_limit(), 20);
+    }
+
+    #[tokio::test]
+    async fn test_health_check() {
+        let req = Request::empty();
+        let result = health(req).await;
+
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "OK");
+    }
+
+    #[tokio::test]
+    async fn test_state_injector_creation() {
+        let (app_state, _temp_dir) = create_test_app_state().await;
+        let injector = StateInjector::new(app_state.clone());
+
+        // 验证状态注入器可以正确创建
+        assert_eq!(
+            Arc::as_ptr(&injector.state.storage),
+            Arc::as_ptr(&app_state.storage)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_state_injector_middleware() {
+        let (app_state, _temp_dir) = create_test_app_state().await;
+        let injector = StateInjector::new(app_state.clone());
+
+        // 验证状态注入器的基本属性
+        assert_eq!(
+            Arc::as_ptr(&injector.state.storage),
+            Arc::as_ptr(&app_state.storage)
+        );
+
+        // 验证状态注入器实现了正确的trait
+        let _: &dyn MiddleWareHandler = &injector;
+    }
+
+    #[tokio::test]
+    async fn test_state_injector_function() {
+        let (app_state, _temp_dir) = create_test_app_state().await;
+        let injector = state_injector(app_state.clone());
+
+        assert_eq!(
+            Arc::as_ptr(&injector.state.storage),
+            Arc::as_ptr(&app_state.storage)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_upload_file_empty_body() {
+        let (app_state, _temp_dir) = create_test_app_state().await;
+        let req = Request::empty();
+
+        let result = upload_file(req, CfgExtractor(app_state)).await;
+
+        // 空请求体应该返回错误
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_list_files_empty() {
+        let (app_state, _temp_dir) = create_test_app_state().await;
+
+        let result = list_files(CfgExtractor(app_state)).await;
+
+        assert!(result.is_ok());
+        let files = result.unwrap();
+        // 空存储应该返回空列表
+        assert!(files.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_download_nonexistent_file() {
+        let (app_state, _temp_dir) = create_test_app_state().await;
+
+        let result =
+            download_file((Path("nonexistent-id".to_string()), CfgExtractor(app_state))).await;
+
+        // 不存在的文件应该返回错误
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_delete_nonexistent_file() {
+        let (app_state, _temp_dir) = create_test_app_state().await;
+
+        let result =
+            delete_file((Path("nonexistent-id".to_string()), CfgExtractor(app_state))).await;
+
+        // 删除不存在的文件应该返回错误
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_get_version_stats() {
+        let (app_state, _temp_dir) = create_test_app_state().await;
+
+        let result = get_version_stats(CfgExtractor(app_state)).await;
+
+        assert!(result.is_ok());
+        let stats = result.unwrap();
+        assert!(stats.is_object());
+    }
+
+    #[tokio::test]
+    async fn test_get_search_stats() {
+        let (app_state, _temp_dir) = create_test_app_state().await;
+
+        let result = get_search_stats(CfgExtractor(app_state)).await;
+
+        assert!(result.is_ok());
+        let stats = result.unwrap();
+        assert!(stats.is_object());
+    }
+
+    #[tokio::test]
+    async fn test_search_files_empty_query() {
+        let (app_state, _temp_dir) = create_test_app_state().await;
+
+        let query = SearchQuery {
+            q: String::new(),
+            limit: 20,
+            offset: 0,
+        };
+
+        let result = search_files((Query(query), CfgExtractor(app_state))).await;
+
+        // 空查询应该返回错误
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_search_files_valid_query() {
+        let (app_state, _temp_dir) = create_test_app_state().await;
+
+        let query = SearchQuery {
+            q: "test".to_string(),
+            limit: 20,
+            offset: 0,
+        };
+
+        let result = search_files((Query(query), CfgExtractor(app_state))).await;
+
+        assert!(result.is_ok());
+        let results = result.unwrap();
+        // 搜索结果应该是有效的JSON
+        assert!(results.is_object() || results.is_array());
+    }
+
+    #[tokio::test]
+    async fn test_list_sync_states() {
+        let (app_state, _temp_dir) = create_test_app_state().await;
+
+        let result = list_sync_states(CfgExtractor(app_state)).await;
+
+        assert!(result.is_ok());
+        let states = result.unwrap();
+        // 返回值应该是有效的JSON
+        assert!(states.is_object() || states.is_array());
+    }
+
+    #[tokio::test]
+    async fn test_get_conflicts() {
+        let (app_state, _temp_dir) = create_test_app_state().await;
+
+        let result = get_conflicts(CfgExtractor(app_state)).await;
+
+        assert!(result.is_ok());
+        let conflicts = result.unwrap();
+        assert!(conflicts.is_array());
     }
 }

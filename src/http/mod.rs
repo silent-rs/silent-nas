@@ -2,6 +2,7 @@
 //!
 //! 提供 REST API 服务，使用中间件和萃取器模式
 
+mod audit_api;
 mod files;
 mod health;
 mod incremental_sync;
@@ -49,6 +50,13 @@ pub async fn start_http_server(
     // 创建增量同步处理器
     let inc_sync_handler = Arc::new(IncrementalSyncHandler::new(storage.clone(), 64 * 1024));
 
+    // 创建审计日志管理器（可选，通过环境变量启用）
+    let audit_logger = if std::env::var("ENABLE_AUDIT").is_ok() {
+        Some(Arc::new(crate::audit::AuditLogger::new(1000)))
+    } else {
+        None
+    };
+
     // 计算源 HTTP 地址
     let advertise_host = std::env::var("ADVERTISE_HOST")
         .ok()
@@ -70,6 +78,7 @@ pub async fn start_http_server(
         search_engine: search_engine.clone(),
         inc_sync_handler,
         source_http_addr,
+        audit_logger,
     };
 
     // 定期提交索引
@@ -118,7 +127,9 @@ pub async fn start_http_server(
             .append(Route::new("health").get(health::health))
             .append(Route::new("health/readiness").get(health::readiness))
             .append(Route::new("health/status").get(health::health_status))
-            .append(Route::new("metrics").get(metrics_api::get_metrics)),
+            .append(Route::new("metrics").get(metrics_api::get_metrics))
+            .append(Route::new("audit/logs").get(audit_api::get_audit_logs))
+            .append(Route::new("audit/stats").get(audit_api::get_audit_stats)),
     );
 
     info!("HTTP 服务器启动: {}", addr);
@@ -198,6 +209,7 @@ mod tests {
             search_engine,
             inc_sync_handler,
             source_http_addr,
+            audit_logger: None,
         };
 
         (app_state, temp_dir)

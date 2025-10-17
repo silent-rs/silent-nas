@@ -188,14 +188,22 @@ async fn main() -> Result<()> {
     let notifier_webdav = notifier.clone();
     let sync_webdav = sync_manager.clone();
 
-    let source_http_addr_for_webdav = source_http_addr.clone();
     tokio::spawn(async move {
+        let webdav_base = format!(
+            "http://{}:{}",
+            advertise_host,
+            // 从监听地址中提取端口以确保一致
+            webdav_addr_clone
+                .rsplit(':')
+                .next()
+                .unwrap_or(&config.server.webdav_port.to_string())
+        );
         if let Err(e) = start_webdav_server(
             &webdav_addr_clone,
             storage_webdav,
             notifier_webdav,
             sync_webdav,
-            source_http_addr_for_webdav.clone(),
+            webdav_base,
         )
         .await
         {

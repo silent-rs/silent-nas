@@ -365,32 +365,25 @@ impl WebDavHandler {
             )
         })?;
 
-        // 生成文件 ID 并写入基于ID的存储（用于跨节点按ID拉取）
+        // 构造元数据（保留原始WebDAV路径，便于对端按路径拉取）
         let file_id = scru128::new_string();
-        let id_metadata = self
-            .storage
-            .save_file(&file_id, &body_data)
-            .await
-            .map_err(|e| {
-                SilentError::business_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("保存ID文件失败: {}", e),
-                )
-            })?;
-
-        // 用于事件的元数据，保留原始WebDAV路径，便于对端按路径回退拉取
         let metadata = FileMetadata {
-            id: id_metadata.id.clone(),
+            id: file_id.clone(),
             name: storage_path
                 .file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or("unknown")
                 .to_string(),
             path: path.clone(),
-            size: id_metadata.size,
-            hash: id_metadata.hash.clone(),
-            created_at: id_metadata.created_at,
-            modified_at: id_metadata.modified_at,
+            size: body_data.len() as u64,
+            hash: {
+                use sha2::{Digest, Sha256};
+                let mut h = Sha256::new();
+                h.update(&body_data);
+                hex::encode(h.finalize())
+            },
+            created_at: chrono::Local::now().naive_local(),
+            modified_at: chrono::Local::now().naive_local(),
         };
 
         // 通知 SyncManager 处理本地变更

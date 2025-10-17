@@ -109,11 +109,24 @@ impl EventListener {
                                     Ok(resp) if resp.status().is_success() => {
                                         match resp.bytes().await {
                                             Ok(bytes) => {
-                                                if let Err(e) = self
-                                                    .storage
-                                                    .save_file(&event.file_id, &bytes)
-                                                    .await
-                                                {
+                                                // 优先按元数据路径保存，避免在 data 下生成ID文件
+                                                let save_res =
+                                                    if let Some(meta) = event.metadata.as_ref() {
+                                                        if !meta.path.is_empty() {
+                                                            self.storage
+                                                                .save_at_path(&meta.path, &bytes)
+                                                                .await
+                                                        } else {
+                                                            self.storage
+                                                                .save_file(&event.file_id, &bytes)
+                                                                .await
+                                                        }
+                                                    } else {
+                                                        self.storage
+                                                            .save_file(&event.file_id, &bytes)
+                                                            .await
+                                                    };
+                                                if let Err(e) = save_res {
                                                     error!(
                                                         "保存拉取内容失败: {} - {}",
                                                         event.file_id, e
@@ -145,18 +158,18 @@ impl EventListener {
                                                 format!("/{}", meta.path)
                                             };
                                             let dav_url = format!(
-                                                "{}/webdav{}",
+                                                "{}{}",
                                                 source_http.trim_end_matches('/'),
                                                 dav_path
                                             );
                                             match reqwest::get(&dav_url).await {
                                                 Ok(r2) if r2.status().is_success() => {
                                                     if let Ok(bytes) = r2.bytes().await {
-                                                        if let Err(e) = self
+                                                        let save_res = self
                                                             .storage
-                                                            .save_file(&event.file_id, &bytes)
-                                                            .await
-                                                        {
+                                                            .save_at_path(&dav_path, &bytes)
+                                                            .await;
+                                                        if let Err(e) = save_res {
                                                             error!(
                                                                 "保存DAV拉取内容失败: {} - {}",
                                                                 event.file_id, e

@@ -99,6 +99,40 @@ impl StorageManager {
         })
     }
 
+    /// 按相对路径保存文件（用于 WebDAV/S3 路径语义）
+    pub async fn save_at_path(&self, relative_path: &str, data: &[u8]) -> Result<FileMetadata> {
+        let rel = relative_path.trim_start_matches('/');
+        let file_path = self.data_root().join(rel);
+
+        if let Some(parent) = file_path.parent() {
+            fs::create_dir_all(parent).await?;
+        }
+
+        let mut file = fs::File::create(&file_path).await?;
+        file.write_all(data).await?;
+        file.flush().await?;
+
+        debug!("按路径保存文件: {:?}", file_path);
+
+        let hash = self.calculate_hash(data);
+        let metadata = fs::metadata(&file_path).await?;
+        let now = chrono::Local::now().naive_local();
+
+        Ok(FileMetadata {
+            id: rel.to_string(),
+            name: file_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(rel)
+                .to_string(),
+            path: format!("/{}", rel),
+            size: metadata.len(),
+            hash,
+            created_at: now,
+            modified_at: now,
+        })
+    }
+
     /// 读取文件
     pub async fn read_file(&self, file_id: &str) -> Result<Vec<u8>> {
         let file_path = self.get_file_path(file_id);

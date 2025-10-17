@@ -1,8 +1,11 @@
 // Silent-NAS 库接口
 // 用于测试和外部集成
 
+pub mod audit;
+pub mod cache;
 pub mod config;
 pub mod error;
+pub mod metrics;
 pub mod models;
 pub mod notify;
 pub mod s3;

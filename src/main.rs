@@ -1,8 +1,11 @@
+mod audit;
 mod auth;
+mod cache;
 mod config;
 mod error;
 mod event_listener;
 mod http;
+mod metrics;
 mod models;
 mod notify;
 mod rpc;

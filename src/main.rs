@@ -295,14 +295,21 @@ async fn main() -> Result<()> {
     info!("  S3:      http://{}", s3_addr);
     info!("  QUIC:    {}", quic_addr);
 
-    // 保持运行，优雅处理 SIGINT/SIGTERM（容器内常用 SIGTERM）
+    // 保持运行，优雅处理 SIGINT/SIGTERM（同时监听两种信号）
     #[cfg(unix)]
     {
         use tokio::signal::unix::{SignalKind, signal};
-        // 在容器内，优先监听 SIGTERM；避免某些环境下 ctrl_c() 立即返回导致进程退出
         let mut sigterm = signal(SignalKind::terminate()).expect("注册 SIGTERM 失败");
-        sigterm.recv().await;
-        info!("收到 SIGTERM 信号，正在退出...");
+        let mut sigint = signal(SignalKind::interrupt()).expect("注册 SIGINT 失败");
+
+        tokio::select! {
+            _ = sigterm.recv() => {
+                info!("收到 SIGTERM 信号，正在退出...");
+            }
+            _ = sigint.recv() => {
+                info!("收到 SIGINT 信号 (Ctrl+C)，正在退出...");
+            }
+        }
     }
 
     #[cfg(not(unix))]

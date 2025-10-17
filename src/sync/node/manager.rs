@@ -475,4 +475,71 @@ mod tests {
         assert_ne!(online, offline);
         assert_ne!(online, faulty);
     }
+
+    #[test]
+    fn test_node_info_clone() {
+        let node = NodeInfo {
+            node_id: "test-node".to_string(),
+            address: "127.0.0.1:9000".to_string(),
+            last_seen: Local::now().naive_local(),
+            version: "1.0.0".to_string(),
+            metadata: HashMap::new(),
+            status: NodeStatus::Online,
+        };
+
+        let cloned = node.clone();
+        assert_eq!(node.node_id, cloned.node_id);
+        assert_eq!(node.address, cloned.address);
+        assert_eq!(node.version, cloned.version);
+        assert_eq!(node.status, cloned.status);
+    }
+
+    #[test]
+    fn test_node_discovery_config_creation() {
+        let config = NodeDiscoveryConfig {
+            node_id: "test-node".to_string(),
+            listen_addr: "0.0.0.0:9000".to_string(),
+            seed_nodes: vec!["seed1:9000".to_string(), "seed2:9000".to_string()],
+            heartbeat_interval: 30,
+            node_timeout: 60,
+        };
+
+        assert_eq!(config.node_id, "test-node");
+        assert_eq!(config.listen_addr, "0.0.0.0:9000");
+        assert_eq!(config.seed_nodes.len(), 2);
+        assert_eq!(config.heartbeat_interval, 30);
+        assert_eq!(config.node_timeout, 60);
+    }
+
+    #[test]
+    fn test_sync_config_custom() {
+        let config = SyncConfig {
+            auto_sync: false,
+            sync_interval: 120,
+            max_files_per_sync: 50,
+            max_retries: 5,
+        };
+
+        assert!(!config.auto_sync);
+        assert_eq!(config.sync_interval, 120);
+        assert_eq!(config.max_files_per_sync, 50);
+        assert_eq!(config.max_retries, 5);
+    }
+
+    #[test]
+    fn test_sync_stats_creation() {
+        let stats = SyncStats {
+            total_files: 100,
+            synced_files: 80,
+            pending_files: 20,
+            last_sync_time: Some(Local::now().naive_local()),
+            error_count: 5,
+        };
+
+        assert_eq!(stats.total_files, 100);
+        assert_eq!(stats.synced_files, 80);
+        assert_eq!(stats.pending_files, 20);
+        assert!(stats.last_sync_time.is_some());
+        assert_eq!(stats.error_count, 5);
+    }
 }

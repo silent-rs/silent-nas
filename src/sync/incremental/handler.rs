@@ -375,4 +375,102 @@ mod tests {
         let result = handler.calculate_local_signature("nonexistent").await;
         assert!(result.is_err());
     }
+
+    #[tokio::test]
+    async fn test_generate_delta_chunks_large_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage = Arc::new(StorageManager::new(
+            PathBuf::from(temp_dir.path()),
+            64 * 1024,
+        ));
+        storage.init().await.unwrap();
+
+        // 创建一个大文件（超过一个块的大小）
+        let file_id = "large_file";
+        let mut data = Vec::new();
+        for i in 0..1000 {
+            data.extend_from_slice(format!("Line {} with some content\n", i).as_bytes());
+        }
+        storage.save_file(file_id, &data).await.unwrap();
+
+        let handler = IncrementalSyncHandler::new(storage, 1024); // 使用小块大小
+
+        // 计算签名
+        let signature = handler.calculate_local_signature(file_id).await.unwrap();
+
+        // 验证生成了多个块
+        assert!(signature.chunks.len() > 1);
+        assert_eq!(signature.file_size, data.len() as u64);
+
+        // 创建一个不同的目标签名来测试差异检测
+        let target_sig = FileSignature {
+            file_id: file_id.to_string(),
+            file_size: 100,
+            chunk_size: 1024,
+            file_hash: "different".to_string(),
+            chunks: vec![],
+        };
+
+        let delta = handler
+            .generate_delta_chunks(file_id, &target_sig)
+            .await
+            .unwrap();
+
+        // 应该有差异块
+        assert!(!delta.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_calculate_local_signature_empty_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage = Arc::new(StorageManager::new(
+            PathBuf::from(temp_dir.path()),
+            64 * 1024,
+        ));
+        storage.init().await.unwrap();
+
+        // 创建空文件
+        let file_id = "empty_file";
+        let data = b"";
+        storage.save_file(file_id, data).await.unwrap();
+
+        let handler = IncrementalSyncHandler::new(storage, 64 * 1024);
+        let signature = handler.calculate_local_signature(file_id).await.unwrap();
+
+        assert_eq!(signature.file_id, file_id);
+        assert_eq!(signature.file_size, 0);
+        // 空文件应该有0个块
+        assert!(signature.chunks.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_handler_with_different_chunk_sizes() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage = Arc::new(StorageManager::new(
+            PathBuf::from(temp_dir.path()),
+            64 * 1024,
+        ));
+        storage.init().await.unwrap();
+
+        let data = b"Test data for different chunk sizes";
+        let file_id = "test_file";
+        storage.save_file(file_id, data).await.unwrap();
+
+        // 测试不同的块大小
+        for chunk_size in [512, 1024, 4096, 64 * 1024] {
+            let handler = IncrementalSyncHandler::new(storage.clone(), chunk_size);
+            let signature = handler.calculate_local_signature(file_id).await.unwrap();
+
+            assert_eq!(signature.chunk_size, chunk_size);
+            assert_eq!(signature.file_size, data.len() as u64);
+
+            // 验证块数量合理
+            let expected_chunks = if data.is_empty() {
+                0
+            } else {
+                ((data.len() as f64) / (chunk_size as f64)).ceil() as usize
+            };
+            assert_eq!(signature.chunks.len(), expected_chunks);
+        }
+    }
 }

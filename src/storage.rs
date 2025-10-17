@@ -51,14 +51,10 @@ impl StorageManager {
 
     /// 获取文件的完整路径（基于 file_id）
     fn get_file_path(&self, file_id: &str) -> PathBuf {
-        // 如果file_id包含斜杠，说明是bucket/key格式，直接使用
-        if file_id.contains('/') {
-            self.data_root().join(file_id)
-        } else {
-            // 使用前2个字符作为子目录，避免单目录文件过多
-            let prefix = &file_id[..2.min(file_id.len())];
-            self.data_root().join(prefix).join(file_id)
-        }
+        // 所有ID统一直接映射到 data/<id>，不再使用哈希前缀目录
+        // 若file_id包含路径分隔符（如S3 bucket/key），保持相对路径写入 data/<bucket>/<key>
+        // 若包含分隔符，视为相对路径；否则视为ID，均直接放在 data/ 下（路径保持相对结构）
+        self.data_root().join(file_id)
     }
 
     /// 获取文件的完整路径（基于相对路径，用于 WebDAV）
@@ -110,14 +106,19 @@ impl StorageManager {
         let real_path = if file_path.exists() {
             file_path
         } else {
-            let legacy = self
-                .root_path
-                .join(&file_id[..2.min(file_id.len())])
-                .join(file_id);
-            if legacy.exists() {
-                legacy
+            // 兼容旧布局：data/<prefix>/<id>
+            let prefix = &file_id[..2.min(file_id.len())];
+            let legacy_data = self.data_root().join(prefix).join(file_id);
+            if legacy_data.exists() {
+                legacy_data
             } else {
-                return Err(NasError::FileNotFound(file_id.to_string()));
+                // 更早的旧布局：root/<prefix>/<id>
+                let legacy_root = self.root_path.join(prefix).join(file_id);
+                if legacy_root.exists() {
+                    legacy_root
+                } else {
+                    return Err(NasError::FileNotFound(file_id.to_string()));
+                }
             }
         };
 
@@ -132,14 +133,17 @@ impl StorageManager {
         let real_path = if file_path.exists() {
             file_path
         } else {
-            let legacy = self
-                .root_path
-                .join(&file_id[..2.min(file_id.len())])
-                .join(file_id);
-            if legacy.exists() {
-                legacy
+            let prefix = &file_id[..2.min(file_id.len())];
+            let legacy_data = self.data_root().join(prefix).join(file_id);
+            if legacy_data.exists() {
+                legacy_data
             } else {
-                return Err(NasError::FileNotFound(file_id.to_string()));
+                let legacy_root = self.root_path.join(prefix).join(file_id);
+                if legacy_root.exists() {
+                    legacy_root
+                } else {
+                    return Err(NasError::FileNotFound(file_id.to_string()));
+                }
             }
         };
 
@@ -275,14 +279,17 @@ impl StorageManager {
         let real_path = if file_path.exists() {
             file_path
         } else {
-            let legacy = self
-                .root_path
-                .join(&file_id[..2.min(file_id.len())])
-                .join(file_id);
-            if legacy.exists() {
-                legacy
+            let prefix = &file_id[..2.min(file_id.len())];
+            let legacy_data = self.data_root().join(prefix).join(file_id);
+            if legacy_data.exists() {
+                legacy_data
             } else {
-                return Err(NasError::FileNotFound(file_id.to_string()));
+                let legacy_root = self.root_path.join(prefix).join(file_id);
+                if legacy_root.exists() {
+                    legacy_root
+                } else {
+                    return Err(NasError::FileNotFound(file_id.to_string()));
+                }
             }
         };
 

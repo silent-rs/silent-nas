@@ -266,3 +266,46 @@ impl EventListener {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+    use tempfile::TempDir;
+
+    // 注意：由于EventListener依赖NATS客户端，完整的功能测试需要集成测试环境
+    // 这里只测试可以独立测试的部分
+
+    #[tokio::test]
+    async fn test_event_listener_dependencies() {
+        // 测试EventListener的依赖项可以正确创建
+        let temp_dir = TempDir::new().unwrap();
+        let storage = StorageManager::new(PathBuf::from(temp_dir.path()), 64 * 1024);
+        storage.init().await.unwrap();
+
+        // 创建NATS客户端需要真实的NATS服务器
+        // 这里只验证存储管理器可以正常工作
+        let test_data = b"test content";
+        let file_id = storage.save_file("test", test_data).await.unwrap();
+        assert!(!file_id.id.is_empty());
+
+        // 验证增量同步处理器可以创建
+        let storage_arc = Arc::new(storage);
+        let handler = IncrementalSyncHandler::new(storage_arc, 64 * 1024);
+
+        // 验证处理器可以正常工作
+        let sig = handler
+            .calculate_local_signature(&file_id.id)
+            .await
+            .unwrap();
+        assert_eq!(sig.file_size, test_data.len() as u64);
+    }
+
+    #[test]
+    fn test_module_imports() {
+        // 验证所有必要的类型都可以正确导入
+        // 这是一个编译时测试，如果编译通过就说明导入正确
+        let _result: Result<()> = Ok(());
+        // 测试通过意味着所有类型导入都正确
+    }
+}

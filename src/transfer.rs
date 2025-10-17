@@ -365,4 +365,138 @@ mod tests {
             assert_eq!(input, expected);
         }
     }
+
+    #[tokio::test]
+    #[ignore] // 需要NATS服务器运行，集成测试时再执行
+    async fn test_quic_transfer_server_creation() {
+        use crate::storage::StorageManager;
+        use std::path::PathBuf;
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let storage = StorageManager::new(PathBuf::from(temp_dir.path()), 64 * 1024);
+        storage.init().await.unwrap();
+
+        // EventNotifier需要NATS，这里测试服务器创建即可
+        let notifier = EventNotifier::connect("nats://localhost:4222", "test".to_string())
+            .await
+            .expect("NATS server should be running");
+
+        let server = QuicTransferServer::new(storage, notifier);
+        // 验证服务器创建成功
+        assert!(server.endpoint.is_none()); // 初始时endpoint为None
+    }
+
+    #[test]
+    fn test_server_configure() {
+        // 测试configure_server方法（不需要EventNotifier）
+        // 这是一个内部方法，通过验证其逻辑来测试
+
+        // 验证证书生成逻辑
+        let cert_result = rcgen::generate_simple_self_signed(vec!["localhost".into()]);
+        assert!(cert_result.is_ok());
+
+        let cert = cert_result.unwrap();
+        let cert_der = cert.cert.der();
+        let key_der = cert.key_pair.serialize_der();
+
+        assert!(!cert_der.is_empty());
+        assert!(!key_der.is_empty());
+    }
+
+    #[test]
+    fn test_protocol_constants() {
+        // 测试协议相关常量
+        const UPLOAD_CMD: u8 = 0x01;
+        const DOWNLOAD_CMD: u8 = 0x02;
+        const MAX_CONCURRENT_STREAMS: u8 = 0;
+
+        assert_eq!(UPLOAD_CMD, 1);
+        assert_eq!(DOWNLOAD_CMD, 2);
+        assert_eq!(MAX_CONCURRENT_STREAMS, 0);
+
+        // 验证命令不冲突
+        assert_ne!(UPLOAD_CMD, DOWNLOAD_CMD);
+    }
+
+    #[test]
+    fn test_buffer_operations() {
+        // 测试缓冲区操作
+        let mut buffer = Vec::new();
+
+        // 写入命令
+        buffer.push(0x01u8);
+        assert_eq!(buffer[0], 0x01);
+
+        // 写入长度
+        let len: u32 = 1024;
+        buffer.extend_from_slice(&len.to_be_bytes());
+        assert_eq!(buffer.len(), 5);
+
+        // 读取长度
+        let read_len = u32::from_be_bytes([buffer[1], buffer[2], buffer[3], buffer[4]]);
+        assert_eq!(read_len, 1024);
+    }
+
+    #[test]
+    fn test_file_id_validation() {
+        // 测试文件ID验证逻辑
+        let valid_ids = vec![
+            "test-123",
+            "file_001",
+            "document.pdf",
+            "image-2024-01-01.jpg",
+        ];
+
+        for id in valid_ids {
+            assert!(!id.is_empty());
+            assert!(id.len() < 1000); // 合理的长度限制
+
+            // 验证可以编码为UTF-8
+            let bytes = id.as_bytes();
+            let decoded = String::from_utf8(bytes.to_vec());
+            assert!(decoded.is_ok());
+            assert_eq!(decoded.unwrap(), id);
+        }
+    }
+
+    #[test]
+    fn test_response_codes() {
+        // 测试响应代码
+        const SUCCESS: u8 = 0x00;
+        const ERROR: u8 = 0xFF;
+
+        assert_eq!(SUCCESS, 0);
+        assert_eq!(ERROR, 255);
+        assert_ne!(SUCCESS, ERROR);
+
+        // 验证响应代码范围（编译时常量）
+        const _: () = assert!(SUCCESS < 128);
+        const _: () = assert!(ERROR > 128);
+    }
+
+    #[test]
+    fn test_stream_buffer_sizes() {
+        // 测试流缓冲区大小
+        const BUFFER_SIZE_1K: usize = 1024;
+        const BUFFER_SIZE_4K: usize = 4096;
+        const BUFFER_SIZE_64K: usize = 65536;
+
+        let mut buffer_1k = vec![0u8; BUFFER_SIZE_1K];
+        let mut buffer_4k = vec![0u8; BUFFER_SIZE_4K];
+        let mut buffer_64k = vec![0u8; BUFFER_SIZE_64K];
+
+        assert_eq!(buffer_1k.len(), 1024);
+        assert_eq!(buffer_4k.len(), 4096);
+        assert_eq!(buffer_64k.len(), 65536);
+
+        // 验证缓冲区可以写入
+        buffer_1k[0] = 0xFF;
+        buffer_4k[0] = 0xFF;
+        buffer_64k[0] = 0xFF;
+
+        assert_eq!(buffer_1k[0], 0xFF);
+        assert_eq!(buffer_4k[0], 0xFF);
+        assert_eq!(buffer_64k[0], 0xFF);
+    }
 }

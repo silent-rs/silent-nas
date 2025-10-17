@@ -13,7 +13,7 @@ use file_service::*;
 
 pub struct FileServiceImpl {
     storage: StorageManager,
-    notifier: EventNotifier,
+    notifier: Option<EventNotifier>,
     /// 对外可访问的 HTTP 基址（用于事件中携带源地址，便于其他节点拉取）
     source_http_addr: Option<String>,
 }
@@ -21,7 +21,7 @@ pub struct FileServiceImpl {
 impl FileServiceImpl {
     pub fn new(
         storage: StorageManager,
-        notifier: EventNotifier,
+        notifier: Option<EventNotifier>,
         source_http_addr: Option<String>,
     ) -> Self {
         Self {
@@ -63,7 +63,9 @@ impl FileService for FileServiceImpl {
         if let Some(addr) = &self.source_http_addr {
             event.source_http_addr = Some(addr.clone());
         }
-        let _ = self.notifier.notify_created(event).await;
+        if let Some(ref n) = self.notifier {
+            let _ = n.notify_created(event).await;
+        }
 
         Ok(Response::new(UploadFileResponse {
             metadata: Some(convert_metadata(&metadata)),
@@ -110,7 +112,9 @@ impl FileService for FileServiceImpl {
         if let Some(addr) = &self.source_http_addr {
             event.source_http_addr = Some(addr.clone());
         }
-        let _ = self.notifier.notify_deleted(event).await;
+        if let Some(ref n) = self.notifier {
+            let _ = n.notify_deleted(event).await;
+        }
 
         Ok(Response::new(DeleteFileResponse { success: true }))
     }

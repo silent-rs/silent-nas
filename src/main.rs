@@ -44,20 +44,21 @@ async fn main() -> Result<()> {
     let storage = StorageManager::new(config.storage.root_path.clone(), config.storage.chunk_size);
     storage.init().await?;
 
-    // 连接 NATS
-    let notifier = EventNotifier::connect(&config.nats.url, config.nats.topic_prefix.clone())
-        .await
-        .map_err(|e| {
-            error!("连接 NATS 失败: {}", e);
-            e
-        })?;
+    // 尝试连接 NATS（可选，单节点模式下可不连接）
+    let notifier =
+        EventNotifier::try_connect(&config.nats.url, config.nats.topic_prefix.clone()).await;
+    if notifier.is_some() {
+        info!("✅ NATS 已连接 - 多节点模式启用");
+    } else {
+        info!("ℹ️  未连接 NATS - 单节点模式运行");
+    }
 
     // 初始化同步管理器
     let node_id = scru128::new_string();
     let sync_manager = SyncManager::new(
         node_id.clone(),
         Arc::new(storage.clone()),
-        Arc::new(notifier.clone()),
+        notifier.clone().map(Arc::new),
     );
     info!("同步管理器已初始化: node_id={}", node_id);
 
@@ -78,19 +79,24 @@ async fn main() -> Result<()> {
         .unwrap_or_else(|| config.server.host.clone());
     let source_http_addr = format!("http://{}:{}", advertise_host, config.server.http_port);
 
-    // 启动事件监听器（监听其他节点的文件变更）
-    let event_listener = EventListener::new(
-        sync_manager.clone(),
-        notifier.get_client(),
-        config.nats.topic_prefix.clone(),
-        storage.clone(),
-        config.storage.chunk_size,
-    );
-    tokio::spawn(async move {
-        if let Err(e) = event_listener.start().await {
-            error!("事件监听器错误: {}", e);
-        }
-    });
+    // 启动事件监听器（仅在 NATS 连接成功时）
+    if let Some(ref nats_notifier) = notifier {
+        let event_listener = EventListener::new(
+            sync_manager.clone(),
+            nats_notifier.get_client(),
+            config.nats.topic_prefix.clone(),
+            storage.clone(),
+            config.storage.chunk_size,
+        );
+        tokio::spawn(async move {
+            if let Err(e) = event_listener.start().await {
+                error!("事件监听器错误: {}", e);
+            }
+        });
+        info!("事件监听器已启动");
+    } else {
+        info!("跳过事件监听器（单节点模式）");
+    }
 
     // 启动 HTTP 服务器（使用 Silent 框架）
     let http_addr = format!("{}:{}", config.server.host, config.server.http_port);
@@ -279,12 +285,12 @@ async fn main() -> Result<()> {
 async fn start_http_server(
     addr: &str,
     storage: StorageManager,
-    notifier: EventNotifier,
+    notifier: Option<EventNotifier>,
     sync_manager: Arc<SyncManager>,
     version_manager: Arc<VersionManager>,
 ) -> Result<()> {
     let storage = Arc::new(storage);
-    let notifier = Arc::new(notifier);
+    let notifier = notifier.map(Arc::new);
 
     // 创建增量同步处理器
     use sync::incremental::IncrementalSyncHandler;
@@ -350,7 +356,9 @@ async fn start_http_server(
             let mut event =
                 FileEvent::new(EventType::Created, file_id.clone(), Some(metadata.clone()));
             event.source_http_addr = Some((*src_http).clone());
-            let _ = notifier.notify_created(event).await;
+            if let Some(ref n) = notifier {
+                let _ = n.notify_created(event).await;
+            }
 
             Ok(serde_json::json!({
                 "file_id": file_id,
@@ -398,7 +406,9 @@ async fn start_http_server(
             })?;
 
             let event = FileEvent::new(EventType::Deleted, file_id, None);
-            let _ = notifier.notify_deleted(event).await;
+            if let Some(ref n) = notifier {
+                let _ = n.notify_deleted(event).await;
+            }
 
             Ok(serde_json::json!({"success": true}))
         }
@@ -511,7 +521,9 @@ async fn start_http_server(
             // 发送修改事件
             if let Ok(metadata) = storage.get_metadata(&file_id).await {
                 let event = FileEvent::new(EventType::Modified, file_id.clone(), Some(metadata));
-                let _ = notifier.notify_modified(event).await;
+                if let Some(ref n) = notifier {
+                    let _ = n.notify_modified(event).await;
+                }
             }
 
             Ok(serde_json::to_value(version).unwrap())
@@ -650,7 +662,7 @@ async fn start_http_server(
 async fn start_grpc_server(
     addr: SocketAddr,
     storage: StorageManager,
-    notifier: EventNotifier,
+    notifier: Option<EventNotifier>,
     source_http_addr: String,
 ) -> Result<()> {
     let file_service = FileServiceImpl::new(storage, notifier, Some(source_http_addr));
@@ -670,13 +682,13 @@ async fn start_grpc_server(
 async fn start_webdav_server(
     addr: &str,
     storage: StorageManager,
-    notifier: EventNotifier,
+    notifier: Option<EventNotifier>,
     sync_manager: Arc<SyncManager>,
     source_http_addr: String,
     version_manager: Arc<VersionManager>,
 ) -> Result<()> {
     let storage = Arc::new(storage);
-    let notifier = Arc::new(notifier);
+    let notifier = notifier.map(Arc::new);
 
     let route = webdav::create_webdav_routes(
         storage,
@@ -701,14 +713,14 @@ async fn start_webdav_server(
 async fn start_s3_server(
     addr: &str,
     storage: StorageManager,
-    notifier: EventNotifier,
+    notifier: Option<EventNotifier>,
     s3_config: config::S3Config,
     source_http_addr: String,
     versioning_manager: Arc<s3::VersioningManager>,
     version_manager: Arc<VersionManager>,
 ) -> Result<()> {
     let storage = Arc::new(storage);
-    let notifier = Arc::new(notifier);
+    let notifier = notifier.map(Arc::new);
 
     // 配置S3认证
     let auth = if s3_config.enable_auth {

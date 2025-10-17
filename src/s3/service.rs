@@ -11,7 +11,7 @@ use std::sync::{Arc, RwLock};
 /// S3服务
 pub struct S3Service {
     pub(crate) storage: Arc<StorageManager>,
-    pub(crate) notifier: Arc<EventNotifier>,
+    pub(crate) notifier: Option<Arc<EventNotifier>>,
     pub(crate) auth: Option<S3Auth>,
     pub(crate) multipart_uploads: Arc<RwLock<HashMap<String, MultipartUpload>>>,
     pub(crate) source_http_addr: String,
@@ -22,7 +22,7 @@ pub struct S3Service {
 impl S3Service {
     pub fn new(
         storage: Arc<StorageManager>,
-        notifier: Arc<EventNotifier>,
+        notifier: Option<Arc<EventNotifier>>,
         auth: Option<S3Auth>,
         source_http_addr: String,
         versioning_manager: Arc<VersioningManager>,

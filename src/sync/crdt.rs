@@ -94,8 +94,8 @@ pub struct SyncManager {
     node_id: String,
     /// 存储管理器
     storage: Arc<StorageManager>,
-    /// 事件通知器
-    notifier: Arc<EventNotifier>,
+    /// 事件通知器（可选，单节点模式下为 None）
+    notifier: Option<Arc<EventNotifier>>,
     /// 文件同步状态缓存
     sync_states: Arc<RwLock<HashMap<String, FileSync>>>,
     /// 每个文件最近一次已知的源HTTP地址（用于补拉）
@@ -106,7 +106,7 @@ impl SyncManager {
     pub fn new(
         node_id: String,
         storage: Arc<StorageManager>,
-        notifier: Arc<EventNotifier>,
+        notifier: Option<Arc<EventNotifier>>,
     ) -> Arc<Self> {
         Arc::new(Self {
             node_id,
@@ -254,15 +254,17 @@ impl SyncManager {
 
     /// 广播文件变更到其他节点
     pub async fn broadcast_change(&self, file_sync: &FileSync) -> Result<()> {
-        // 通过 NATS 发送同步事件
-        let event = FileEvent::new(
-            EventType::Modified,
-            file_sync.file_id.clone(),
-            file_sync.get_metadata().cloned(),
-        );
+        // 通过 NATS 发送同步事件（仅在多节点模式下）
+        if let Some(ref notifier) = self.notifier {
+            let event = FileEvent::new(
+                EventType::Modified,
+                file_sync.file_id.clone(),
+                file_sync.get_metadata().cloned(),
+            );
 
-        self.notifier.publish_event(&event).await?;
-        debug!("广播文件变更: {}", file_sync.file_id);
+            notifier.publish_event(&event).await?;
+            debug!("广播文件变更: {}", file_sync.file_id);
+        }
 
         Ok(())
     }

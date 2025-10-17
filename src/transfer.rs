@@ -12,12 +12,12 @@ pub struct QuicTransferServer {
     #[allow(dead_code)]
     storage: StorageManager,
     #[allow(dead_code)]
-    notifier: EventNotifier,
+    notifier: Option<EventNotifier>,
     endpoint: Option<Endpoint>,
 }
 
 impl QuicTransferServer {
-    pub fn new(storage: StorageManager, notifier: EventNotifier) -> Self {
+    pub fn new(storage: StorageManager, notifier: Option<EventNotifier>) -> Self {
         Self {
             storage,
             notifier,
@@ -382,7 +382,7 @@ mod tests {
             .await
             .expect("NATS server should be running");
 
-        let server = QuicTransferServer::new(storage, notifier);
+        let server = QuicTransferServer::new(storage, Some(notifier));
         // 验证服务器创建成功
         assert!(server.endpoint.is_none()); // 初始时endpoint为None
     }

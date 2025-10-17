@@ -37,7 +37,7 @@ const CONTENT_TYPE_HTML: &str = "text/html; charset=utf-8";
 #[derive(Clone)]
 pub struct WebDavHandler {
     pub storage: Arc<StorageManager>,
-    pub notifier: Arc<EventNotifier>,
+    pub notifier: Option<Arc<EventNotifier>>,
     pub sync_manager: Arc<SyncManager>,
     pub base_path: String,
     pub source_http_addr: String,
@@ -48,7 +48,7 @@ pub struct WebDavHandler {
 impl WebDavHandler {
     pub fn new(
         storage: Arc<StorageManager>,
-        notifier: Arc<EventNotifier>,
+        notifier: Option<Arc<EventNotifier>>,
         sync_manager: Arc<SyncManager>,
         base_path: String,
         source_http_addr: String,
@@ -407,7 +407,9 @@ impl WebDavHandler {
         // 发布事件到 NATS（用于跨节点通知）
         let mut event = FileEvent::new(EventType::Created, file_id, Some(metadata));
         event.source_http_addr = Some(self.source_http_addr.clone());
-        let _ = self.notifier.notify_created(event).await;
+        if let Some(ref n) = self.notifier {
+            let _ = n.notify_created(event).await;
+        }
 
         let mut resp = Response::empty();
         resp.set_status(StatusCode::CREATED);
@@ -452,7 +454,9 @@ impl WebDavHandler {
                     .unwrap_or(8081 - 1)
             ));
         }
-        let _ = self.notifier.notify_deleted(event).await;
+        if let Some(ref n) = self.notifier {
+            let _ = n.notify_deleted(event).await;
+        }
 
         let mut resp = Response::empty();
         resp.set_status(StatusCode::NO_CONTENT);
@@ -533,7 +537,9 @@ impl WebDavHandler {
                     .unwrap_or(8081 - 1)
             ));
         }
-        let _ = self.notifier.notify_created(event).await;
+        if let Some(ref n) = self.notifier {
+            let _ = n.notify_created(event).await;
+        }
 
         let mut resp = Response::empty();
         resp.set_status(StatusCode::CREATED);
@@ -702,7 +708,7 @@ fn register_webdav_methods(route: Route, handler: Arc<WebDavHandler>) -> Route {
 /// 创建 WebDAV 路由
 pub fn create_webdav_routes(
     storage: Arc<StorageManager>,
-    notifier: Arc<EventNotifier>,
+    notifier: Option<Arc<EventNotifier>>,
     sync_manager: Arc<SyncManager>,
     source_http_addr: String,
     version_manager: Arc<crate::version::VersionManager>,

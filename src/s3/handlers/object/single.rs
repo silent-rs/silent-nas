@@ -84,7 +84,9 @@ impl S3Service {
         // 发送事件
         let mut event = FileEvent::new(EventType::Created, file_id.clone(), Some(metadata.clone()));
         event.source_http_addr = Some(self.source_http_addr.clone());
-        let _ = self.notifier.notify_created(event).await;
+        if let Some(ref n) = self.notifier {
+            let _ = n.notify_created(event).await;
+        }
 
         // 返回响应
         let mut resp = Response::empty();
@@ -302,7 +304,9 @@ impl S3Service {
         // 发送事件
         let mut event = FileEvent::new(EventType::Created, dest_file_id, Some(metadata.clone()));
         event.source_http_addr = Some(self.source_http_addr.clone());
-        let _ = self.notifier.notify_created(event).await;
+        if let Some(ref n) = self.notifier {
+            let _ = n.notify_created(event).await;
+        }
 
         // 生成CopyObjectResult XML响应
         let last_modified = metadata.modified_at.and_utc().to_rfc3339();
@@ -351,7 +355,9 @@ impl S3Service {
         // 发送事件
         let mut event = FileEvent::new(EventType::Deleted, file_id, None);
         event.source_http_addr = Some(self.source_http_addr.clone());
-        let _ = self.notifier.notify_deleted(event).await;
+        if let Some(ref n) = self.notifier {
+            let _ = n.notify_deleted(event).await;
+        }
 
         let mut resp = Response::empty();
         resp.headers_mut().insert(

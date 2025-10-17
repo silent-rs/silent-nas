@@ -13,7 +13,7 @@ use tracing::debug;
 /// 创建S3路由
 pub fn create_s3_routes(
     storage: Arc<StorageManager>,
-    notifier: Arc<EventNotifier>,
+    notifier: Option<Arc<EventNotifier>>,
     auth: Option<S3Auth>,
     source_http_addr: String,
     versioning_manager: Arc<VersioningManager>,

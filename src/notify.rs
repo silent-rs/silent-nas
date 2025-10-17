@@ -11,7 +11,8 @@ pub struct EventNotifier {
 }
 
 impl EventNotifier {
-    /// 连接到 NATS 服务器
+    /// 连接到 NATS 服务器（强制连接，失败会报错）
+    #[allow(dead_code)]
     pub async fn connect(url: &str, topic_prefix: String) -> Result<Self> {
         let client = async_nats::connect(url)
             .await
@@ -22,6 +23,23 @@ impl EventNotifier {
             client,
             topic_prefix,
         })
+    }
+
+    /// 尝试连接到 NATS 服务器（可选，失败不报错）
+    pub async fn try_connect(url: &str, topic_prefix: String) -> Option<Self> {
+        match async_nats::connect(url).await {
+            Ok(client) => {
+                info!("NATS 客户端已连接: {}", url);
+                Some(Self {
+                    client,
+                    topic_prefix,
+                })
+            }
+            Err(e) => {
+                info!("未连接 NATS (单节点模式): {}", e);
+                None
+            }
+        }
     }
 
     /// 获取 NATS 客户端（用于事件监听器）

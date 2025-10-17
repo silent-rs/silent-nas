@@ -1,0 +1,234 @@
+# Silent-NAS 配置文件示例
+# 这是一个完整的配置示例，包含所有可用选项和详细说明
+# 复制此文件为 config.toml 并根据需要修改
+
+# ==================== 服务器配置 ====================
+[server]
+# 监听地址
+# - "0.0.0.0": 监听所有网络接口（用于远程访问）
+# - "127.0.0.1": 仅监听本地回环（仅本机访问）
+# - 特定IP: 监听指定网卡
+host = "0.0.0.0"
+
+# HTTP API 服务端口
+# 提供 REST API 和基础文件操作接口
+# 默认: 8080
+http_port = 8080
+
+# gRPC 服务端口
+# 提供高性能的 gRPC 接口，用于程序间通信
+# 默认: 50051
+grpc_port = 50051
+
+# QUIC 传输服务端口
+# 基于 UDP 的高速文件传输协议
+# 默认: 4433
+quic_port = 4433
+
+# WebDAV 服务端口
+# 兼容 WebDAV 协议，可用于文件管理器挂载
+# 支持的客户端: Windows 资源管理器、macOS Finder、Cyberduck、rclone 等
+# 默认: 8081
+webdav_port = 8081
+
+# S3 兼容 API 服务端口
+# 提供 AWS S3 兼容接口
+# 支持的客户端: AWS CLI、MinIO Client (mc)、boto3、s3cmd 等
+# 默认: 9000
+s3_port = 9000
+
+# ==================== 存储配置 ====================
+[storage]
+# 文件存储根目录
+# 支持相对路径和绝对路径
+#
+# 示例:
+# - "./storage"           相对于程序运行目录
+# - "./data/nas"          嵌套目录
+# - "/var/lib/silent-nas" 绝对路径（Linux）
+# - "D:/NAS/storage"      绝对路径（Windows）
+root_path = "./storage"
+
+# 文件分块大小（字节）
+# 用于文件分片上传、下载和增量同步
+#
+# 推荐值:
+# - 1MB  = 1048576      适合网络较慢的环境
+# - 4MB  = 4194304      默认值，平衡性能和内存
+# - 8MB  = 8388608      适合高速网络
+# - 16MB = 16777216     适合大文件传输
+# - 64MB = 67108864     适合超大文件和高速存储
+chunk_size = 4194304
+
+# ==================== NATS 消息队列配置 ====================
+# NATS 用于多节点间的文件变更事件同步
+#
+# 运行模式:
+# 1. 单节点模式: NATS 连接失败时自动降级，无需配置
+# 2. 多节点模式: 所有节点连接到同一个 NATS 服务器
+[nats]
+# NATS 服务器地址
+#
+# 单节点部署:
+# - 可以不配置或配置不存在的地址
+# - 系统会自动以单节点模式运行
+#
+# 多节点部署:
+# - 配置实际的 NATS 服务器地址
+# - 所有节点使用相同的配置
+#
+# 示例:
+# - "nats://127.0.0.1:4222"           本地 NATS
+# - "nats://nas-nats:4222"            Docker 容器名
+# - "nats://192.168.1.100:4222"       局域网地址
+# - "nats://user:pass@host:4222"      带认证
+url = "nats://127.0.0.1:4222"
+
+# 事件主题前缀
+# 用于区分不同的 NAS 集群，避免事件冲突
+#
+# 示例:
+# - "silent.nas.files"     默认主题
+# - "company.nas.files"    公司 NAS
+# - "home.nas.files"       家庭 NAS
+# - "team-a.nas"           团队 A
+topic_prefix = "silent.nas.files"
+
+# ==================== S3 配置 ====================
+# S3 兼容 API 配置
+# 提供与 AWS S3 兼容的对象存储接口
+[s3]
+# S3 访问密钥（Access Key ID）
+# 用于 S3 API 认证
+#
+# 注意: 如果 enable_auth = false，此配置会被忽略
+access_key = "minioadmin"
+
+# S3 密钥（Secret Access Key）
+# 用于 S3 API 签名验证
+#
+# 注意: 如果 enable_auth = false，此配置会被忽略
+secret_key = "minioadmin"
+
+# 是否启用 S3 认证
+#
+# false: 允许匿名访问，适合内网测试环境
+# true:  要求 Access Key 和 Secret Key 认证，适合生产环境
+#
+# 安全建议:
+# - 生产环境请设置为 true
+# - 内网测试可以设置为 false
+# - 公网部署必须设置为 true 并使用强密码
+enable_auth = false
+
+# ==================== 部署场景示例 ====================
+
+# ===== 场景 1: 单机开发环境 =====
+# [server]
+# host = "127.0.0.1"
+# http_port = 8080
+# grpc_port = 50051
+# quic_port = 4433
+# webdav_port = 8081
+# s3_port = 9000
+#
+# [storage]
+# root_path = "./storage"
+# chunk_size = 4194304
+#
+# [nats]
+# url = "nats://localhost:4222"  # 不需要真实的 NATS
+# topic_prefix = "dev.nas"
+#
+# [s3]
+# access_key = "test"
+# secret_key = "test123"
+# enable_auth = false
+
+# ===== 场景 2: 多节点集群部署 =====
+# [server]
+# host = "0.0.0.0"
+# http_port = 8080
+# grpc_port = 50051
+# quic_port = 4433
+# webdav_port = 8081
+# s3_port = 9000
+#
+# [storage]
+# root_path = "/data/nas"
+# chunk_size = 8388608  # 8MB
+#
+# [nats]
+# url = "nats://nats-server:4222"  # 真实的 NATS 服务器
+# topic_prefix = "prod.nas.files"
+#
+# [s3]
+# access_key = "admin"
+# secret_key = "your-strong-password-here"
+# enable_auth = true
+
+# ===== 场景 3: Docker 容器部署 =====
+# [server]
+# host = "0.0.0.0"
+# http_port = 8080
+# grpc_port = 50051
+# quic_port = 4433
+# webdav_port = 8081
+# s3_port = 9000
+#
+# [storage]
+# root_path = "/data"  # Docker volume 挂载点
+# chunk_size = 4194304
+#
+# [nats]
+# url = "nats://nats:4222"  # Docker 服务名
+# topic_prefix = "docker.nas"
+#
+# [s3]
+# access_key = "minioadmin"
+# secret_key = "minioadmin"
+# enable_auth = false
+
+# ==================== 客户端连接示例 ====================
+
+# HTTP API:
+#   curl http://localhost:8080/api/health
+#   curl -X POST -F "file=@test.txt" http://localhost:8080/api/files/upload
+
+# WebDAV:
+#   Windows: \\localhost@8081\webdav
+#   macOS:   http://localhost:8081/webdav
+#   rclone:  rclone config (WebDAV, http://localhost:8081/webdav)
+
+# S3:
+#   AWS CLI:     aws --endpoint-url http://localhost:9000 s3 ls
+#   MinIO mc:    mc alias set mynas http://localhost:9000 minioadmin minioadmin
+#   boto3:       boto3.client('s3', endpoint_url='http://localhost:9000')
+
+# gRPC:
+#   grpcurl -plaintext localhost:50051 list
+
+# ==================== 常见问题 ====================
+
+# Q: 如何切换单节点/多节点模式？
+# A: 配置正确的 NATS URL。连接成功=多节点，连接失败=自动降级为单节点
+
+# Q: 端口被占用怎么办？
+# A: 修改对应的 *_port 配置为未使用的端口
+
+# Q: 如何提高传输性能？
+# A: 增大 chunk_size（如 16MB 或 64MB），使用 QUIC 协议
+
+# Q: S3 认证失败怎么办？
+# A: 检查 access_key 和 secret_key 是否正确，或临时设置 enable_auth = false
+
+# Q: 多节点同步不工作？
+# A: 检查 NATS 服务器是否运行，所有节点的 NATS URL 和 topic_prefix 是否一致
+
+# Q: WebDAV 连接失败？
+# A: 确认 host 设置为 0.0.0.0（而非 127.0.0.1），检查防火墙设置
+
+# ==================== 更多信息 ====================
+# 项目主页: https://github.com/silent-rs/silent-nas
+# 文档: README.md
+# 问题反馈: https://github.com/silent-rs/silent-nas/issues

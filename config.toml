@@ -1,14 +1,53 @@
+# Silent-NAS 配置文件
+# 详细配置说明请参考 config.example.toml
+
+# ==================== 服务器配置 ====================
 [server]
+# 监听地址（0.0.0.0 表示所有网卡，127.0.0.1 表示仅本地）
 host = "127.0.0.1"
+
+# HTTP API 服务端口（REST API、文件上传下载）
 http_port = 8080
+
+# gRPC 服务端口（高性能 RPC 调用）
 grpc_port = 50051
+
+# QUIC 传输服务端口（基于 UDP 的高速文件传输）
 quic_port = 4433
+
+# WebDAV 服务端口（兼容 WebDAV 客户端）
 webdav_port = 8081
 
-[storage]
-root_path = "./storage"
-chunk_size = 4194304  # 4MB
+# S3 兼容 API 服务端口（兼容 AWS S3 协议）
+s3_port = 9000
 
+# ==================== 存储配置 ====================
+[storage]
+# 文件存储根目录（相对路径或绝对路径）
+root_path = "./storage"
+
+# 文件分块大小（字节）
+# 4MB = 4194304, 8MB = 8388608, 16MB = 16777216
+chunk_size = 4194304
+
+# ==================== NATS 消息队列配置 ====================
+# 用于多节点文件同步，单节点模式可不配置或配置错误的地址
 [nats]
+# NATS 服务器地址
+# 单节点：留空或配置不存在的地址（如 nats://localhost:4222）
+# 多节点：配置实际的 NATS 服务器地址
 url = "nats://127.0.0.1:4222"
+
+# 事件主题前缀（用于区分不同的 NAS 集群）
 topic_prefix = "silent.nas.files"
+
+# ==================== S3 配置 ====================
+[s3]
+# S3 访问密钥（Access Key）
+access_key = "minioadmin"
+
+# S3 密钥（Secret Key）
+secret_key = "minioadmin"
+
+# 是否启用 S3 认证（false 表示允许匿名访问）
+enable_auth = false

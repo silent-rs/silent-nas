@@ -240,6 +240,7 @@ mod tests {
             inc_sync_handler,
             source_http_addr,
             audit_logger: None,
+            auth_manager: None,
         };
 
         (app_state, temp_dir)

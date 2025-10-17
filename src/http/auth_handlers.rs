@@ -34,12 +34,12 @@ pub async fn register_handler(
     };
 
     let register_req: RegisterRequest = serde_json::from_slice(&bytes)
-        .map_err(|e| SilentError::business_error(StatusCode::BAD_REQUEST, &e.to_string()))?;
+        .map_err(|e| SilentError::business_error(StatusCode::BAD_REQUEST, e.to_string()))?;
 
     // 注册用户
     let user_info = auth_manager.register(register_req).map_err(|e| match e {
-        NasError::Auth(msg) => SilentError::business_error(StatusCode::BAD_REQUEST, &msg),
-        _ => SilentError::business_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+        NasError::Auth(msg) => SilentError::business_error(StatusCode::BAD_REQUEST, msg),
+        _ => SilentError::business_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     })?;
 
     // 返回用户信息
@@ -71,12 +71,12 @@ pub async fn login_handler(
     };
 
     let login_req: LoginRequest =
-        serde_json::from_slice(&bytes).map_err(|e| SilentError::business_error(StatusCode::BAD_REQUEST, &e.to_string()))?;
+        serde_json::from_slice(&bytes).map_err(|e| SilentError::business_error(StatusCode::BAD_REQUEST, e.to_string()))?;
 
     // 登录
     let login_resp = auth_manager.login(login_req).map_err(|e| match e {
-        NasError::Auth(msg) => SilentError::business_error(StatusCode::BAD_REQUEST, &msg),
-        _ => SilentError::business_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+        NasError::Auth(msg) => SilentError::business_error(StatusCode::BAD_REQUEST, msg),
+        _ => SilentError::business_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     })?;
 
     // 返回登录响应
@@ -113,14 +113,14 @@ pub async fn refresh_handler(
     };
 
     let refresh_req: RefreshRequest =
-        serde_json::from_slice(&bytes).map_err(|e| SilentError::business_error(StatusCode::BAD_REQUEST, &e.to_string()))?;
+        serde_json::from_slice(&bytes).map_err(|e| SilentError::business_error(StatusCode::BAD_REQUEST, e.to_string()))?;
 
     // 刷新Token
     let login_resp = auth_manager
         .refresh_token(&refresh_req.refresh_token)
         .map_err(|e| match e {
-            NasError::Auth(msg) => SilentError::business_error(StatusCode::BAD_REQUEST, &msg),
-            _ => SilentError::business_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+            NasError::Auth(msg) => SilentError::business_error(StatusCode::BAD_REQUEST, msg),
+            _ => SilentError::business_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
         })?;
 
     // 返回新的Token
@@ -146,8 +146,8 @@ pub async fn me_handler(
 
     // 验证Token并获取用户
     let user = auth_manager.verify_token(&token).map_err(|e| match e {
-        NasError::Auth(msg) => SilentError::business_error(StatusCode::BAD_REQUEST, &msg),
-        _ => SilentError::business_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+        NasError::Auth(msg) => SilentError::business_error(StatusCode::BAD_REQUEST, msg),
+        _ => SilentError::business_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     })?;
 
     // 转换为UserInfo（隐藏密码）
@@ -177,8 +177,8 @@ pub async fn change_password_handler(
 
     // 验证Token并获取用户ID
     let user = auth_manager.verify_token(&token).map_err(|e| match e {
-        NasError::Auth(msg) => SilentError::business_error(StatusCode::BAD_REQUEST, &msg),
-        _ => SilentError::business_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+        NasError::Auth(msg) => SilentError::business_error(StatusCode::BAD_REQUEST, msg),
+        _ => SilentError::business_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     })?;
 
     // 解析请求体
@@ -192,14 +192,14 @@ pub async fn change_password_handler(
     };
 
     let change_req: ChangePasswordRequest =
-        serde_json::from_slice(&bytes).map_err(|e| SilentError::business_error(StatusCode::BAD_REQUEST, &e.to_string()))?;
+        serde_json::from_slice(&bytes).map_err(|e| SilentError::business_error(StatusCode::BAD_REQUEST, e.to_string()))?;
 
     // 修改密码
     auth_manager
         .change_password(&user.id, change_req)
         .map_err(|e| match e {
-            NasError::Auth(msg) => SilentError::business_error(StatusCode::BAD_REQUEST, &msg),
-            _ => SilentError::business_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+            NasError::Auth(msg) => SilentError::business_error(StatusCode::BAD_REQUEST, msg),
+            _ => SilentError::business_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
         })?;
 
     // 返回成功
@@ -229,10 +229,12 @@ mod tests {
 
     #[test]
     fn test_extract_token() {
-        let req = Request::builder()
+        let http_req = http::Request::builder()
             .header("Authorization", "Bearer test-token-123")
-            .body(String::new())
+            .body(())
             .unwrap();
+        let (parts, _) = http_req.into_parts();
+        let req = Request::from_parts(parts, ReqBody::Empty);
 
         let token = extract_token(&req).unwrap();
         assert_eq!(token, "test-token-123");
@@ -240,7 +242,11 @@ mod tests {
 
     #[test]
     fn test_extract_token_missing_header() {
-        let req = Request::builder().body(String::new()).unwrap();
+        let http_req = http::Request::builder()
+            .body(())
+            .unwrap();
+        let (parts, _) = http_req.into_parts();
+        let req = Request::from_parts(parts, ReqBody::Empty);
 
         let result = extract_token(&req);
         assert!(result.is_err());
@@ -248,9 +254,12 @@ mod tests {
 
     #[test]
     fn test_extract_token_invalid_format() {
-        let req = Request::builder()
+        let http_req = http::Request::builder()
             .header("Authorization", "InvalidFormat test-token")
-            .body(String::new()).unwrap();
+            .body(())
+            .unwrap();
+        let (parts, _) = http_req.into_parts();
+        let req = Request::from_parts(parts, ReqBody::Empty);
 
         let result = extract_token(&req);
         assert!(result.is_err());

@@ -27,6 +27,9 @@ pub enum NasError {
     #[error("传输错误: {0}")]
     Transfer(String),
 
+    #[error("认证错误: {0}")]
+    Auth(String),
+
     #[allow(dead_code)]
     #[error("无效的文件路径: {0}")]
     InvalidPath(String),
@@ -37,6 +40,13 @@ pub enum NasError {
 
     #[error("{0}")]
     Other(String),
+}
+
+// 为 sled::Error 实现 From trait
+impl From<sled::Error> for NasError {
+    fn from(err: sled::Error) -> Self {
+        NasError::Storage(format!("数据库错误: {}", err))
+    }
 }
 
 pub type Result<T> = std::result::Result<T, NasError>;

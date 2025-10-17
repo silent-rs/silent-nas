@@ -2,7 +2,7 @@
 
 use super::models::{Claims, User};
 use crate::error::{NasError, Result};
-use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
+use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// JWT 配置
@@ -20,8 +20,8 @@ impl JwtConfig {
     pub fn new(secret: String) -> Self {
         Self {
             secret,
-            access_token_exp: 3600,       // 1小时
-            refresh_token_exp: 604800,    // 7天
+            access_token_exp: 3600,    // 1小时
+            refresh_token_exp: 604800, // 7天
         }
     }
 

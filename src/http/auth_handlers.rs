@@ -5,9 +5,9 @@ use crate::auth::{ChangePasswordRequest, LoginRequest, RegisterRequest, UserInfo
 use crate::error::NasError;
 use http::StatusCode;
 use http_body_util::BodyExt;
+use silent::SilentError;
 use silent::extractor::Configs as CfgExtractor;
 use silent::prelude::*;
-use silent::SilentError;
 
 /// 用户注册
 ///
@@ -18,10 +18,9 @@ pub async fn register_handler(
     CfgExtractor(state): CfgExtractor<AppState>,
 ) -> silent::Result<serde_json::Value> {
     // 获取认证管理器
-    let auth_manager = state
-        .auth_manager
-        .as_ref()
-        .ok_or_else(|| SilentError::business_error(StatusCode::SERVICE_UNAVAILABLE, "认证功能未启用"))?;
+    let auth_manager = state.auth_manager.as_ref().ok_or_else(|| {
+        SilentError::business_error(StatusCode::SERVICE_UNAVAILABLE, "认证功能未启用")
+    })?;
 
     // 解析请求体
     let body = req.take_body();
@@ -29,7 +28,10 @@ pub async fn register_handler(
         ReqBody::Incoming(body) => body.collect().await?.to_bytes().to_vec(),
         ReqBody::Once(bytes) => bytes.to_vec(),
         ReqBody::Empty => {
-            return Err(SilentError::business_error(StatusCode::BAD_REQUEST, "请求体为空"));
+            return Err(SilentError::business_error(
+                StatusCode::BAD_REQUEST,
+                "请求体为空",
+            ));
         }
     };
 
@@ -55,10 +57,9 @@ pub async fn login_handler(
     CfgExtractor(state): CfgExtractor<AppState>,
 ) -> silent::Result<serde_json::Value> {
     // 获取认证管理器
-    let auth_manager = state
-        .auth_manager
-        .as_ref()
-        .ok_or_else(|| SilentError::business_error(StatusCode::SERVICE_UNAVAILABLE, "认证功能未启用"))?;
+    let auth_manager = state.auth_manager.as_ref().ok_or_else(|| {
+        SilentError::business_error(StatusCode::SERVICE_UNAVAILABLE, "认证功能未启用")
+    })?;
 
     // 解析请求体
     let body = req.take_body();
@@ -66,12 +67,15 @@ pub async fn login_handler(
         ReqBody::Incoming(body) => body.collect().await?.to_bytes().to_vec(),
         ReqBody::Once(bytes) => bytes.to_vec(),
         ReqBody::Empty => {
-            return Err(SilentError::business_error(StatusCode::BAD_REQUEST, "请求体为空"));
+            return Err(SilentError::business_error(
+                StatusCode::BAD_REQUEST,
+                "请求体为空",
+            ));
         }
     };
 
-    let login_req: LoginRequest =
-        serde_json::from_slice(&bytes).map_err(|e| SilentError::business_error(StatusCode::BAD_REQUEST, e.to_string()))?;
+    let login_req: LoginRequest = serde_json::from_slice(&bytes)
+        .map_err(|e| SilentError::business_error(StatusCode::BAD_REQUEST, e.to_string()))?;
 
     // 登录
     let login_resp = auth_manager.login(login_req).map_err(|e| match e {
@@ -97,10 +101,9 @@ pub async fn refresh_handler(
     }
 
     // 获取认证管理器
-    let auth_manager = state
-        .auth_manager
-        .as_ref()
-        .ok_or_else(|| SilentError::business_error(StatusCode::SERVICE_UNAVAILABLE, "认证功能未启用"))?;
+    let auth_manager = state.auth_manager.as_ref().ok_or_else(|| {
+        SilentError::business_error(StatusCode::SERVICE_UNAVAILABLE, "认证功能未启用")
+    })?;
 
     // 解析请求体
     let body = req.take_body();
@@ -108,12 +111,15 @@ pub async fn refresh_handler(
         ReqBody::Incoming(body) => body.collect().await?.to_bytes().to_vec(),
         ReqBody::Once(bytes) => bytes.to_vec(),
         ReqBody::Empty => {
-            return Err(SilentError::business_error(StatusCode::BAD_REQUEST, "请求体为空"));
+            return Err(SilentError::business_error(
+                StatusCode::BAD_REQUEST,
+                "请求体为空",
+            ));
         }
     };
 
-    let refresh_req: RefreshRequest =
-        serde_json::from_slice(&bytes).map_err(|e| SilentError::business_error(StatusCode::BAD_REQUEST, e.to_string()))?;
+    let refresh_req: RefreshRequest = serde_json::from_slice(&bytes)
+        .map_err(|e| SilentError::business_error(StatusCode::BAD_REQUEST, e.to_string()))?;
 
     // 刷新Token
     let login_resp = auth_manager
@@ -136,10 +142,9 @@ pub async fn me_handler(
     CfgExtractor(state): CfgExtractor<AppState>,
 ) -> silent::Result<serde_json::Value> {
     // 获取认证管理器
-    let auth_manager = state
-        .auth_manager
-        .as_ref()
-        .ok_or_else(|| SilentError::business_error(StatusCode::SERVICE_UNAVAILABLE, "认证功能未启用"))?;
+    let auth_manager = state.auth_manager.as_ref().ok_or_else(|| {
+        SilentError::business_error(StatusCode::SERVICE_UNAVAILABLE, "认证功能未启用")
+    })?;
 
     // 从请求头获取Token
     let token = extract_token(&req)?;
@@ -167,10 +172,9 @@ pub async fn change_password_handler(
     CfgExtractor(state): CfgExtractor<AppState>,
 ) -> silent::Result<serde_json::Value> {
     // 获取认证管理器
-    let auth_manager = state
-        .auth_manager
-        .as_ref()
-        .ok_or_else(|| SilentError::business_error(StatusCode::SERVICE_UNAVAILABLE, "认证功能未启用"))?;
+    let auth_manager = state.auth_manager.as_ref().ok_or_else(|| {
+        SilentError::business_error(StatusCode::SERVICE_UNAVAILABLE, "认证功能未启用")
+    })?;
 
     // 从请求头获取Token
     let token = extract_token(&req)?;
@@ -187,12 +191,15 @@ pub async fn change_password_handler(
         ReqBody::Incoming(body) => body.collect().await?.to_bytes().to_vec(),
         ReqBody::Once(bytes) => bytes.to_vec(),
         ReqBody::Empty => {
-            return Err(SilentError::business_error(StatusCode::BAD_REQUEST, "请求体为空"));
+            return Err(SilentError::business_error(
+                StatusCode::BAD_REQUEST,
+                "请求体为空",
+            ));
         }
     };
 
-    let change_req: ChangePasswordRequest =
-        serde_json::from_slice(&bytes).map_err(|e| SilentError::business_error(StatusCode::BAD_REQUEST, e.to_string()))?;
+    let change_req: ChangePasswordRequest = serde_json::from_slice(&bytes)
+        .map_err(|e| SilentError::business_error(StatusCode::BAD_REQUEST, e.to_string()))?;
 
     // 修改密码
     auth_manager
@@ -214,10 +221,15 @@ fn extract_token(req: &Request) -> silent::Result<String> {
         .headers()
         .get("Authorization")
         .and_then(|v| v.to_str().ok())
-        .ok_or_else(|| SilentError::business_error(StatusCode::UNAUTHORIZED, "缺少Authorization头"))?;
+        .ok_or_else(|| {
+            SilentError::business_error(StatusCode::UNAUTHORIZED, "缺少Authorization头")
+        })?;
 
     if !auth_header.starts_with("Bearer ") {
-        return Err(SilentError::business_error(StatusCode::UNAUTHORIZED, "无效的Authorization格式"));
+        return Err(SilentError::business_error(
+            StatusCode::UNAUTHORIZED,
+            "无效的Authorization格式",
+        ));
     }
 
     Ok(auth_header[7..].to_string())
@@ -242,9 +254,7 @@ mod tests {
 
     #[test]
     fn test_extract_token_missing_header() {
-        let http_req = http::Request::builder()
-            .body(())
-            .unwrap();
+        let http_req = http::Request::builder().body(()).unwrap();
         let (parts, _) = http_req.into_parts();
         let req = Request::from_parts(parts, ReqBody::Empty);
 

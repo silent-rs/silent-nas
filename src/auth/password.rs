@@ -2,8 +2,8 @@
 
 use crate::error::{NasError, Result};
 use argon2::{
-    password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
     Argon2,
+    password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString, rand_core::OsRng},
 };
 
 /// 密码处理器
@@ -123,10 +123,10 @@ mod tests {
     #[test]
     fn test_password_strength_weak() {
         let weak_passwords = vec![
-            "short",      // 太短
-            "12345678",   // 只有数字
-            "abcdefgh",   // 只有小写字母
-            "ABCDEFGH",   // 只有大写字母
+            "short",    // 太短
+            "12345678", // 只有数字
+            "abcdefgh", // 只有小写字母
+            "ABCDEFGH", // 只有大写字母
         ];
 
         for password in weak_passwords {
@@ -138,9 +138,9 @@ mod tests {
     #[test]
     fn test_password_strength_medium() {
         let medium_passwords = vec![
-            "Password1",       // 大小写+数字
-            "password123",     // 小写+数字（8字符）
-            "MyPass123",       // 大小写+数字
+            "Password1",   // 大小写+数字
+            "password123", // 小写+数字（8字符）
+            "MyPass123",   // 大小写+数字
         ];
 
         for password in medium_passwords {
@@ -152,9 +152,9 @@ mod tests {
     #[test]
     fn test_password_strength_strong() {
         let strong_passwords = vec![
-            "StrongP@ssw0rd!",     // 12字符，所有类型
-            "MySecure123!Pass",    // 长度足够，复杂
-            "Compl3x!Password",    // 符合强密码要求
+            "StrongP@ssw0rd!",  // 12字符，所有类型
+            "MySecure123!Pass", // 长度足够，复杂
+            "Compl3x!Password", // 符合强密码要求
         ];
 
         for password in strong_passwords {
@@ -194,11 +194,7 @@ mod tests {
 
     #[test]
     fn test_special_characters() {
-        let passwords_with_special = vec![
-            "Pass!@#$%^&*()",
-            "P@ssw0rd!",
-            "Test#123",
-        ];
+        let passwords_with_special = vec!["Pass!@#$%^&*()", "P@ssw0rd!", "Test#123"];
 
         for password in passwords_with_special {
             let hash = PasswordHandler::hash_password(password).unwrap();

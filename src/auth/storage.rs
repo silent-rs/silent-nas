@@ -1,8 +1,8 @@
 //! 用户存储层
 
-use super::models::{User, UserStatus};
 #[cfg(test)]
 use super::models::UserRole;
+use super::models::{User, UserStatus};
 use crate::error::{NasError, Result};
 use chrono::Local;
 use std::path::Path;
@@ -18,7 +18,8 @@ pub struct UserStorage {
 impl UserStorage {
     /// 创建用户存储
     pub fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let db = sled::open(path).map_err(|e| NasError::Storage(format!("打开数据库失败: {}", e)))?;
+        let db =
+            sled::open(path).map_err(|e| NasError::Storage(format!("打开数据库失败: {}", e)))?;
 
         let users_tree = db
             .open_tree("users")
@@ -61,7 +62,8 @@ impl UserStorage {
         self.users_tree.insert(&user.id, user_bytes)?;
 
         // 建立索引
-        self.username_index.insert(&user.username, user.id.as_bytes())?;
+        self.username_index
+            .insert(&user.username, user.id.as_bytes())?;
         self.email_index.insert(&user.email, user.id.as_bytes())?;
 
         // 刷新到磁盘
@@ -121,7 +123,8 @@ impl UserStorage {
                 return Err(NasError::Auth(format!("用户名已存在: {}", user.username)));
             }
             self.username_index.remove(&old_user.username)?;
-            self.username_index.insert(&user.username, user.id.as_bytes())?;
+            self.username_index
+                .insert(&user.username, user.id.as_bytes())?;
         }
 
         // 如果邮箱变更，更新索引
@@ -246,7 +249,10 @@ mod tests {
         assert_eq!(found.id, user.id);
 
         // 根据邮箱获取
-        let found = storage.get_user_by_email("test@example.com").unwrap().unwrap();
+        let found = storage
+            .get_user_by_email("test@example.com")
+            .unwrap()
+            .unwrap();
         assert_eq!(found.id, user.id);
     }
 

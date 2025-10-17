@@ -10,8 +10,8 @@ pub mod password;
 pub mod storage;
 
 pub use models::{
-    ChangePasswordRequest, LoginRequest, LoginResponse, RegisterRequest, User, UserInfo,
-    UserRole, UserStatus,
+    ChangePasswordRequest, LoginRequest, LoginResponse, RegisterRequest, User, UserInfo, UserRole,
+    UserStatus,
 };
 
 use crate::error::{NasError, Result};

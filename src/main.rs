@@ -82,6 +82,9 @@ async fn main() -> Result<()> {
     // 创建退出信号通道
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
+    // 收集所有服务器的任务句柄，用于退出时中止
+    let mut server_handles = Vec::new();
+
     // 启动事件监听器（仅在 NATS 连接成功时）
     if let Some(ref nats_notifier) = notifier {
         let event_listener = EventListener::new(
@@ -118,7 +121,7 @@ async fn main() -> Result<()> {
     let version_clone = version_manager.clone();
     // source_http_addr 已用于 HTTP/WebDAV/S3 三处，不再单独复制
 
-    tokio::spawn(async move {
+    let http_handle = tokio::spawn(async move {
         if let Err(e) = start_http_server(
             &http_addr_clone,
             storage_clone,
@@ -131,6 +134,7 @@ async fn main() -> Result<()> {
             error!("HTTP 服务器错误: {}", e);
         }
     });
+    server_handles.push(http_handle);
 
     // 启动定期巡检补拉任务
     let storage_reconcile = storage.clone();
@@ -191,7 +195,7 @@ async fn main() -> Result<()> {
     let notifier_clone = notifier.clone();
     let source_http_addr_clone = source_http_addr.clone();
 
-    tokio::spawn(async move {
+    let grpc_handle = tokio::spawn(async move {
         if let Err(e) = start_grpc_server(
             grpc_addr,
             storage_clone,
@@ -203,6 +207,7 @@ async fn main() -> Result<()> {
             error!("gRPC 服务器错误: {}", e);
         }
     });
+    server_handles.push(grpc_handle);
 
     // 启动 WebDAV 服务器
     let webdav_addr = format!("{}:{}", config.server.host, config.server.webdav_port);
@@ -212,7 +217,7 @@ async fn main() -> Result<()> {
     let sync_webdav = sync_manager.clone();
     let version_webdav = version_manager.clone();
 
-    tokio::spawn(async move {
+    let webdav_handle = tokio::spawn(async move {
         let webdav_base = format!(
             "http://{}:{}",
             advertise_host,
@@ -235,6 +240,7 @@ async fn main() -> Result<()> {
             error!("WebDAV 服务器错误: {}", e);
         }
     });
+    server_handles.push(webdav_handle);
 
     // 初始化 S3 版本控制管理器
     let s3_versioning_manager = Arc::new(s3::VersioningManager::new());
@@ -250,7 +256,7 @@ async fn main() -> Result<()> {
     let s3_versioning_clone = s3_versioning_manager.clone();
     let version_s3 = version_manager.clone();
 
-    tokio::spawn(async move {
+    let s3_handle = tokio::spawn(async move {
         if let Err(e) = start_s3_server(
             &s3_addr_clone,
             storage_s3,
@@ -265,14 +271,22 @@ async fn main() -> Result<()> {
             error!("S3 服务器错误: {}", e);
         }
     });
+    server_handles.push(s3_handle);
 
     // 启动 QUIC 服务器
     let quic_addr: SocketAddr = format!("{}:{}", config.server.host, config.server.quic_port)
         .parse()
         .expect("无效的 QUIC 地址");
 
-    let mut quic_server = transfer::QuicTransferServer::new(storage.clone(), notifier.clone());
-    quic_server.start(quic_addr).await?;
+    let storage_quic = storage.clone();
+    let notifier_quic = notifier.clone();
+    let quic_handle = tokio::spawn(async move {
+        let mut quic_server = transfer::QuicTransferServer::new(storage_quic, notifier_quic);
+        if let Err(e) = quic_server.start(quic_addr).await {
+            error!("QUIC 服务器错误: {}", e);
+        }
+    });
+    server_handles.push(quic_handle);
 
     info!("所有服务已启动");
     info!("  HTTP:    http://{}", http_addr);
@@ -301,8 +315,14 @@ async fn main() -> Result<()> {
     let _ = shutdown_tx.send(true);
     info!("已通知所有后台任务退出");
 
+    // 中止所有服务器任务
+    for handle in server_handles {
+        handle.abort();
+    }
+    info!("已中止所有服务器任务");
+
     // 等待一小段时间让任务清理
-    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
     info!("应用已退出");
 
     Ok(())

@@ -46,6 +46,7 @@ rcgen = "0.14"
 tonic = "0.14"
 prost = "0.14"
 tonic-prost = "0.14"
+tokio-stream = "0.1"
 
 # WebDAV support
 quick-xml = { version = "0.38", features = ["serialize"] }
@@ -54,6 +55,7 @@ urlencoding = "2"
 
 # S3 support
 hmac = "0.12"
+md5 = "0.7"
 
 # Search engine
 tantivy = "0.22"

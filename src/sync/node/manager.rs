@@ -303,6 +303,8 @@ pub struct NodeSyncCoordinator {
     node_manager: Arc<NodeManager>,
     /// 同步管理器
     sync_manager: Arc<SyncManager>,
+    /// 存储管理器
+    storage: Arc<crate::storage::StorageManager>,
     /// 同步统计
     stats: Arc<RwLock<SyncStats>>,
 }
@@ -312,29 +314,87 @@ impl NodeSyncCoordinator {
         config: SyncConfig,
         node_manager: Arc<NodeManager>,
         sync_manager: Arc<SyncManager>,
+        storage: Arc<crate::storage::StorageManager>,
     ) -> Arc<Self> {
         Arc::new(Self {
             config,
             node_manager,
             sync_manager,
+            storage,
             stats: Arc::new(RwLock::new(SyncStats::default())),
         })
     }
 
     /// 同步文件到指定节点
     pub async fn sync_to_node(&self, node_id: &str, file_ids: Vec<String>) -> Result<usize> {
+        use crate::sync::node::client::{ClientConfig, NodeSyncClient};
+
         info!("开始同步 {} 个文件到节点: {}", file_ids.len(), node_id);
 
+        // 获取目标节点信息
+        let nodes = self.node_manager.nodes.read().await;
+        let target_node = nodes
+            .get(node_id)
+            .ok_or_else(|| NasError::Other(format!("节点不存在: {}", node_id)))?;
+
+        let node_address = target_node.address.clone();
+        drop(nodes);
+
+        // 创建 gRPC 客户端
+        let client = NodeSyncClient::new(node_address.clone(), ClientConfig::default());
+        client.connect().await?;
+
         let mut synced = 0;
+        let mut retry_count = 0;
 
         for file_id in file_ids.iter().take(self.config.max_files_per_sync) {
             // 获取文件的同步状态
-            if let Some(_file_sync) = self.sync_manager.get_sync_state(file_id).await {
-                // TODO: 通过 gRPC 发送到目标节点
-                // 调用 NodeSyncService::SyncFileState
+            if let Some(file_sync) = self.sync_manager.get_sync_state(file_id).await {
+                // 读取文件内容
+                match self.storage.read_file(file_id).await {
+                    Ok(content) => {
+                        let file_size = content.len();
 
-                synced += 1;
-                debug!("文件同步成功: {}", file_id);
+                        // 从 LWWRegister 中获取元数据（value已经是Option<T>）
+                        let metadata = file_sync.metadata.value.clone();
+
+                        // 根据文件大小选择传输方式
+                        let transfer_result = if file_size < 5 * 1024 * 1024 {
+                            // 小于 5MB 使用直接传输
+                            client.transfer_file(file_id, content, metadata).await
+                        } else {
+                            // 大于 5MB 使用流式传输
+                            const CHUNK_SIZE: usize = 1024 * 1024; // 1MB chunks
+                            client
+                                .stream_file_content(file_id, content, CHUNK_SIZE)
+                                .await
+                                .map(|_| true)
+                        };
+
+                        match transfer_result {
+                            Ok(_) => {
+                                synced += 1;
+                                retry_count = 0; // 重置重试计数
+                                debug!("文件同步成功: {}, 大小: {} 字节", file_id, file_size);
+                            }
+                            Err(e) => {
+                                error!("文件同步失败: {}, 错误: {}", file_id, e);
+                                retry_count += 1;
+
+                                if retry_count >= self.config.max_retries {
+                                    warn!("达到最大重试次数，停止同步");
+                                    break;
+                                }
+
+                                // 等待后重试
+                                tokio::time::sleep(Duration::from_secs(2)).await;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        warn!("读取文件失败: {}, 错误: {}", file_id, e);
+                    }
+                }
             }
         }
 
@@ -342,6 +402,9 @@ impl NodeSyncCoordinator {
         let mut stats = self.stats.write().await;
         stats.synced_files += synced;
         stats.last_sync_time = Some(Local::now().naive_local());
+
+        // 断开连接
+        client.disconnect().await;
 
         Ok(synced)
     }
@@ -352,12 +415,32 @@ impl NodeSyncCoordinator {
         node_id: &str,
         file_ids: Vec<String>,
     ) -> Result<usize> {
+        use crate::sync::node::client::{ClientConfig, NodeSyncClient};
+
         info!("从节点 {} 请求 {} 个文件", node_id, file_ids.len());
 
-        // TODO: 实现通过 gRPC 请求文件
-        // 调用 NodeSyncService::RequestFileSync
+        // 获取目标节点信息
+        let nodes = self.node_manager.nodes.read().await;
+        let target_node = nodes
+            .get(node_id)
+            .ok_or_else(|| NasError::Other(format!("节点不存在: {}", node_id)))?;
 
-        Ok(0)
+        let node_address = target_node.address.clone();
+        drop(nodes);
+
+        // 创建 gRPC 客户端
+        let client = NodeSyncClient::new(node_address.clone(), ClientConfig::default());
+        client.connect().await?;
+
+        // 通过 gRPC 请求文件同步
+        let synced_count = client.request_file_sync(node_id, file_ids).await?;
+
+        // 断开连接
+        client.disconnect().await;
+
+        info!("成功从节点 {} 请求 {} 个文件", node_id, synced_count);
+
+        Ok(synced_count as usize)
     }
 
     /// 启动自动同步任务

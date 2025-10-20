@@ -2,6 +2,7 @@
 //!
 //! 提供 REST API 服务，使用中间件和萃取器模式
 
+mod admin_handlers;
 mod audit_api;
 mod auth_handlers;
 mod auth_middleware;
@@ -131,6 +132,7 @@ pub async fn start_http_server(
                 .append(Route::new("register").post(auth_handlers::register_handler))
                 .append(Route::new("login").post(auth_handlers::login_handler))
                 .append(Route::new("refresh").post(auth_handlers::refresh_handler))
+                .append(Route::new("logout").post(auth_handlers::logout_handler))
                 .append(Route::new("me").get(auth_handlers::me_handler))
                 .append(Route::new("password").put(auth_handlers::change_password_handler)),
         )
@@ -141,7 +143,28 @@ pub async fn start_http_server(
     // 如果启用认证，为需要保护的API添加认证Hook
     if let Some(ref auth_mgr) = app_state.auth_manager {
         let auth_hook = AuthHook::new(auth_mgr.clone());
+        let admin_hook = AuthHook::admin_only(auth_mgr.clone());
         let optional_auth_hook = OptionalAuthHook::new(auth_mgr.clone());
+
+        // 管理员API - 需要管理员权限
+        api_route = api_route
+            .append(
+                Route::new("admin/users")
+                    .hook(admin_hook.clone())
+                    .get(admin_handlers::list_users),
+            )
+            .append(
+                Route::new("admin/users/<id>")
+                    .hook(admin_hook.clone())
+                    .get(admin_handlers::get_user)
+                    .put(admin_handlers::update_user)
+                    .delete(admin_handlers::delete_user),
+            )
+            .append(
+                Route::new("admin/users/<id>/reset-password")
+                    .hook(admin_hook.clone())
+                    .post(admin_handlers::reset_password),
+            );
 
         // 文件操作 - 需要认证
         api_route = api_route

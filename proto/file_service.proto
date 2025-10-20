@@ -74,6 +74,10 @@ service NodeSyncService {
   rpc SyncFileState(SyncFileStateRequest) returns (SyncFileStateResponse);
   rpc RequestFileSync(RequestFileSyncRequest) returns (RequestFileSyncResponse);
   rpc GetSyncStatus(GetSyncStatusRequest) returns (GetSyncStatusResponse);
+
+  // 文件内容传输
+  rpc TransferFile(TransferFileRequest) returns (TransferFileResponse);
+  rpc StreamFileContent(stream FileChunk) returns (StreamFileResponse);
 }
 
 // 节点信息
@@ -154,4 +158,36 @@ message GetSyncStatusResponse {
   int32 synced_files = 2;
   int32 pending_files = 3;
   int64 last_sync_time = 4;
+}
+
+// ========== 文件内容传输 ==========
+
+// 文件传输请求
+message TransferFileRequest {
+  string file_id = 1;
+  string source_node_id = 2;
+  FileMetadata metadata = 3;
+}
+
+// 文件传输响应
+message TransferFileResponse {
+  bool success = 1;
+  bytes content = 2;  // 小文件可以直接返回内容
+  string error_message = 3;
+}
+
+// 文件块（用于流式传输大文件）
+message FileChunk {
+  string file_id = 1;
+  uint64 offset = 2;
+  bytes data = 3;
+  bool is_last = 4;
+  string checksum = 5;  // 块的校验和
+}
+
+// 流式传输响应
+message StreamFileResponse {
+  bool success = 1;
+  uint64 bytes_received = 2;
+  string error_message = 3;
 }

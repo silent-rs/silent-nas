@@ -252,6 +252,113 @@ impl NodeSyncClient {
         *client_lock = None;
         info!("断开与节点 {} 的连接", self.address);
     }
+
+    /// 传输文件到远程节点
+    pub async fn transfer_file(
+        &self,
+        file_id: &str,
+        content: Vec<u8>,
+        metadata: Option<crate::models::FileMetadata>,
+    ) -> Result<bool> {
+        info!(
+            "传输文件 {} 到 {}, 大小: {} 字节",
+            file_id,
+            self.address,
+            content.len()
+        );
+
+        let mut client = self.ensure_connected().await?;
+
+        // 转换元数据
+        let proto_metadata = metadata.map(|m| crate::rpc::file_service::FileMetadata {
+            id: m.id,
+            name: m.name,
+            path: m.path,
+            size: m.size,
+            hash: m.hash,
+            created_at: m.created_at.to_string(),
+            modified_at: m.modified_at.to_string(),
+        });
+
+        let request = tonic::Request::new(crate::rpc::file_service::TransferFileRequest {
+            file_id: file_id.to_string(),
+            source_node_id: String::new(), // 将由服务端填充
+            metadata: proto_metadata,
+        });
+
+        let response = client
+            .transfer_file(request)
+            .await
+            .map_err(|e| NasError::Other(format!("文件传输失败: {}", e)))?;
+
+        let resp = response.into_inner();
+
+        if !resp.success {
+            return Err(NasError::Other(format!(
+                "文件传输失败: {}",
+                resp.error_message
+            )));
+        }
+
+        Ok(true)
+    }
+
+    /// 流式传输大文件到远程节点
+    pub async fn stream_file_content(
+        &self,
+        file_id: &str,
+        content: Vec<u8>,
+        chunk_size: usize,
+    ) -> Result<u64> {
+        info!(
+            "流式传输文件 {} 到 {}, 总大小: {} 字节, 块大小: {} 字节",
+            file_id,
+            self.address,
+            content.len(),
+            chunk_size
+        );
+
+        let mut client = self.ensure_connected().await?;
+
+        // 创建块流
+        let chunks: Vec<crate::rpc::file_service::FileChunk> = content
+            .chunks(chunk_size)
+            .enumerate()
+            .map(|(i, chunk_data)| {
+                let offset = (i * chunk_size) as u64;
+                let is_last = (i + 1) * chunk_size >= content.len();
+
+                crate::rpc::file_service::FileChunk {
+                    file_id: file_id.to_string(),
+                    offset,
+                    data: chunk_data.to_vec(),
+                    is_last,
+                    checksum: format!("{:x}", md5::compute(chunk_data)),
+                }
+            })
+            .collect();
+
+        // 转换为 Stream
+        let stream = tokio_stream::iter(chunks);
+
+        let request = tonic::Request::new(stream);
+
+        let response = client
+            .stream_file_content(request)
+            .await
+            .map_err(|e| NasError::Other(format!("流式传输失败: {}", e)))?;
+
+        let resp = response.into_inner();
+
+        if !resp.success {
+            return Err(NasError::Other(format!(
+                "流式传输失败: {}",
+                resp.error_message
+            )));
+        }
+
+        Ok(resp.bytes_received)
+    }
 }
 
 /// 同步状态信息

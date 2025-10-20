@@ -8,6 +8,7 @@ pub struct Config {
     pub storage: StorageConfig,
     pub nats: NatsConfig,
     pub s3: S3Config,
+    pub auth: AuthConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -39,6 +40,21 @@ pub struct S3Config {
     pub enable_auth: bool,
 }
 
+/// 认证配置
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuthConfig {
+    /// 是否启用认证
+    pub enable: bool,
+    /// 数据库路径
+    pub db_path: String,
+    /// JWT密钥
+    pub jwt_secret: String,
+    /// 访问令牌过期时间（秒）
+    pub access_token_exp: u64,
+    /// 刷新令牌过期时间（秒）
+    pub refresh_token_exp: u64,
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -63,6 +79,13 @@ impl Default for Config {
                 secret_key: "minioadmin".to_string(),
                 enable_auth: false,
             },
+            auth: AuthConfig {
+                enable: false,
+                db_path: "./data/auth.db".to_string(),
+                jwt_secret: "silent-nas-secret-key-change-in-production".to_string(),
+                access_token_exp: 3600,    // 1小时
+                refresh_token_exp: 604800, // 7天
+            },
         }
     }
 }
@@ -77,7 +100,33 @@ impl Config {
     }
 
     pub fn load() -> Self {
-        Self::from_file("config.toml").unwrap_or_default()
+        let mut config = Self::from_file("config.toml").unwrap_or_default();
+        config.apply_env_overrides();
+        config
+    }
+
+    /// 应用环境变量覆盖配置
+    pub fn apply_env_overrides(&mut self) {
+        // 认证配置
+        if let Ok(enable) = std::env::var("ENABLE_AUTH") {
+            self.auth.enable = enable.to_lowercase() == "true" || enable == "1";
+        }
+        if let Ok(db_path) = std::env::var("AUTH_DB_PATH") {
+            self.auth.db_path = db_path;
+        }
+        if let Ok(jwt_secret) = std::env::var("JWT_SECRET") {
+            self.auth.jwt_secret = jwt_secret;
+        }
+        if let Ok(exp) = std::env::var("JWT_ACCESS_EXP")
+            && let Ok(seconds) = exp.parse::<u64>()
+        {
+            self.auth.access_token_exp = seconds;
+        }
+        if let Ok(exp) = std::env::var("JWT_REFRESH_EXP")
+            && let Ok(seconds) = exp.parse::<u64>()
+        {
+            self.auth.refresh_token_exp = seconds;
+        }
     }
 }
 
@@ -110,6 +159,16 @@ mod tests {
         assert_eq!(config.s3.access_key, "minioadmin");
         assert_eq!(config.s3.secret_key, "minioadmin");
         assert!(!config.s3.enable_auth);
+
+        // 测试认证配置
+        assert!(!config.auth.enable);
+        assert_eq!(config.auth.db_path, "./data/auth.db");
+        assert_eq!(
+            config.auth.jwt_secret,
+            "silent-nas-secret-key-change-in-production"
+        );
+        assert_eq!(config.auth.access_token_exp, 3600);
+        assert_eq!(config.auth.refresh_token_exp, 604800);
     }
 
     #[test]
@@ -226,6 +285,13 @@ topic_prefix = "test.topic"
 access_key = "testkey"
 secret_key = "testsecret"
 enable_auth = true
+
+[auth]
+enable = true
+db_path = "/tmp/auth.db"
+jwt_secret = "test-secret"
+access_token_exp = 7200
+refresh_token_exp = 1209600
 "#;
         fs::write(temp_file, config_content).unwrap();
 
@@ -236,6 +302,8 @@ enable_auth = true
         assert_eq!(config.nats.url, "nats://test:4222");
         assert_eq!(config.s3.access_key, "testkey");
         assert!(config.s3.enable_auth);
+        assert!(config.auth.enable);
+        assert_eq!(config.auth.db_path, "/tmp/auth.db");
 
         // 清理
         let _ = fs::remove_file(temp_file);
@@ -255,5 +323,98 @@ enable_auth = true
 
         assert_eq!(config.server.http_port, cloned.server.http_port);
         assert_eq!(config.storage.root_path, cloned.storage.root_path);
+    }
+
+    #[test]
+    fn test_auth_config() {
+        let auth = AuthConfig {
+            enable: true,
+            db_path: "/tmp/auth.db".to_string(),
+            jwt_secret: "test-secret".to_string(),
+            access_token_exp: 7200,
+            refresh_token_exp: 1209600,
+        };
+
+        assert!(auth.enable);
+        assert_eq!(auth.db_path, "/tmp/auth.db");
+        assert_eq!(auth.jwt_secret, "test-secret");
+        assert_eq!(auth.access_token_exp, 7200);
+        assert_eq!(auth.refresh_token_exp, 1209600);
+    }
+
+    #[test]
+    fn test_apply_env_overrides() {
+        // 设置环境变量
+        unsafe {
+            std::env::set_var("ENABLE_AUTH", "true");
+            std::env::set_var("AUTH_DB_PATH", "/custom/auth.db");
+            std::env::set_var("JWT_SECRET", "custom-secret");
+            std::env::set_var("JWT_ACCESS_EXP", "7200");
+            std::env::set_var("JWT_REFRESH_EXP", "1209600");
+        }
+
+        let mut config = Config::default();
+        config.apply_env_overrides();
+
+        assert!(config.auth.enable);
+        assert_eq!(config.auth.db_path, "/custom/auth.db");
+        assert_eq!(config.auth.jwt_secret, "custom-secret");
+        assert_eq!(config.auth.access_token_exp, 7200);
+        assert_eq!(config.auth.refresh_token_exp, 1209600);
+
+        // 清理环境变量
+        unsafe {
+            std::env::remove_var("ENABLE_AUTH");
+            std::env::remove_var("AUTH_DB_PATH");
+            std::env::remove_var("JWT_SECRET");
+            std::env::remove_var("JWT_ACCESS_EXP");
+            std::env::remove_var("JWT_REFRESH_EXP");
+        }
+    }
+
+    #[test]
+    fn test_config_with_auth_section() {
+        // 创建临时配置文件
+        let temp_file = "./test_auth_config.toml";
+        let config_content = r#"
+[server]
+http_port = 8080
+grpc_port = 50051
+quic_port = 4433
+webdav_port = 8081
+s3_port = 9000
+host = "127.0.0.1"
+
+[storage]
+root_path = "./storage"
+chunk_size = 4194304
+
+[nats]
+url = "nats://127.0.0.1:4222"
+topic_prefix = "silent.nas.files"
+
+[s3]
+access_key = "minioadmin"
+secret_key = "minioadmin"
+enable_auth = false
+
+[auth]
+enable = true
+db_path = "/var/lib/auth.db"
+jwt_secret = "production-secret"
+access_token_exp = 7200
+refresh_token_exp = 1209600
+"#;
+        fs::write(temp_file, config_content).unwrap();
+
+        let config = Config::from_file(temp_file).unwrap();
+        assert!(config.auth.enable);
+        assert_eq!(config.auth.db_path, "/var/lib/auth.db");
+        assert_eq!(config.auth.jwt_secret, "production-secret");
+        assert_eq!(config.auth.access_token_exp, 7200);
+        assert_eq!(config.auth.refresh_token_exp, 1209600);
+
+        // 清理
+        let _ = fs::remove_file(temp_file);
     }
 }

@@ -3,6 +3,8 @@
 //! 提供 REST API 服务，使用中间件和萃取器模式
 
 mod audit_api;
+mod auth_handlers;
+mod auth_middleware;
 mod files;
 mod health;
 mod incremental_sync;
@@ -12,6 +14,7 @@ mod state;
 mod sync;
 mod versions;
 
+pub use auth_middleware::{AuthHook, OptionalAuthHook};
 pub use state::AppState;
 
 use crate::error::Result;
@@ -44,6 +47,7 @@ pub async fn start_http_server(
     sync_manager: Arc<SyncManager>,
     version_manager: Arc<VersionManager>,
     search_engine: Arc<SearchEngine>,
+    config: crate::config::Config,
 ) -> Result<()> {
     let storage = Arc::new(storage);
 
@@ -53,6 +57,32 @@ pub async fn start_http_server(
     // 创建审计日志管理器（可选，通过环境变量启用）
     let audit_logger = if std::env::var("ENABLE_AUDIT").is_ok() {
         Some(Arc::new(crate::audit::AuditLogger::new(1000)))
+    } else {
+        None
+    };
+
+    // 创建认证管理器（使用配置）
+    let auth_manager = if config.auth.enable {
+        match crate::auth::AuthManager::new(&config.auth.db_path) {
+            Ok(manager) => {
+                // 设置JWT配置
+                manager.set_jwt_config(crate::auth::JwtConfig {
+                    secret: config.auth.jwt_secret.clone(),
+                    access_token_exp: config.auth.access_token_exp,
+                    refresh_token_exp: config.auth.refresh_token_exp,
+                });
+
+                // 初始化默认管理员
+                if let Err(e) = manager.init_default_admin() {
+                    tracing::warn!("初始化默认管理员失败: {}", e);
+                }
+                Some(Arc::new(manager))
+            }
+            Err(e) => {
+                tracing::error!("创建认证管理器失败: {}", e);
+                None
+            }
+        }
     } else {
         None
     };
@@ -79,6 +109,7 @@ pub async fn start_http_server(
         inc_sync_handler,
         source_http_addr,
         audit_logger,
+        auth_manager,
     };
 
     // 定期提交索引
@@ -94,8 +125,119 @@ pub async fn start_http_server(
     });
 
     // 构建路由
-    let route = Route::new_root().hook(state_injector(app_state)).append(
-        Route::new("api")
+    let mut api_route = Route::new("api")
+        .append(
+            Route::new("auth")
+                .append(Route::new("register").post(auth_handlers::register_handler))
+                .append(Route::new("login").post(auth_handlers::login_handler))
+                .append(Route::new("refresh").post(auth_handlers::refresh_handler))
+                .append(Route::new("me").get(auth_handlers::me_handler))
+                .append(Route::new("password").put(auth_handlers::change_password_handler)),
+        )
+        .append(Route::new("health").get(health::health))
+        .append(Route::new("health/readiness").get(health::readiness))
+        .append(Route::new("health/status").get(health::health_status));
+
+    // 如果启用认证，为需要保护的API添加认证Hook
+    if let Some(ref auth_mgr) = app_state.auth_manager {
+        let auth_hook = AuthHook::new(auth_mgr.clone());
+        let optional_auth_hook = OptionalAuthHook::new(auth_mgr.clone());
+
+        // 文件操作 - 需要认证
+        api_route = api_route
+            .append(
+                Route::new("files")
+                    .hook(auth_hook.clone())
+                    .post(files::upload_file)
+                    .get(files::list_files),
+            )
+            .append(
+                Route::new("files/<id>")
+                    .hook(auth_hook.clone())
+                    .get(files::download_file)
+                    .delete(files::delete_file),
+            )
+            // 版本管理 - 需要认证
+            .append(
+                Route::new("files/<id>/versions")
+                    .hook(auth_hook.clone())
+                    .get(versions::list_versions),
+            )
+            .append(
+                Route::new("files/<id>/versions/<version_id>")
+                    .hook(auth_hook.clone())
+                    .get(versions::get_version)
+                    .delete(versions::delete_version),
+            )
+            .append(
+                Route::new("files/<id>/versions/<version_id>/restore")
+                    .hook(auth_hook.clone())
+                    .post(versions::restore_version),
+            )
+            .append(
+                Route::new("versions/stats")
+                    .hook(auth_hook.clone())
+                    .get(versions::get_version_stats),
+            )
+            // 同步功能 - 可选认证
+            .append(
+                Route::new("sync/states")
+                    .hook(optional_auth_hook.clone())
+                    .get(sync::list_sync_states),
+            )
+            .append(
+                Route::new("sync/states/<id>")
+                    .hook(optional_auth_hook.clone())
+                    .get(sync::get_sync_state),
+            )
+            .append(
+                Route::new("sync/conflicts")
+                    .hook(optional_auth_hook.clone())
+                    .get(sync::get_conflicts),
+            )
+            .append(
+                Route::new("sync/signature/<id>")
+                    .hook(optional_auth_hook.clone())
+                    .get(incremental_sync::get_file_signature),
+            )
+            .append(
+                Route::new("sync/delta/<id>")
+                    .hook(optional_auth_hook.clone())
+                    .post(incremental_sync::get_file_delta),
+            )
+            // 搜索 - 需要认证
+            .append(
+                Route::new("search")
+                    .hook(auth_hook.clone())
+                    .get(search::search_files),
+            )
+            .append(
+                Route::new("search/stats")
+                    .hook(auth_hook.clone())
+                    .get(search::get_search_stats),
+            )
+            // 指标 - 需要认证
+            .append(
+                Route::new("metrics")
+                    .hook(auth_hook.clone())
+                    .get(metrics_api::get_metrics),
+            )
+            // 审计日志 - 需要认证
+            .append(
+                Route::new("audit/logs")
+                    .hook(auth_hook.clone())
+                    .get(audit_api::get_audit_logs),
+            )
+            .append(
+                Route::new("audit/stats")
+                    .hook(auth_hook.clone())
+                    .get(audit_api::get_audit_stats),
+            );
+
+        info!("🔒 认证功能已启用 - API端点已受保护");
+    } else {
+        // 未启用认证，使用原始路由（无保护）
+        api_route = api_route
             .append(
                 Route::new("files")
                     .post(files::upload_file)
@@ -124,13 +266,16 @@ pub async fn start_http_server(
             .append(Route::new("sync/delta/<id>").post(incremental_sync::get_file_delta))
             .append(Route::new("search").get(search::search_files))
             .append(Route::new("search/stats").get(search::get_search_stats))
-            .append(Route::new("health").get(health::health))
-            .append(Route::new("health/readiness").get(health::readiness))
-            .append(Route::new("health/status").get(health::health_status))
             .append(Route::new("metrics").get(metrics_api::get_metrics))
             .append(Route::new("audit/logs").get(audit_api::get_audit_logs))
-            .append(Route::new("audit/stats").get(audit_api::get_audit_stats)),
-    );
+            .append(Route::new("audit/stats").get(audit_api::get_audit_stats));
+
+        info!("⚠️  认证功能未启用 - API端点无保护");
+    }
+
+    let route = Route::new_root()
+        .hook(state_injector(app_state))
+        .append(api_route);
 
     info!("HTTP 服务器启动: {}", addr);
     info!("  - REST API: http://{}/api", addr);
@@ -210,6 +355,7 @@ mod tests {
             inc_sync_handler,
             source_http_addr,
             audit_logger: None,
+            auth_manager: None,
         };
 
         (app_state, temp_dir)

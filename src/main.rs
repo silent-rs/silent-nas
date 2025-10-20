@@ -128,6 +128,7 @@ async fn main() -> Result<()> {
     let sync_clone = sync_manager.clone();
     let version_clone = version_manager.clone();
     let search_clone = search_engine.clone();
+    let config_clone = config.clone();
     // source_http_addr 已用于 HTTP/WebDAV/S3 三处，不再单独复制
 
     let http_handle = tokio::spawn(async move {
@@ -138,6 +139,7 @@ async fn main() -> Result<()> {
             sync_clone,
             version_clone,
             search_clone,
+            config_clone,
         )
         .await
         {

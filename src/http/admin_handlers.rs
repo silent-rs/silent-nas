@@ -9,7 +9,135 @@ use serde::{Deserialize, Serialize};
 use silent::SilentError;
 use silent::extractor::Configs as CfgExtractor;
 use silent::prelude::*;
+use tracing::{info, warn};
 use validator::Validate;
+
+/// 触发跨节点 push 同步请求
+#[derive(Debug, Deserialize)]
+pub struct PushSyncRequest {
+    /// 目标节点 gRPC 地址：host:port
+    pub target: String,
+    /// 指定文件ID列表，若为空或缺省则默认推送所有未删除文件
+    pub file_ids: Option<Vec<String>>,
+}
+
+/// POST /api/admin/sync/push
+/// 触发本节点向指定 gRPC 地址的节点推送文件（先同步状态，再流式推送内容）
+pub async fn trigger_push_sync(
+    mut req: Request,
+    CfgExtractor(state): CfgExtractor<AppState>,
+) -> silent::Result<serde_json::Value> {
+    // 解析请求体
+    let body = req.take_body();
+    let bytes = match body {
+        ReqBody::Incoming(body) => body.collect().await?.to_bytes().to_vec(),
+        ReqBody::Once(bytes) => bytes.to_vec(),
+        ReqBody::Empty => {
+            return Err(SilentError::business_error(
+                StatusCode::BAD_REQUEST,
+                "请求体为空",
+            ));
+        }
+    };
+
+    let payload: PushSyncRequest = serde_json::from_slice(&bytes).map_err(|e| {
+        SilentError::business_error(StatusCode::BAD_REQUEST, format!("解析请求失败: {}", e))
+    })?;
+
+    info!("管理员触发push同步 -> {}", payload.target);
+
+    // 组装待推送文件
+    let file_ids: Vec<String> = if let Some(list) = payload.file_ids {
+        list
+    } else {
+        state
+            .sync_manager
+            .get_all_sync_states()
+            .await
+            .into_iter()
+            .filter(|s| !s.is_deleted())
+            .map(|s| s.file_id)
+            .collect()
+    };
+
+    // 客户端
+    use crate::sync::node::client::{ClientConfig, NodeSyncClient};
+    let client = NodeSyncClient::new(payload.target.clone(), ClientConfig::default());
+    client
+        .connect()
+        .await
+        .map_err(|e| SilentError::business_error(StatusCode::BAD_GATEWAY, e.to_string()))?;
+
+    // 逐个文件：先同步状态，再流式推送内容
+    use crate::rpc::file_service::{
+        FileMetadata as ProtoFileMetadata, FileSyncState as ProtoFileSyncState,
+    };
+    use tokio::fs;
+
+    let mut success = 0usize;
+    for file_id in file_ids.iter() {
+        if let Some(file_sync) = state.sync_manager.get_sync_state(file_id).await {
+            // 发送状态
+            let proto_meta = file_sync.metadata.value.clone().map(|m| ProtoFileMetadata {
+                id: m.id,
+                name: m.name,
+                path: m.path,
+                size: m.size,
+                hash: m.hash,
+                created_at: m.created_at.to_string(),
+                modified_at: m.modified_at.to_string(),
+            });
+            let vc_json =
+                serde_json::to_string(&file_sync.vector_clock).unwrap_or_else(|_| "{}".to_string());
+            let state_msg = ProtoFileSyncState {
+                file_id: file_id.clone(),
+                metadata: proto_meta,
+                deleted: file_sync.deleted.value.unwrap_or(false),
+                vector_clock: vc_json,
+                timestamp: chrono::Local::now().timestamp_millis(),
+            };
+            let _ = client
+                .sync_file_states(state.sync_manager.node_id(), vec![state_msg])
+                .await;
+
+            // 读取文件内容（优先路径）
+            let content_res = if let Some(meta) = file_sync.metadata.value.as_ref() {
+                let full = state.storage.get_full_path(&meta.path);
+                fs::read(full).await.map_err(|e| {
+                    SilentError::business_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+                })
+            } else {
+                state.storage.read_file(file_id).await.map_err(|e| {
+                    SilentError::business_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+                })
+            };
+
+            match content_res {
+                Ok(content) => {
+                    if let Err(e) = client
+                        .stream_file_content(file_id, content, 1024 * 1024)
+                        .await
+                    {
+                        warn!("流式推送失败: {} - {}", file_id, e);
+                    } else {
+                        success += 1;
+                    }
+                }
+                Err(e) => {
+                    warn!("读取文件失败: {} - {}", file_id, e);
+                }
+            }
+        }
+    }
+
+    client.disconnect().await;
+
+    Ok(serde_json::json!({
+        "target": payload.target,
+        "requested": file_ids.len(),
+        "pushed": success,
+    }))
+}
 
 /// 更新用户请求
 #[derive(Debug, Deserialize, Validate)]

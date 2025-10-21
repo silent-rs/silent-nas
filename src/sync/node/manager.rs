@@ -327,6 +327,9 @@ impl NodeSyncCoordinator {
 
     /// 同步文件到指定节点
     pub async fn sync_to_node(&self, node_id: &str, file_ids: Vec<String>) -> Result<usize> {
+        use crate::rpc::file_service::{
+            FileMetadata as ProtoFileMetadata, FileSyncState as ProtoFileSyncState,
+        };
         use crate::sync::node::client::{ClientConfig, NodeSyncClient};
 
         info!("开始同步 {} 个文件到节点: {}", file_ids.len(), node_id);
@@ -350,26 +353,44 @@ impl NodeSyncCoordinator {
         for file_id in file_ids.iter().take(self.config.max_files_per_sync) {
             // 获取文件的同步状态
             if let Some(file_sync) = self.sync_manager.get_sync_state(file_id).await {
+                // 先同步状态（VectorClock/LWW），以便对端处理冲突
+                let proto_meta = file_sync.metadata.value.clone().map(|m| ProtoFileMetadata {
+                    id: m.id,
+                    name: m.name,
+                    path: m.path,
+                    size: m.size,
+                    hash: m.hash,
+                    created_at: m.created_at.to_string(),
+                    modified_at: m.modified_at.to_string(),
+                });
+
+                let vc_json = serde_json::to_string(&file_sync.vector_clock)
+                    .unwrap_or_else(|_| "{}".to_string());
+
+                let state = ProtoFileSyncState {
+                    file_id: file_id.clone(),
+                    metadata: proto_meta,
+                    deleted: file_sync.deleted.value.unwrap_or(false),
+                    vector_clock: vc_json,
+                    timestamp: chrono::Local::now().timestamp_millis(),
+                };
+
+                // 忽略返回的冲突列表，由服务端记录日志与审计
+                let _ = client
+                    .sync_file_states(self.sync_manager.node_id(), vec![state])
+                    .await;
+
                 // 读取文件内容
                 match self.storage.read_file(file_id).await {
                     Ok(content) => {
                         let file_size = content.len();
 
-                        // 从 LWWRegister 中获取元数据（value已经是Option<T>）
-                        let metadata = file_sync.metadata.value.clone();
-
-                        // 根据文件大小选择传输方式
-                        let transfer_result = if file_size < 5 * 1024 * 1024 {
-                            // 小于 5MB 使用直接传输
-                            client.transfer_file(file_id, content, metadata).await
-                        } else {
-                            // 大于 5MB 使用流式传输
-                            const CHUNK_SIZE: usize = 1024 * 1024; // 1MB chunks
-                            client
-                                .stream_file_content(file_id, content, CHUNK_SIZE)
-                                .await
-                                .map(|_| true)
-                        };
+                        // 统一采用流式传输，避免与服务端 TransferFile（拉取语义）不一致
+                        const CHUNK_SIZE: usize = 1024 * 1024; // 1MB
+                        let transfer_result = client
+                            .stream_file_content(file_id, content, CHUNK_SIZE)
+                            .await
+                            .map(|_| true);
 
                         match transfer_result {
                             Ok(_) => {

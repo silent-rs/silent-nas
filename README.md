@@ -118,6 +118,9 @@ cargo run --release
 
 详细架构说明见 **[部署指南](docs/deployment.md)**
 
+### 多节点部署
+- 参见 `docs/deployment-multi-node.md` 配置 `[node]` 与 `[sync]`，并在各节点设置 `seed_nodes` 完成注册与自动同步。
+
 ## 许可证
 
 本项目采用 MIT 许可证 - 详见 [LICENSE](LICENSE) 文件

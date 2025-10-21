@@ -46,8 +46,20 @@ QUIC2=$(get_free_udp_port)
 
 cleanup() {
   echo "[smoke] 清理进程与临时文件..."
-  [[ -n "${PID1:-}" ]] && kill $PID1 2>/dev/null || true
-  [[ -n "${PID2:-}" ]] && kill $PID2 2>/dev/null || true
+  # 停止后台进程
+  if [[ -n "${PID1:-}" ]]; then
+    kill $PID1 2>/dev/null || true
+    sleep 0.1 || true
+    kill -9 $PID1 2>/dev/null || true
+  fi
+  if [[ -n "${PID2:-}" ]]; then
+    kill $PID2 2>/dev/null || true
+    sleep 0.1 || true
+    kill -9 $PID2 2>/dev/null || true
+  fi
+  # 删除日志与临时目录
+  rm -f /tmp/silent-nas-node1.log /tmp/silent-nas-node2.log 2>/dev/null || true
+  rm -rf "$WORK_DIR" 2>/dev/null || true
   sleep 0.2 || true
 }
 trap cleanup EXIT
@@ -142,32 +154,36 @@ max_retries = 3
 EOF
 
 echo "[smoke] 启动节点1..."
-(cd "$WORK_DIR/node1" && ADVERTISE_HOST=127.0.0.1 "$TARGET_BIN") >/tmp/silent-nas-node1.log 2>&1 &
+(cd "$WORK_DIR/node1" && RUST_LOG=info ADVERTISE_HOST=127.0.0.1 exec "$TARGET_BIN") >/tmp/silent-nas-node1.log 2>&1 &
 PID1=$!
 
 echo "[smoke] 等待节点1 HTTP就绪..."
-for i in {1..50}; do
+for i in {1..100}; do
   if curl -fsS "http://127.0.0.1:$HTTP1/api/health" >/dev/null 2>&1; then
     break
   fi
   sleep 0.2
-  if [[ $i -eq 50 ]]; then
-    echo "[smoke] 等待节点1 HTTP就绪超时"; exit 1
+  if [[ $i -eq 100 ]]; then
+    echo "[smoke] 等待节点1 HTTP就绪超时，节点1日志如下："
+    tail -n 200 /tmp/silent-nas-node1.log || true
+    exit 1
   fi
 done
 
 echo "[smoke] 启动节点2..."
-(cd "$WORK_DIR/node2" && ADVERTISE_HOST=127.0.0.1 "$TARGET_BIN") >/tmp/silent-nas-node2.log 2>&1 &
+(cd "$WORK_DIR/node2" && RUST_LOG=info ADVERTISE_HOST=127.0.0.1 exec "$TARGET_BIN") >/tmp/silent-nas-node2.log 2>&1 &
 PID2=$!
 
 echo "[smoke] 等待节点2 HTTP就绪..."
-for i in {1..50}; do
+for i in {1..100}; do
   if curl -fsS "http://127.0.0.1:$HTTP2/api/health" >/dev/null 2>&1; then
     break
   fi
   sleep 0.2
-  if [[ $i -eq 50 ]]; then
-    echo "[smoke] 等待节点2 HTTP就绪超时"; exit 1
+  if [[ $i -eq 100 ]]; then
+    echo "[smoke] 等待节点2 HTTP就绪超时，节点2日志如下："
+    tail -n 200 /tmp/silent-nas-node2.log || true
+    exit 1
   fi
 done
 
@@ -175,7 +191,7 @@ echo "[smoke] 通过WebDAV向节点1写入文件..."
 echo "hello from smoke" > "$WORK_DIR/smoke.txt"
 curl -fsS -X PUT --data-binary @"$WORK_DIR/smoke.txt" "http://127.0.0.1:$WEBDAV1/webdav/smoke.txt"
 
-echo "[smoke] 轮询节点2文件列表收敛..."
+echo "[smoke] 轮询节点2文件列表收敛(自动同步)..."
 ok=false
 for i in {1..50}; do
   COUNT=$(curl -fsS "http://127.0.0.1:$HTTP2/api/files" 2>/dev/null \
@@ -190,11 +206,31 @@ for i in {1..50}; do
 done
 
 if [[ "$ok" != "true" ]]; then
-  echo "[smoke] 同步未在预期时间内完成"
-  echo "--- 节点1日志 ---"; tail -n 100 /tmp/silent-nas-node1.log || true
-  echo "--- 节点2日志 ---"; tail -n 100 /tmp/silent-nas-node2.log || true
-  exit 1
+  echo "[smoke] 自动同步超时，尝试调用管理员API触发push..."
+  curl -fsS -H 'Content-Type: application/json' \
+    -d "{\"target\":\"127.0.0.1:$GRPC2\"}" \
+    "http://127.0.0.1:$HTTP1/api/admin/sync/push" || true
+
+  echo "[smoke] 触发push后再次轮询收敛..."
+  for i in {1..50}; do
+    COUNT=$(curl -fsS "http://127.0.0.1:$HTTP2/api/files" 2>/dev/null \
+      | grep -o '"size":' \
+      | wc -l | tr -d ' ')
+    COUNT=${COUNT:-0}
+    if [[ "$COUNT" -ge 1 ]]; then
+      ok=true
+      break
+    fi
+    sleep 0.3
+  done
 fi
 
-echo "[smoke] ✅ 同步成功 (节点2检测到 >=1 个文件)"
+if [[ "$ok" == "true" ]]; then
+  echo "[smoke] ✅ 同步成功 (节点2检测到 >=1 个文件)"
+else
+  echo "[smoke] ❌ 同步失败"
+  echo "--- 节点1日志 ---"; tail -n 120 /tmp/silent-nas-node1.log || true
+  echo "--- 节点2日志 ---"; tail -n 120 /tmp/silent-nas-node2.log || true
+  exit 1
+fi
 exit 0

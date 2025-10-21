@@ -215,6 +215,32 @@ pub async fn change_password_handler(
     }))
 }
 
+/// 用户注销
+///
+/// POST /api/auth/logout
+/// 需要认证
+pub async fn logout_handler(
+    req: Request,
+    CfgExtractor(state): CfgExtractor<AppState>,
+) -> silent::Result<serde_json::Value> {
+    let auth_manager = state.auth_manager.as_ref().ok_or_else(|| {
+        SilentError::business_error(StatusCode::SERVICE_UNAVAILABLE, "认证功能未启用")
+    })?;
+
+    // 提取Token
+    let token = extract_token(&req)?;
+
+    // 注销
+    auth_manager.logout(&token).map_err(|e| match e {
+        NasError::Auth(msg) => SilentError::business_error(StatusCode::BAD_REQUEST, msg),
+        _ => SilentError::business_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    })?;
+
+    Ok(serde_json::json!({
+        "message": "注销成功"
+    }))
+}
+
 /// 从请求头提取Bearer Token
 fn extract_token(req: &Request) -> silent::Result<String> {
     let auth_header = req

@@ -7,7 +7,9 @@
 pub mod jwt;
 pub mod models;
 pub mod password;
+pub mod rate_limit;
 pub mod storage;
+pub mod token_blacklist;
 
 pub use jwt::JwtConfig;
 pub use models::{
@@ -16,11 +18,13 @@ pub use models::{
 };
 
 use crate::error::{NasError, Result};
-use chrono::Local;
+use chrono::{Local, TimeZone};
 use password::PasswordHandler;
+use rate_limit::{RateLimitConfig, RateLimiter};
 use std::path::Path;
 use std::sync::{Arc, RwLock};
 use storage::UserStorage;
+use token_blacklist::TokenBlacklist;
 use validator::Validate;
 
 /// 认证管理器
@@ -28,17 +32,50 @@ use validator::Validate;
 pub struct AuthManager {
     pub(crate) storage: Arc<UserStorage>,
     jwt_config: Arc<RwLock<JwtConfig>>,
+    rate_limiter: Option<Arc<RateLimiter>>,
+    token_blacklist: Option<Arc<TokenBlacklist>>,
 }
 
 impl AuthManager {
     /// 创建认证管理器
     pub fn new<P: AsRef<Path>>(db_path: P) -> Result<Self> {
-        let storage = UserStorage::new(db_path)?;
+        let storage = UserStorage::new(&db_path)?;
         let jwt_config = JwtConfig::from_env();
+
+        let db_dir = db_path
+            .as_ref()
+            .parent()
+            .ok_or_else(|| NasError::Config("无效的数据库路径".to_string()))?;
+
+        // 创建限流器
+        let rate_limiter = {
+            let rate_limit_path = db_dir.join("rate_limit.db");
+            match RateLimiter::new(rate_limit_path, RateLimitConfig::default()) {
+                Ok(limiter) => Some(Arc::new(limiter)),
+                Err(e) => {
+                    tracing::warn!("创建限流器失败: {}, 限流功能将被禁用", e);
+                    None
+                }
+            }
+        };
+
+        // 创建Token黑名单
+        let token_blacklist = {
+            let blacklist_path = db_dir.join("token_blacklist.db");
+            match TokenBlacklist::new(blacklist_path) {
+                Ok(blacklist) => Some(Arc::new(blacklist)),
+                Err(e) => {
+                    tracing::warn!("创建Token黑名单失败: {}, 注销功能将被禁用", e);
+                    None
+                }
+            }
+        };
 
         Ok(Self {
             storage: Arc::new(storage),
             jwt_config: Arc::new(RwLock::new(jwt_config)),
+            rate_limiter,
+            token_blacklist,
         })
     }
 
@@ -85,12 +122,34 @@ impl AuthManager {
 
     /// 登录
     pub fn login(&self, req: LoginRequest) -> Result<LoginResponse> {
+        // 检查限流
+        if let Some(ref limiter) = self.rate_limiter
+            && limiter.is_locked(&req.username)?
+        {
+            let remaining = limiter.get_lock_remaining(&req.username)?;
+            if let Some(seconds) = remaining {
+                return Err(NasError::Auth(format!(
+                    "账户已被锁定，请在 {} 秒后重试",
+                    seconds
+                )));
+            }
+        }
+
         // 尝试通过用户名或邮箱查找用户
         let user = self
             .storage
             .get_user_by_username(&req.username)?
-            .or_else(|| self.storage.get_user_by_email(&req.username).ok().flatten())
-            .ok_or_else(|| NasError::Auth("用户名或密码错误".to_string()))?;
+            .or_else(|| self.storage.get_user_by_email(&req.username).ok().flatten());
+
+        if user.is_none() {
+            // 记录失败
+            if let Some(ref limiter) = self.rate_limiter {
+                let _ = limiter.record_failure(&req.username);
+            }
+            return Err(NasError::Auth("用户名或密码错误".to_string()));
+        }
+
+        let user = user.unwrap();
 
         // 检查用户状态
         match user.status {
@@ -105,7 +164,16 @@ impl AuthManager {
 
         // 验证密码
         if !PasswordHandler::verify_password(&req.password, &user.password_hash)? {
+            // 记录失败
+            if let Some(ref limiter) = self.rate_limiter {
+                let _ = limiter.record_failure(&req.username);
+            }
             return Err(NasError::Auth("用户名或密码错误".to_string()));
+        }
+
+        // 登录成功，清除失败记录
+        if let Some(ref limiter) = self.rate_limiter {
+            let _ = limiter.clear(&req.username);
         }
 
         // 生成 Token
@@ -160,6 +228,13 @@ impl AuthManager {
     pub fn verify_token(&self, token: &str) -> Result<User> {
         let claims = self.jwt_config.read().unwrap().verify_token(token)?;
 
+        // 检查Token是否在黑名单中
+        if let Some(ref blacklist) = self.token_blacklist
+            && blacklist.is_blacklisted(&claims.jti)?
+        {
+            return Err(NasError::Auth("Token已被撤销".to_string()));
+        }
+
         let user = self
             .storage
             .get_user_by_id(&claims.sub)?
@@ -170,6 +245,36 @@ impl AuthManager {
         }
 
         Ok(user)
+    }
+
+    /// 注销（将Token加入黑名单）
+    pub fn logout(&self, token: &str) -> Result<()> {
+        let blacklist = self
+            .token_blacklist
+            .as_ref()
+            .ok_or_else(|| NasError::Auth("注销功能未启用".to_string()))?;
+
+        let claims = self.jwt_config.read().unwrap().verify_token(token)?;
+
+        // 计算过期时间
+        let expires_at = chrono::Local
+            .timestamp_opt(claims.exp as i64, 0)
+            .single()
+            .unwrap();
+
+        blacklist.add(&claims.jti, &claims.sub, expires_at, "user_logout")?;
+
+        Ok(())
+    }
+
+    /// 撤销用户的所有Token
+    pub fn revoke_all_tokens(&self, user_id: &str) -> Result<usize> {
+        let blacklist = self
+            .token_blacklist
+            .as_ref()
+            .ok_or_else(|| NasError::Auth("注销功能未启用".to_string()))?;
+
+        blacklist.revoke_user_tokens(user_id)
     }
 
     /// 修改密码
@@ -205,9 +310,21 @@ impl AuthManager {
     }
 
     /// 列出所有用户（仅管理员）
-    pub fn list_users(&self) -> Result<Vec<UserInfo>> {
-        let users = self.storage.list_users()?;
-        Ok(users.into_iter().map(|u| u.into()).collect())
+    pub async fn list_users(&self) -> Result<Vec<User>> {
+        self.storage.list_users()
+    }
+
+    /// 根据ID获取用户（仅管理员）
+    pub async fn get_user_by_id(&self, user_id: &str) -> Result<Option<User>> {
+        self.storage.get_user_by_id(user_id)
+    }
+
+    /// 更新用户信息（仅管理员）
+    pub async fn update_user(&self, user: &User) -> Result<()> {
+        let mut updated_user = user.clone();
+        updated_user.updated_at = Local::now();
+        self.storage.update_user(updated_user)?;
+        Ok(())
     }
 
     /// 更新用户角色（仅管理员）
@@ -238,8 +355,24 @@ impl AuthManager {
         Ok(updated.into())
     }
 
+    /// 重置用户密码（仅管理员）
+    pub async fn reset_password(&self, user_id: &str, new_password: &str) -> Result<()> {
+        let mut user = self
+            .storage
+            .get_user_by_id(user_id)?
+            .ok_or_else(|| NasError::Auth("用户不存在".to_string()))?;
+
+        // 哈希新密码
+        user.password_hash = PasswordHandler::hash_password(new_password)?;
+        user.updated_at = Local::now();
+
+        // 更新用户
+        self.storage.update_user(user)?;
+        Ok(())
+    }
+
     /// 删除用户（仅管理员）
-    pub fn delete_user(&self, user_id: &str) -> Result<()> {
+    pub async fn delete_user(&self, user_id: &str) -> Result<()> {
         self.storage.delete_user(user_id)
     }
 

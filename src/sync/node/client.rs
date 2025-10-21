@@ -376,7 +376,7 @@ pub struct SyncStatusInfo {
 fn convert_from_proto_node(proto: &crate::rpc::file_service::NodeInfo) -> Result<NodeInfo> {
     let datetime = DateTime::<Utc>::from_timestamp_millis(proto.last_seen)
         .ok_or_else(|| NasError::Other("无效的时间戳".to_string()))?;
-    let last_seen = datetime.naive_utc();
+    let last_seen = datetime.with_timezone(&chrono::Local).naive_local();
 
     Ok(NodeInfo {
         node_id: proto.node_id.clone(),

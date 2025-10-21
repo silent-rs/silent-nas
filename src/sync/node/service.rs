@@ -422,7 +422,7 @@ fn convert_from_proto_node(
     // 使用新的 DateTime API 进行转换
     let datetime = DateTime::<Utc>::from_timestamp_millis(proto.last_seen)
         .ok_or_else(|| "无效的时间戳".to_string())?;
-    let last_seen = datetime.naive_utc();
+    let last_seen = datetime.with_timezone(&chrono::Local).naive_local();
 
     Ok(crate::sync::node::NodeInfo {
         node_id: proto.node_id.clone(),

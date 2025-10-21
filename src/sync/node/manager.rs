@@ -331,6 +331,7 @@ impl NodeSyncCoordinator {
             FileMetadata as ProtoFileMetadata, FileSyncState as ProtoFileSyncState,
         };
         use crate::sync::node::client::{ClientConfig, NodeSyncClient};
+        use tokio::fs;
 
         info!("开始同步 {} 个文件到节点: {}", file_ids.len(), node_id);
 
@@ -380,8 +381,17 @@ impl NodeSyncCoordinator {
                     .sync_file_states(self.sync_manager.node_id(), vec![state])
                     .await;
 
-                // 读取文件内容
-                match self.storage.read_file(file_id).await {
+                // 读取文件内容：优先按路径（WebDAV/S3场景），否则按ID
+                let content_res = if let Some(meta) = file_sync.metadata.value.as_ref() {
+                    let full_path = self.storage.get_full_path(&meta.path);
+                    fs::read(full_path)
+                        .await
+                        .map_err(|e| NasError::Other(e.to_string()))
+                } else {
+                    self.storage.read_file(file_id).await
+                };
+
+                match content_res {
                     Ok(content) => {
                         let file_size = content.len();
 

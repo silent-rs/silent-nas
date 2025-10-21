@@ -1,0 +1,39 @@
+[server]
+host = "127.0.0.1"
+http_port = 60325
+grpc_port = 60326
+quic_port = 59921
+webdav_port = 60327
+s3_port = 60328
+
+[storage]
+root_path = "/Users/hubertshelley/Documents/silent/silent-nas/scripts/.smoke/node2/storage"
+chunk_size = 1048576
+
+[nats]
+url = "nats://127.0.0.1:4222"
+topic_prefix = "smoke.nas"
+
+[s3]
+access_key = "minioadmin"
+secret_key = "minioadmin"
+enable_auth = false
+
+[auth]
+enable = false
+db_path = "/Users/hubertshelley/Documents/silent/silent-nas/scripts/.smoke/node2/auth.db"
+jwt_secret = "smoke"
+access_token_exp = 3600
+refresh_token_exp = 604800
+
+[node]
+enable = true
+seed_nodes = ["127.0.0.1:60322"]
+heartbeat_interval = 2
+node_timeout = 120
+
+[sync]
+auto_sync = true
+sync_interval = 2
+max_files_per_sync = 100
+max_retries = 3

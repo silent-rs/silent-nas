@@ -1,71 +1,112 @@
-# Silent-NAS 文档目录
+# Silent-NAS 文档
 
-本目录包含 Silent-NAS 项目的详细技术文档和实现报告。
+欢迎使用 Silent-NAS 文档！本目录包含所有用户文档和使用指南。
 
-## 📚 文档分类
+## 📖 文档导航
 
-### 需求与规划
-- **需求整理.md** - 功能需求文档和开发规划
+### 新手入门
 
-### 部署与配置
-- **分布式部署指南.md** - 多节点部署指南和配置说明
+1. **[安装指南](installation.md)**
+   - 系统要求
+   - 多种安装方式（二进制/源码/Docker）
+   - 依赖服务安装（NATS）
+   - 验证安装
 
-### 技术实现文档
-- **HTTP条件请求.md** - HTTP 条件请求和缓存优化实现
-- **事件监听器实现说明.md** - NATS 事件监听器设计和实现
+2. **[快速开始](../README.md#快速开始)**
+   - 5分钟快速体验
+   - 基本操作示例
 
-### 功能实现报告
-按时间顺序记录各功能模块的实现过程：
+### 配置和部署
 
-- **CRDT文件同步实现报告.md** (2025-10-15)
-  - 基于 CRDT 的文件同步机制
-  - 冲突检测和自动合并策略
+3. **[配置指南](configuration.md)**
+   - 完整配置参数说明
+   - 配置模板（开发/生产/集群）
+   - 环境变量配置
+   - 配置最佳实践
 
-- **文件版本管理实现报告.md** (2025-10-15)
-  - HTTP API 版本控制
-  - 版本存储和管理机制
+4. **[部署指南](deployment.md)**
+   - 单节点部署
+   - 集群部署
+   - Docker 部署
+   - Systemd 服务配置
+   - 反向代理配置（Nginx/Caddy/Traefik）
+   - 高可用配置
+   - 监控和日志
+   - 备份策略
+   - 安全加固
 
-- **跨节点同步实现报告.md** (2025-10-16)
-  - 节点发现和管理
-  - gRPC 同步协议
-  - 分布式状态同步
+### API 使用
 
-- **S3-WebDAV版本控制实现报告.md** (2025-10-17)
-  - S3 Bucket 版本控制 API
-  - WebDAV DeltaV 扩展支持
-  - 版本管理器实现
+5. **[API 使用指南](api-guide.md)**
+   - HTTP REST API
+   - WebDAV 协议
+   - S3 兼容 API
+   - gRPC API
+   - 性能监控
+   - 错误处理
+   - 最佳实践
 
-### 开发记录
-- **代码重构-同步模块.md** - 同步模块代码重构记录
-- **开发总结-2025-10-16.md** - Phase 3-4 开发阶段总结
-- **测试覆盖率提升总结.md** - 测试覆盖率优化过程
+### 运维指南
 
-## 📝 文档更新规范
+6. **[运行指南](../RUNNING.md)**
+   - 启动和停止服务
+   - 日志查看
+   - 故障排查
+   - 性能测试
 
-### 新增文档
-当实现新功能时，建议创建对应的实现报告：
-1. 功能概述和目标
-2. 技术方案设计
-3. 关键代码实现
-4. 测试验证
-5. 遗留问题和后续优化
+## 🎯 根据使用场景选择文档
 
-### 文档命名
-- 功能实现报告：`功能名称实现报告.md`
-- 技术文档：`技术主题.md`
-- 开发记录：`记录类型-日期.md`
+### 我想快速测试 Silent-NAS
+→ [README 快速开始](../README.md#快速开始) → [运行指南](../RUNNING.md)
 
-### 文档归档
-- 临时性文档（如分支分析、修复说明）在功能合并后删除
-- 重复的测试报告只保留最新、最完整的版本
-- 过时的文档移入 `archived/` 目录（如需要）
+### 我想在生产环境部署
+→ [安装指南](installation.md) → [配置指南](configuration.md) → [部署指南](deployment.md)
 
-## 🔗 相关资源
+### 我想使用 Docker 部署
+→ [Docker 部署](deployment.md#docker-部署) → [Docker README](../docker/README.md)
 
-- [项目 README](../README.md) - 项目概述
-- [运行指南](../RUNNING.md) - 快速开始
-- [TODO 列表](../TODO.md) - 任务规划
-- [Docker 文档](../docker/README.md) - 容器化部署
+### 我想开发应用对接 Silent-NAS
+→ [API 使用指南](api-guide.md)
 
-## 📅 最后更新
-2025-10-17
+### 我想部署集群
+→ [部署指南 - 集群部署](deployment.md#集群部署docker-compose)
+
+## 🔗 外部文档
+
+- [Docker 部署文档](../docker/README.md)
+- [Docker 快速开始](../docker/QUICK_START.md)
+- [项目 GitHub](https://github.com/silent-rs/silent-nas)
+- [问题反馈](https://github.com/silent-rs/silent-nas/issues)
+
+## 📋 文档版本
+
+当前文档版本: **v0.6.0**
+
+最后更新: 2025-10-21
+
+## 🤝 贡献文档
+
+发现文档问题或想要改进？欢迎提交 Pull Request！
+
+文档源文件位置: `docs/`
+
+## 💡 获取帮助
+
+- **GitHub Issues**: [提交问题](https://github.com/silent-rs/silent-nas/issues)
+- **讨论区**: [参与讨论](https://github.com/silent-rs/silent-nas/discussions)
+- **文档反馈**: 在相关文档页面提交 Issue
+
+## 📚 文档结构
+
+```
+docs/
+├── README.md           # 本文档索引
+├── installation.md     # 安装指南
+├── configuration.md    # 配置指南
+├── api-guide.md        # API 使用指南
+└── deployment.md       # 部署指南
+```
+
+---
+
+**提示**: 所有文档均使用 Markdown 格式编写，可以在 GitHub 或任何 Markdown 查看器中阅读。

@@ -162,6 +162,33 @@ impl NodeManager {
             .collect()
     }
 
+    /// 启动对外心跳发送任务（周期性向已知节点发送心跳）
+    pub async fn start_outbound_heartbeat(self: Arc<Self>) {
+        let mut interval = interval(Duration::from_secs(self.config.heartbeat_interval));
+
+        tokio::spawn(async move {
+            loop {
+                interval.tick().await;
+
+                let nodes_snapshot: Vec<(String, String)> = {
+                    let nodes = self.nodes.read().await;
+                    nodes
+                        .values()
+                        .map(|n| (n.node_id.clone(), n.address.clone()))
+                        .collect()
+                };
+
+                for (node_id, address) in nodes_snapshot {
+                    if let Err(e) = self.send_heartbeat_to_node(&node_id, &address).await {
+                        warn!("向节点发送心跳失败: {} @ {}, 错误: {}", node_id, address, e);
+                    } else {
+                        debug!("已发送心跳: {} @ {}", node_id, address);
+                    }
+                }
+            }
+        });
+    }
+
     /// 启动心跳检查任务
     pub async fn start_heartbeat_check(self: Arc<Self>) {
         let mut interval = interval(Duration::from_secs(self.config.heartbeat_interval));
@@ -347,6 +374,10 @@ impl NodeSyncCoordinator {
         // 创建 gRPC 客户端
         let client = NodeSyncClient::new(node_address.clone(), ClientConfig::default());
         client.connect().await?;
+        debug!(
+            "gRPC 客户端已连接: {} -> {}",
+            self.node_manager.config.node_id, node_address
+        );
 
         let mut synced = 0;
         let mut retry_count = 0;
@@ -384,10 +415,18 @@ impl NodeSyncCoordinator {
                 // 读取文件内容：优先按路径（WebDAV/S3场景），否则按ID
                 let content_res = if let Some(meta) = file_sync.metadata.value.as_ref() {
                     let full_path = self.storage.get_full_path(&meta.path);
+                    debug!(
+                        "读取文件内容(按路径): file_id={}, path={}, addr={}",
+                        file_id, meta.path, node_address
+                    );
                     fs::read(full_path)
                         .await
                         .map_err(|e| NasError::Other(e.to_string()))
                 } else {
+                    debug!(
+                        "读取文件内容(按ID): file_id={}, addr={}",
+                        file_id, node_address
+                    );
                     self.storage.read_file(file_id).await
                 };
 
@@ -406,10 +445,16 @@ impl NodeSyncCoordinator {
                             Ok(_) => {
                                 synced += 1;
                                 retry_count = 0; // 重置重试计数
-                                debug!("文件同步成功: {}, 大小: {} 字节", file_id, file_size);
+                                info!(
+                                    "文件同步成功: {}, 大小: {} 字节 -> {}",
+                                    file_id, file_size, node_address
+                                );
                             }
                             Err(e) => {
-                                error!("文件同步失败: {}, 错误: {}", file_id, e);
+                                error!(
+                                    "文件同步失败: {} -> {}, 错误: {}",
+                                    file_id, node_address, e
+                                );
                                 retry_count += 1;
 
                                 if retry_count >= self.config.max_retries {
@@ -437,6 +482,12 @@ impl NodeSyncCoordinator {
         // 断开连接
         client.disconnect().await;
 
+        info!(
+            "同步任务完成: 目标={}, 文件数={}, 成功数={}",
+            node_address,
+            file_ids.len().min(self.config.max_files_per_sync),
+            synced
+        );
         Ok(synced)
     }
 
@@ -490,6 +541,7 @@ impl NodeSyncCoordinator {
 
                 // 获取所有在线节点
                 let nodes = self.node_manager.list_online_nodes().await;
+                let total_nodes = nodes.len();
 
                 if nodes.is_empty() {
                     debug!("没有在线节点，跳过同步");
@@ -498,7 +550,16 @@ impl NodeSyncCoordinator {
 
                 // 获取所有需要同步的文件
                 let all_states = self.sync_manager.get_all_sync_states().await;
-                let file_ids: Vec<String> = all_states.iter().map(|s| s.file_id.clone()).collect();
+                let file_ids: Vec<String> = all_states
+                    .iter()
+                    .filter(|s| !s.is_deleted())
+                    .map(|s| s.file_id.clone())
+                    .collect();
+                info!(
+                    "自动同步准备: 在线节点={}, 待同步文件数={}",
+                    total_nodes,
+                    file_ids.len()
+                );
 
                 // 同步到每个节点
                 for node in nodes {

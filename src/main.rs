@@ -405,6 +405,9 @@ async fn start_grpc_server(
     if node_cfg.enable {
         let nm_for_heartbeat = node_manager.clone();
         tokio::spawn(async move { nm_for_heartbeat.start_heartbeat_check().await });
+        // 启动向外发送心跳任务，降低节点离线误判概率
+        let nm_for_outbound = node_manager.clone();
+        tokio::spawn(async move { nm_for_outbound.start_outbound_heartbeat().await });
     }
 
     if node_cfg.enable && sync_cfg.auto_sync {

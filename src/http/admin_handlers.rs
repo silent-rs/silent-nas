@@ -139,6 +139,65 @@ pub async fn trigger_push_sync(
     }))
 }
 
+/// 触发从指定节点拉取（请求对端推送）
+#[derive(Debug, Deserialize)]
+pub struct RequestSyncRequest {
+    /// 源节点 gRPC 地址（host:port）
+    pub source: String,
+    /// 需要同步的文件ID列表
+    pub file_ids: Vec<String>,
+}
+
+/// POST /api/admin/sync/request
+/// 让本节点向指定 gRPC 地址的节点发起同步请求（由对端执行 push）
+pub async fn trigger_request_sync(
+    mut req: Request,
+    CfgExtractor(_state): CfgExtractor<AppState>,
+) -> silent::Result<serde_json::Value> {
+    let body = req.take_body();
+    let bytes = match body {
+        ReqBody::Incoming(body) => body.collect().await?.to_bytes().to_vec(),
+        ReqBody::Once(bytes) => bytes.to_vec(),
+        ReqBody::Empty => {
+            return Err(SilentError::business_error(
+                StatusCode::BAD_REQUEST,
+                "请求体为空",
+            ));
+        }
+    };
+
+    let payload: RequestSyncRequest = serde_json::from_slice(&bytes).map_err(|e| {
+        SilentError::business_error(StatusCode::BAD_REQUEST, format!("解析请求失败: {}", e))
+    })?;
+
+    info!(
+        "管理员触发request同步 <- {} ({} 文件)",
+        payload.source,
+        payload.file_ids.len()
+    );
+
+    use crate::sync::node::client::{ClientConfig, NodeSyncClient};
+    let client = NodeSyncClient::new(payload.source.clone(), ClientConfig::default());
+    client
+        .connect()
+        .await
+        .map_err(|e| SilentError::business_error(StatusCode::BAD_GATEWAY, e.to_string()))?;
+
+    // 调用对端的 RequestFileSync，让对端向本节点推送
+    let requested = client
+        .request_file_sync("", payload.file_ids.clone())
+        .await
+        .map_err(|e| SilentError::business_error(StatusCode::BAD_GATEWAY, e.to_string()))?;
+
+    client.disconnect().await;
+
+    Ok(serde_json::json!({
+        "source": payload.source,
+        "requested": payload.file_ids.len(),
+        "accepted": requested,
+    }))
+}
+
 /// 更新用户请求
 #[derive(Debug, Deserialize, Validate)]
 pub struct UpdateUserRequest {

@@ -193,6 +193,11 @@ pub async fn start_http_server(
                     .post(admin_handlers::trigger_push_sync),
             )
             .append(
+                Route::new("admin/sync/request")
+                    .hook(admin_hook.clone())
+                    .post(admin_handlers::trigger_request_sync),
+            )
+            .append(
                 Route::new("files/<id>/versions/<version_id>")
                     .hook(auth_hook.clone())
                     .get(versions::get_version)
@@ -289,6 +294,7 @@ pub async fn start_http_server(
             )
             .append(Route::new("versions/stats").get(versions::get_version_stats))
             .append(Route::new("admin/sync/push").post(admin_handlers::trigger_push_sync))
+            .append(Route::new("admin/sync/request").post(admin_handlers::trigger_request_sync))
             .append(Route::new("sync/states").get(sync::list_sync_states))
             .append(Route::new("sync/states/<id>").get(sync::get_sync_state))
             .append(Route::new("sync/conflicts").get(sync::get_conflicts))

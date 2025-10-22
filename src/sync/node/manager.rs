@@ -343,13 +343,41 @@ impl NodeSyncCoordinator {
         sync_manager: Arc<SyncManager>,
         storage: Arc<crate::storage::StorageManager>,
     ) -> Arc<Self> {
-        Arc::new(Self {
+        let this = Arc::new(Self {
             config,
             node_manager,
             sync_manager,
             storage,
             stats: Arc::new(RwLock::new(SyncStats::default())),
-        })
+        });
+
+        // 订阅本地变更事件，触发快速 push
+        let this_clone = this.clone();
+        let mut rx = this_clone.sync_manager.subscribe();
+        tokio::spawn(async move {
+            while let Ok(file_id) = rx.recv().await {
+                let nodes = this_clone.node_manager.list_online_nodes().await;
+                if nodes.is_empty() {
+                    debug!("快速同步跳过：无在线节点");
+                    continue;
+                }
+                info!(
+                    "快速同步触发: file_id={}, 在线节点数={}",
+                    file_id,
+                    nodes.len()
+                );
+                for n in nodes {
+                    if let Err(e) = this_clone
+                        .sync_to_node(&n.node_id, vec![file_id.clone()])
+                        .await
+                    {
+                        warn!("快速同步失败: {} -> {}: {}", file_id, n.node_id, e);
+                    }
+                }
+            }
+        });
+
+        this
     }
 
     /// 同步文件到指定节点

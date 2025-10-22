@@ -1,211 +1,36 @@
+use super::{WebDavHandler, constants::*};
 use crate::models::{EventType, FileEvent};
-use crate::notify::EventNotifier;
-use crate::storage::StorageManager;
-use crate::sync::crdt::SyncManager;
-use async_trait::async_trait;
 use http_body_util::BodyExt;
-#[allow(unused_imports)]
-use serde::{Deserialize, Serialize};
 use silent::prelude::*;
 use std::path::Path;
-use std::sync::Arc;
 use tokio::fs;
-use tracing::{debug, info};
-
-// split modules
-pub mod constants;
-mod deltav;
-mod files;
-mod locks;
-mod props;
-mod routes;
-pub mod types;
-
-use constants::*;
-pub use routes::create_webdav_routes;
-use types::DavLock;
-
-// constants and types moved into src/webdav/constants.rs and src/webdav/types.rs
-
-/// WebDAV 处理器
-#[derive(Clone)]
-pub struct WebDavHandler {
-    pub storage: Arc<StorageManager>,
-    pub notifier: Option<Arc<EventNotifier>>,
-    pub sync_manager: Arc<SyncManager>,
-    pub base_path: String,
-    pub source_http_addr: String,
-    #[allow(dead_code)]
-    pub version_manager: Arc<crate::version::VersionManager>,
-    // 简易锁与属性存储（内存）
-    locks: Arc<tokio::sync::RwLock<std::collections::HashMap<String, DavLock>>>,
-    props: Arc<
-        tokio::sync::RwLock<
-            std::collections::HashMap<String, std::collections::HashMap<String, String>>,
-        >,
-    >,
-}
 
 impl WebDavHandler {
-    pub fn new(
-        storage: Arc<StorageManager>,
-        notifier: Option<Arc<EventNotifier>>,
-        sync_manager: Arc<SyncManager>,
-        base_path: String,
-        source_http_addr: String,
-        version_manager: Arc<crate::version::VersionManager>,
-    ) -> Self {
-        let handler = Self {
-            storage,
-            notifier,
-            sync_manager,
-            base_path,
-            source_http_addr,
-            version_manager,
-            locks: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
-            props: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
-        };
-        // 尝试加载持久化元数据（非致命）
-        handler.load_persistent_state();
-        handler
+    pub(super) async fn handle_options(&self) -> silent::Result<Response> {
+        let mut resp = Response::empty();
+        resp.headers_mut().insert(
+            http::header::HeaderName::from_static(HEADER_DAV),
+            http::HeaderValue::from_static(HEADER_DAV_VALUE),
+        );
+        resp.headers_mut().insert(
+            http::header::ALLOW,
+            http::HeaderValue::from_static(HEADER_ALLOW_VALUE),
+        );
+        Ok(resp)
     }
 
-    pub(super) fn lock_token() -> String {
-        format!("opaquelocktoken:{}", scru128::new_string())
-    }
-
-    pub(super) fn meta_dir(&self) -> std::path::PathBuf {
-        self.storage.root_dir().join(".webdav")
-    }
-
-    pub(super) fn locks_file(&self) -> std::path::PathBuf {
-        self.meta_dir().join("locks.json")
-    }
-    pub(super) fn props_file(&self) -> std::path::PathBuf {
-        self.meta_dir().join("props.json")
-    }
-
-    #[allow(clippy::collapsible_if)]
-    fn load_persistent_state(&self) {
-        let meta_dir = self.meta_dir();
-        let _ = std::fs::create_dir_all(&meta_dir);
-        // 加载 locks
-        if let Ok(bytes) = std::fs::read(self.locks_file())
-            && let Ok(map) =
-                serde_json::from_slice::<std::collections::HashMap<String, DavLock>>(&bytes)
-        {
-            let rt = tokio::runtime::Handle::current();
-            let locks = self.locks.clone();
-            rt.spawn(async move {
-                *locks.write().await = map;
-            });
-        }
-        // 加载 props
-        if let Ok(bytes) = std::fs::read(self.props_file())
-            && let Ok(map) = serde_json::from_slice::<
-                std::collections::HashMap<String, std::collections::HashMap<String, String>>,
-            >(&bytes)
-        {
-            let rt = tokio::runtime::Handle::current();
-            let props = self.props.clone();
-            rt.spawn(async move {
-                *props.write().await = map;
-            });
-        }
-    }
-
-    pub(super) async fn persist_locks(&self) {
-        let map = self.locks.read().await.clone();
-        let _ = std::fs::create_dir_all(self.meta_dir());
-        if let Ok(bytes) = serde_json::to_vec_pretty(&map) {
-            let _ = std::fs::write(self.locks_file(), bytes);
-        }
-    }
-
-    pub(super) async fn persist_props(&self) {
-        let map = self.props.read().await.clone();
-        let _ = std::fs::create_dir_all(self.meta_dir());
-        if let Ok(bytes) = serde_json::to_vec_pretty(&map) {
-            let _ = std::fs::write(self.props_file(), bytes);
-        }
-    }
-
-    pub(super) fn parse_timeout(req: &Request) -> i64 {
-        if let Some(v) = req.headers().get("Timeout").and_then(|h| h.to_str().ok()) {
-            // e.g., Second-60 or Infinite
-            if v.to_lowercase().contains("infinite") {
-                return 3600; // 1小时上限，避免永久锁
-            }
-            if let Some(num) = v.split(['-', ',']).find_map(|s| s.parse::<i64>().ok()) {
-                return num.clamp(1, 3600);
-            }
-        }
-        60
-    }
-
-    pub(super) fn extract_if_lock_token(req: &Request) -> Option<String> {
-        // 朴素提取 If: (<opaquelocktoken:...>)
-        req.headers()
-            .get("If")
-            .and_then(|h| h.to_str().ok())
-            .and_then(|s| {
-                let s = s.to_string();
-                let start = s.find("opaquelocktoken:")?;
-                let end = s[start..].find('>').map(|i| start + i).unwrap_or(s.len());
-                Some(s[start..end].to_string())
-            })
-    }
-
-    pub(super) async fn ensure_lock_ok(&self, path: &str, req: &Request) -> silent::Result<()> {
-        let locks = self.locks.read().await;
-        if let Some(l) = locks.get(path)
-            && !l.is_expired()
-        {
-            let provided = Self::extract_if_lock_token(req);
-            if let Some(tok) = provided
-                && tok == l.token
-            {
-                return Ok(());
-            }
-            return Err(SilentError::business_error(
-                StatusCode::LOCKED,
-                "资源被锁定或令牌缺失",
-            ));
-        }
-        Ok(())
-    }
-    /// 解码 URL 路径
-    pub(super) fn decode_path(path: &str) -> silent::Result<String> {
-        urlencoding::decode(path)
-            .map(|s| s.to_string())
-            .map_err(|e| {
-                SilentError::business_error(StatusCode::BAD_REQUEST, format!("路径解码失败: {}", e))
-            })
-    }
-
-    /// 构建完整的 WebDAV href（包含 base_path 前缀）
-    pub(super) fn build_full_href(&self, relative_path: &str) -> String {
-        format!("{}{}", &self.base_path, relative_path)
-    }
-}
-
-// Files operations moved to files module
-// Locks/Props/DeltaV moved to respective modules
-
-impl WebDavHandler {
-    /// PROPFIND - 列出文件和目录
-    #[allow(dead_code)]
-    async fn handle_propfind_old(&self, path: &str, req: &Request) -> silent::Result<Response> {
+    pub(super) async fn handle_propfind(
+        &self,
+        path: &str,
+        req: &Request,
+    ) -> silent::Result<Response> {
         let path = Self::decode_path(path)?;
-
         let depth = req
             .headers()
             .get("Depth")
             .and_then(|v| v.to_str().ok())
             .unwrap_or("0");
-
         let storage_path = self.storage.get_full_path(&path);
-
         let metadata = fs::metadata(&storage_path)
             .await
             .map_err(|_| SilentError::business_error(StatusCode::NOT_FOUND, "路径不存在"))?;
@@ -213,12 +38,9 @@ impl WebDavHandler {
         let mut xml = String::new();
         xml.push_str(XML_HEADER);
         xml.push_str(XML_NS_DAV);
-
         if metadata.is_dir() {
-            // 添加目录本身的响应
             let full_href = self.build_full_href(&path);
             Self::add_prop_response(&mut xml, &full_href, &storage_path, true).await;
-
             if depth != "0" {
                 let mut entries = fs::read_dir(&storage_path).await.map_err(|e| {
                     SilentError::business_error(
@@ -226,7 +48,6 @@ impl WebDavHandler {
                         format!("读取目录失败: {}", e),
                     )
                 })?;
-
                 while let Some(entry) = entries.next_entry().await.map_err(|e| {
                     SilentError::business_error(
                         StatusCode::INTERNAL_SERVER_ERROR,
@@ -248,9 +69,7 @@ impl WebDavHandler {
             let full_href = self.build_full_href(&path);
             Self::add_prop_response(&mut xml, &full_href, &storage_path, false).await;
         }
-
         xml.push_str(XML_MULTISTATUS_END);
-
         let mut resp = Response::text(&xml);
         resp.set_status(StatusCode::MULTI_STATUS);
         resp.headers_mut().insert(
@@ -260,26 +79,21 @@ impl WebDavHandler {
         Ok(resp)
     }
 
-    /// 添加单个资源的属性响应
-    #[allow(dead_code)]
-    async fn add_prop_response_old(xml: &mut String, href: &str, path: &Path, is_dir: bool) {
+    pub(super) async fn add_prop_response(xml: &mut String, href: &str, path: &Path, is_dir: bool) {
         let metadata = match fs::metadata(path).await {
             Ok(m) => m,
             Err(_) => return,
         };
-
         let href_encoded = urlencoding::encode(href);
         let href_with_slash = if is_dir && !href.ends_with('/') {
             format!("{}/", href_encoded)
         } else {
             href_encoded.to_string()
         };
-
         xml.push_str("<D:response>");
         xml.push_str(&format!("<D:href>{}</D:href>", href_with_slash));
         xml.push_str("<D:propstat>");
         xml.push_str("<D:prop>");
-
         if is_dir {
             xml.push_str("<D:resourcetype><D:collection/></D:resourcetype>");
         } else {
@@ -288,13 +102,11 @@ impl WebDavHandler {
                 "<D:getcontentlength>{}</D:getcontentlength>",
                 metadata.len()
             ));
-
             if let Some(ext) = path.extension() {
                 let mime = mime_guess::from_ext(&ext.to_string_lossy()).first_or_octet_stream();
                 xml.push_str(&format!("<D:getcontenttype>{}</D:getcontenttype>", mime));
             }
         }
-
         if let Ok(modified) = metadata.modified()
             && let Ok(datetime) = modified.duration_since(std::time::UNIX_EPOCH)
         {
@@ -306,33 +118,25 @@ impl WebDavHandler {
                 ));
             }
         }
-
         xml.push_str("</D:prop>");
         xml.push_str("<D:status>HTTP/1.1 200 OK</D:status>");
         xml.push_str("</D:propstat>");
         xml.push_str("</D:response>");
     }
 
-    /// HEAD - 获取文件元数据（不返回文件内容）
-    #[allow(dead_code)]
-    async fn handle_head_old(&self, path: &str) -> silent::Result<Response> {
+    pub(super) async fn handle_head(&self, path: &str) -> silent::Result<Response> {
         let path = Self::decode_path(path)?;
-
         let storage_path = self.storage.get_full_path(&path);
         let metadata = fs::metadata(&storage_path)
             .await
             .map_err(|_| SilentError::business_error(StatusCode::NOT_FOUND, "文件不存在"))?;
-
         let mut resp = Response::empty();
-
         if metadata.is_dir() {
-            // 对于目录
             resp.headers_mut().insert(
                 http::header::CONTENT_TYPE,
                 http::HeaderValue::from_static(CONTENT_TYPE_HTML),
             );
         } else {
-            // 对于文件
             resp.headers_mut().insert(
                 http::header::CONTENT_TYPE,
                 http::HeaderValue::from_static("application/octet-stream"),
@@ -341,8 +145,6 @@ impl WebDavHandler {
                 http::header::CONTENT_LENGTH,
                 http::HeaderValue::from_str(&metadata.len().to_string()).unwrap(),
             );
-
-            // 添加 MIME 类型
             if let Some(ext) = storage_path.extension() {
                 let mime = mime_guess::from_ext(&ext.to_string_lossy()).first_or_octet_stream();
                 resp.headers_mut().insert(
@@ -352,8 +154,6 @@ impl WebDavHandler {
                     }),
                 );
             }
-
-            // 添加最后修改时间
             if let Ok(modified) = metadata.modified()
                 && let Ok(datetime) = modified.duration_since(std::time::UNIX_EPOCH)
                 && let Some(dt) = chrono::DateTime::from_timestamp(datetime.as_secs() as i64, 0)
@@ -364,43 +164,31 @@ impl WebDavHandler {
                     .insert(http::header::LAST_MODIFIED, last_modified);
             }
         }
-
         Ok(resp)
     }
 
-    /// GET - 下载文件
-    #[allow(dead_code)]
-    async fn handle_get_old(&self, path: &str) -> silent::Result<Response> {
+    pub(super) async fn handle_get(&self, path: &str) -> silent::Result<Response> {
         let path = Self::decode_path(path)?;
-
         let storage_path = self.storage.get_full_path(&path);
         let metadata = fs::metadata(&storage_path)
             .await
             .map_err(|_| SilentError::business_error(StatusCode::NOT_FOUND, "文件不存在"))?;
-
         if metadata.is_dir() {
-            // 对于目录，返回一个简单的 HTML 页面
             let mut resp = Response::empty();
             resp.headers_mut().insert(
                 http::header::CONTENT_TYPE,
                 http::HeaderValue::from_static(CONTENT_TYPE_HTML),
             );
-            resp.set_body(full(
-                b"<!DOCTYPE html><html><body><h1>Directory</h1><p>Use PROPFIND to list contents.</p></body></html>".to_vec(),
-            ));
+            resp.set_body(full(b"<!DOCTYPE html><html><body><h1>Directory</h1><p>Use PROPFIND to list contents.</p></body></html>".to_vec()));
             return Ok(resp);
         }
-
         let data = fs::read(&storage_path).await.map_err(|e| {
             SilentError::business_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("读取文件失败: {}", e),
             )
         })?;
-
         let mut resp = Response::empty();
-
-        // 设置 MIME 类型
         if let Some(ext) = storage_path.extension() {
             let mime = mime_guess::from_ext(&ext.to_string_lossy()).first_or_octet_stream();
             resp.headers_mut().insert(
@@ -414,13 +202,10 @@ impl WebDavHandler {
                 http::HeaderValue::from_static("application/octet-stream"),
             );
         }
-
         resp.headers_mut().insert(
             http::header::CONTENT_LENGTH,
             http::HeaderValue::from_str(&data.len().to_string()).unwrap(),
         );
-
-        // 添加最后修改时间
         if let Ok(modified) = metadata.modified()
             && let Ok(datetime) = modified.duration_since(std::time::UNIX_EPOCH)
             && let Some(dt) = chrono::DateTime::from_timestamp(datetime.as_secs() as i64, 0)
@@ -430,17 +215,17 @@ impl WebDavHandler {
             resp.headers_mut()
                 .insert(http::header::LAST_MODIFIED, last_modified);
         }
-
         resp.set_body(full(data));
         Ok(resp)
     }
 
-    /// PUT - 上传文件
-    #[allow(dead_code)]
-    async fn handle_put_old(&self, path: &str, req: &mut Request) -> silent::Result<Response> {
+    pub(super) async fn handle_put(
+        &self,
+        path: &str,
+        req: &mut Request,
+    ) -> silent::Result<Response> {
         let path = Self::decode_path(path)?;
         self.ensure_lock_ok(&path, req).await?;
-
         let body = req.take_body();
         let body_data = match body {
             ReqBody::Incoming(body) => body
@@ -462,9 +247,7 @@ impl WebDavHandler {
                 ));
             }
         };
-
         let storage_path = self.storage.get_full_path(&path);
-
         if let Some(parent) = storage_path.parent() {
             fs::create_dir_all(parent).await.map_err(|e| {
                 SilentError::business_error(
@@ -473,8 +256,6 @@ impl WebDavHandler {
                 )
             })?;
         }
-
-        // 使用存储管理器按路径保存，确保元数据一致，并便于版本管理
         let metadata = self
             .storage
             .save_at_path(&path, &body_data)
@@ -486,8 +267,6 @@ impl WebDavHandler {
                 )
             })?;
         let file_id = metadata.id.clone();
-
-        // 如果启用版本管理，则记录版本（DeltaV 最小闭环）
         if let Err(e) = self
             .version_manager
             .create_version(
@@ -496,41 +275,25 @@ impl WebDavHandler {
             )
             .await
         {
-            debug!("创建版本失败(可忽略): {}", e);
+            tracing::debug!("创建版本失败(可忽略): {}", e);
         }
-
-        // 通知 SyncManager 处理本地变更
-        if let Err(e) = self
-            .sync_manager
-            .handle_local_change(EventType::Created, file_id.clone(), Some(metadata.clone()))
-            .await
-        {
-            info!("同步管理器处理失败: {}", e);
-        }
-
-        // 发布事件到 NATS（用于跨节点通知）
+        // 发布事件
         let mut event = FileEvent::new(EventType::Created, file_id, Some(metadata));
         event.source_http_addr = Some(self.source_http_addr.clone());
         if let Some(ref n) = self.notifier {
             let _ = n.notify_created(event).await;
         }
-
         let mut resp = Response::empty();
         resp.set_status(StatusCode::CREATED);
         Ok(resp)
     }
 
-    /// DELETE - 删除文件或目录
-    #[allow(dead_code)]
-    async fn handle_delete_old(&self, path: &str) -> silent::Result<Response> {
+    pub(super) async fn handle_delete(&self, path: &str) -> silent::Result<Response> {
         let path = Self::decode_path(path)?;
-        // 删除前无需 If 检查（DELETE 通过 LOCK/UNLOCK 流程受控），略过
-
         let storage_path = self.storage.get_full_path(&path);
         let metadata = fs::metadata(&storage_path)
             .await
             .map_err(|_| SilentError::business_error(StatusCode::NOT_FOUND, "路径不存在"))?;
-
         if metadata.is_dir() {
             fs::remove_dir_all(&storage_path).await.map_err(|e| {
                 SilentError::business_error(
@@ -546,8 +309,6 @@ impl WebDavHandler {
                 )
             })?;
         }
-
-        // 发布事件
         let file_id = scru128::new_string();
         let mut event = FileEvent::new(EventType::Deleted, file_id, None);
         if let Ok(host) = std::env::var("ADVERTISE_HOST").or_else(|_| std::env::var("HOSTNAME")) {
@@ -563,44 +324,34 @@ impl WebDavHandler {
         if let Some(ref n) = self.notifier {
             let _ = n.notify_deleted(event).await;
         }
-
         let mut resp = Response::empty();
         resp.set_status(StatusCode::NO_CONTENT);
         Ok(resp)
     }
 
-    /// MKCOL - 创建目录
-    #[allow(dead_code)]
-    async fn handle_mkcol_old(&self, path: &str) -> silent::Result<Response> {
+    pub(super) async fn handle_mkcol(&self, path: &str) -> silent::Result<Response> {
         let path = Self::decode_path(path)?;
-
         let storage_path = self.storage.get_full_path(&path);
-
         if storage_path.exists() {
             return Err(SilentError::business_error(
                 StatusCode::METHOD_NOT_ALLOWED,
                 "路径已存在",
             ));
         }
-
         fs::create_dir_all(&storage_path).await.map_err(|e| {
             SilentError::business_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("创建目录失败: {}", e),
             )
         })?;
-
         let mut resp = Response::empty();
         resp.set_status(StatusCode::CREATED);
         Ok(resp)
     }
 
-    /// MOVE - 移动/重命名文件
-    #[allow(dead_code)]
-    async fn handle_move_old(&self, path: &str, req: &Request) -> silent::Result<Response> {
+    pub(super) async fn handle_move(&self, path: &str, req: &Request) -> silent::Result<Response> {
         let path = Self::decode_path(path)?;
         self.ensure_lock_ok(&path, req).await?;
-
         let dest = req
             .headers()
             .get("Destination")
@@ -608,13 +359,9 @@ impl WebDavHandler {
             .ok_or_else(|| {
                 SilentError::business_error(StatusCode::BAD_REQUEST, "缺少 Destination 头")
             })?;
-
-        // 提取目标路径
         let dest_path = self.extract_path_from_url(dest)?;
-
         let storage_path = self.storage.get_full_path(&path);
         let dest_storage_path = self.storage.get_full_path(&dest_path);
-
         if let Some(parent) = dest_storage_path.parent() {
             fs::create_dir_all(parent).await.map_err(|e| {
                 SilentError::business_error(
@@ -623,7 +370,6 @@ impl WebDavHandler {
                 )
             })?;
         }
-
         fs::rename(&storage_path, &dest_storage_path)
             .await
             .map_err(|e| {
@@ -632,7 +378,6 @@ impl WebDavHandler {
                     format!("移动失败: {}", e),
                 )
             })?;
-
         // 发布事件
         let file_id = scru128::new_string();
         let mut event = FileEvent::new(EventType::Modified, file_id, None);
@@ -649,18 +394,14 @@ impl WebDavHandler {
         if let Some(ref n) = self.notifier {
             let _ = n.notify_created(event).await;
         }
-
         let mut resp = Response::empty();
         resp.set_status(StatusCode::CREATED);
         Ok(resp)
     }
 
-    /// COPY - 复制文件
-    #[allow(dead_code)]
-    async fn handle_copy_old(&self, path: &str, req: &Request) -> silent::Result<Response> {
+    pub(super) async fn handle_copy(&self, path: &str, req: &Request) -> silent::Result<Response> {
         let path = Self::decode_path(path)?;
         self.ensure_lock_ok(&path, req).await?;
-
         let dest = req
             .headers()
             .get("Destination")
@@ -668,16 +409,12 @@ impl WebDavHandler {
             .ok_or_else(|| {
                 SilentError::business_error(StatusCode::BAD_REQUEST, "缺少 Destination 头")
             })?;
-
         let dest_path = self.extract_path_from_url(dest)?;
-
         let src_storage_path = self.storage.get_full_path(&path);
         let dest_storage_path = self.storage.get_full_path(&dest_path);
-
         let metadata = fs::metadata(&src_storage_path)
             .await
             .map_err(|_| SilentError::business_error(StatusCode::NOT_FOUND, "源路径不存在"))?;
-
         if let Some(parent) = dest_storage_path.parent() {
             fs::create_dir_all(parent).await.map_err(|e| {
                 SilentError::business_error(
@@ -686,7 +423,6 @@ impl WebDavHandler {
                 )
             })?;
         }
-
         if metadata.is_dir() {
             Self::copy_dir_all(&src_storage_path, &dest_storage_path)
                 .await
@@ -706,18 +442,13 @@ impl WebDavHandler {
                     )
                 })?;
         }
-
         let mut resp = Response::empty();
         resp.set_status(StatusCode::CREATED);
         Ok(resp)
     }
 
-    /// 从完整 URL 中提取路径
-    #[allow(dead_code)]
-    fn extract_path_from_url_old(&self, url: &str) -> silent::Result<String> {
-        // 提取路径部分（去除协议和域名）
+    pub(super) fn extract_path_from_url(&self, url: &str) -> silent::Result<String> {
         let path = if let Some(idx) = url.find("://") {
-            // 找到协议后的第一个 /
             if let Some(path_start) = url[idx + 3..].find('/') {
                 &url[idx + 3 + path_start..]
             } else {
@@ -731,10 +462,7 @@ impl WebDavHandler {
                 "无效的目标 URL",
             ));
         };
-
-        // 移除 base_path 前缀
         let relative_path = path.strip_prefix(&self.base_path).unwrap_or(path);
-
         urlencoding::decode(relative_path)
             .map(|s| s.to_string())
             .map_err(|e| {
@@ -745,271 +473,19 @@ impl WebDavHandler {
             })
     }
 
-    /// 递归复制目录
-    #[allow(dead_code)]
-    async fn copy_dir_all_old(src: &Path, dst: &Path) -> std::io::Result<()> {
+    pub(super) async fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
         fs::create_dir_all(dst).await?;
         let mut entries = fs::read_dir(src).await?;
-
         while let Some(entry) = entries.next_entry().await? {
             let ty = entry.file_type().await?;
             let src_path = entry.path();
             let dst_path = dst.join(entry.file_name());
-
             if ty.is_dir() {
                 Box::pin(Self::copy_dir_all(&src_path, &dst_path)).await?;
             } else {
                 fs::copy(&src_path, &dst_path).await?;
             }
         }
-
         Ok(())
-    }
-}
-
-#[async_trait]
-impl Handler for WebDavHandler {
-    /// 处理 WebDAV 请求
-    async fn call(&self, mut req: Request) -> silent::Result<Response> {
-        let method = req.method().clone();
-        let uri_path = req.uri().path().to_string();
-
-        // 移除 base_path 前缀
-        let relative_path = uri_path
-            .strip_prefix(&self.base_path)
-            .unwrap_or(&uri_path)
-            .to_string();
-
-        debug!("WebDAV {} {}", method, relative_path);
-
-        match method.as_str() {
-            "OPTIONS" => self.handle_options().await,
-            "PROPFIND" => self.handle_propfind(&relative_path, &req).await,
-            "PROPPATCH" => self.handle_proppatch(&relative_path, &mut req).await,
-            "HEAD" => self.handle_head(&relative_path).await,
-            "GET" => self.handle_get(&relative_path).await,
-            "PUT" => self.handle_put(&relative_path, &mut req).await,
-            "DELETE" => self.handle_delete(&relative_path).await,
-            "MKCOL" => self.handle_mkcol(&relative_path).await,
-            "MOVE" => self.handle_move(&relative_path, &req).await,
-            "COPY" => self.handle_copy(&relative_path, &req).await,
-            "LOCK" => self.handle_lock(&relative_path, &req).await,
-            "UNLOCK" => self.handle_unlock(&relative_path, &req).await,
-            "VERSION-CONTROL" => self.handle_version_control(&relative_path).await,
-            "REPORT" => self.handle_report(&relative_path).await,
-            _ => Err(SilentError::business_error(
-                StatusCode::METHOD_NOT_ALLOWED,
-                "不支持的方法",
-            )),
-        }
-    }
-}
-
-/// 为路由注册所有 WebDAV 方法
-#[allow(dead_code)]
-fn register_webdav_methods_old(route: Route, handler: Arc<WebDavHandler>) -> Route {
-    route
-        .insert_handler(Method::HEAD, handler.clone())
-        .insert_handler(Method::GET, handler.clone())
-        .insert_handler(Method::POST, handler.clone())
-        .insert_handler(Method::PUT, handler.clone())
-        .insert_handler(Method::DELETE, handler.clone())
-        .insert_handler(Method::OPTIONS, handler.clone())
-        .insert_handler(
-            Method::from_bytes(METHOD_PROPFIND).unwrap(),
-            handler.clone(),
-        )
-        .insert_handler(
-            Method::from_bytes(METHOD_PROPPATCH).unwrap(),
-            handler.clone(),
-        )
-        .insert_handler(Method::from_bytes(METHOD_MKCOL).unwrap(), handler.clone())
-        .insert_handler(Method::from_bytes(METHOD_MOVE).unwrap(), handler.clone())
-        .insert_handler(Method::from_bytes(METHOD_COPY).unwrap(), handler.clone())
-        .insert_handler(Method::from_bytes(METHOD_LOCK).unwrap(), handler.clone())
-        .insert_handler(Method::from_bytes(METHOD_UNLOCK).unwrap(), handler)
-}
-
-/// 创建 WebDAV 路由
-#[allow(dead_code)]
-pub fn create_webdav_routes_old(
-    storage: Arc<StorageManager>,
-    notifier: Option<Arc<EventNotifier>>,
-    sync_manager: Arc<SyncManager>,
-    source_http_addr: String,
-    version_manager: Arc<crate::version::VersionManager>,
-) -> Route {
-    let handler = Arc::new(WebDavHandler::new(
-        storage,
-        notifier,
-        sync_manager,
-        "".to_string(),
-        source_http_addr,
-        version_manager,
-    ));
-
-    // 将 WebDAV 服务挂载在根路径，客户端直接以根访问
-    let root_route = register_webdav_methods_old(Route::new(""), handler.clone());
-    let path_route = register_webdav_methods_old(Route::new("<path:**>"), handler);
-
-    root_route.append(path_route)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_webdav_method_constants() {
-        assert_eq!(METHOD_PROPFIND, b"PROPFIND");
-        assert_eq!(METHOD_MKCOL, b"MKCOL");
-        assert_eq!(METHOD_MOVE, b"MOVE");
-        assert_eq!(METHOD_COPY, b"COPY");
-    }
-
-    #[test]
-    fn test_xml_constants() {
-        assert!(XML_HEADER.contains("xml version"));
-        assert!(XML_NS_DAV.contains("DAV:"));
-        assert!(XML_MULTISTATUS_END.contains("multistatus"));
-    }
-
-    #[test]
-    fn test_header_constants() {
-        assert_eq!(HEADER_DAV, "dav");
-        assert_eq!(HEADER_DAV_VALUE, "1, 2, version-control");
-        assert!(HEADER_ALLOW_VALUE.contains("OPTIONS"));
-        assert!(HEADER_ALLOW_VALUE.contains("PROPFIND"));
-        assert!(HEADER_ALLOW_VALUE.contains("VERSION-CONTROL"));
-        assert!(HEADER_ALLOW_VALUE.contains("REPORT"));
-    }
-
-    #[test]
-    fn test_content_type_constants() {
-        assert_eq!(CONTENT_TYPE_XML, "application/xml; charset=utf-8");
-        assert_eq!(CONTENT_TYPE_HTML, "text/html; charset=utf-8");
-    }
-
-    #[test]
-    fn test_decode_path_simple() {
-        let path = "/test/file.txt";
-        let decoded = WebDavHandler::decode_path(path);
-        assert!(decoded.is_ok());
-        assert_eq!(decoded.unwrap(), "/test/file.txt");
-    }
-
-    #[test]
-    fn test_decode_path_with_spaces() {
-        let path = "/test%20file.txt";
-        let decoded = WebDavHandler::decode_path(path);
-        assert!(decoded.is_ok());
-        assert_eq!(decoded.unwrap(), "/test file.txt");
-    }
-
-    #[test]
-    fn test_decode_path_with_special_chars() {
-        let path = "/file%2Bname.txt";
-        let decoded = WebDavHandler::decode_path(path);
-        assert!(decoded.is_ok());
-        assert_eq!(decoded.unwrap(), "/file+name.txt");
-    }
-
-    #[test]
-    fn test_decode_path_chinese() {
-        let path = "/%E6%B5%8B%E8%AF%95";
-        let decoded = WebDavHandler::decode_path(path);
-        assert!(decoded.is_ok());
-        assert_eq!(decoded.unwrap(), "/测试");
-    }
-
-    #[test]
-    fn test_xml_header_format() {
-        assert!(XML_HEADER.starts_with("<?"));
-        assert!(XML_HEADER.ends_with("?>"));
-    }
-
-    #[test]
-    fn test_xml_namespace_format() {
-        assert!(XML_NS_DAV.starts_with("<D:"));
-        assert!(XML_NS_DAV.contains("xmlns:D"));
-    }
-
-    #[test]
-    fn test_method_byte_arrays() {
-        assert_eq!(METHOD_PROPFIND.len(), 8);
-        assert_eq!(METHOD_MKCOL.len(), 5);
-        assert_eq!(METHOD_MOVE.len(), 4);
-        assert_eq!(METHOD_COPY.len(), 4);
-    }
-
-    #[test]
-    fn test_header_dav_compliance() {
-        assert!(HEADER_DAV_VALUE.contains("1"));
-        assert!(HEADER_DAV_VALUE.contains("2"));
-    }
-
-    #[test]
-    fn test_allowed_methods_coverage() {
-        let methods = vec![
-            "OPTIONS", "GET", "HEAD", "PUT", "DELETE", "PROPFIND", "MKCOL", "MOVE", "COPY",
-        ];
-        for method in methods {
-            assert!(HEADER_ALLOW_VALUE.contains(method));
-        }
-    }
-
-    #[test]
-    fn test_content_types_have_charset() {
-        assert!(CONTENT_TYPE_XML.contains("charset=utf-8"));
-        assert!(CONTENT_TYPE_HTML.contains("charset=utf-8"));
-    }
-
-    #[test]
-    fn test_xml_multistatus_structure() {
-        let full_xml = format!("{}{}{}", XML_HEADER, XML_NS_DAV, XML_MULTISTATUS_END);
-        assert!(full_xml.contains("<?xml"));
-        assert!(full_xml.contains("<D:multistatus"));
-        assert!(full_xml.contains("</D:multistatus>"));
-    }
-
-    #[test]
-    fn test_path_decoding_empty() {
-        let path = "";
-        let decoded = WebDavHandler::decode_path(path);
-        assert!(decoded.is_ok());
-        assert_eq!(decoded.unwrap(), "");
-    }
-
-    #[test]
-    fn test_path_decoding_root() {
-        let path = "/";
-        let decoded = WebDavHandler::decode_path(path);
-        assert!(decoded.is_ok());
-        assert_eq!(decoded.unwrap(), "/");
-    }
-
-    #[test]
-    fn test_webdav_handler_type() {
-        let type_name = std::any::type_name::<WebDavHandler>();
-        assert!(type_name.contains("WebDavHandler"));
-    }
-
-    #[test]
-    fn test_method_constants_uppercase() {
-        assert!(
-            String::from_utf8_lossy(METHOD_PROPFIND)
-                .chars()
-                .all(|c| c.is_uppercase() || !c.is_alphabetic())
-        );
-        assert!(
-            String::from_utf8_lossy(METHOD_MKCOL)
-                .chars()
-                .all(|c| c.is_uppercase() || !c.is_alphabetic())
-        );
-    }
-
-    #[test]
-    fn test_xml_namespace_dav_protocol() {
-        assert!(XML_NS_DAV.contains("DAV:"));
     }
 }

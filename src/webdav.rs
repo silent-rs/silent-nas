@@ -4,58 +4,21 @@ use crate::storage::StorageManager;
 use crate::sync::crdt::SyncManager;
 use async_trait::async_trait;
 use http_body_util::BodyExt;
+#[allow(unused_imports)]
+use serde::{Deserialize, Serialize};
 use silent::prelude::*;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::fs;
 use tracing::{debug, info};
 
-// WebDAV 方法常量
-const METHOD_PROPFIND: &[u8] = b"PROPFIND";
-const METHOD_PROPPATCH: &[u8] = b"PROPPATCH";
-const METHOD_LOCK: &[u8] = b"LOCK";
-const METHOD_UNLOCK: &[u8] = b"UNLOCK";
-const METHOD_MKCOL: &[u8] = b"MKCOL";
-const METHOD_MOVE: &[u8] = b"MOVE";
-const METHOD_COPY: &[u8] = b"COPY";
-#[allow(dead_code)]
-const METHOD_VERSION_CONTROL: &[u8] = b"VERSION-CONTROL";
-#[allow(dead_code)]
-const METHOD_REPORT: &[u8] = b"REPORT";
+// split modules
+mod constants;
+mod types;
+use constants::*;
+use types::DavLock;
 
-// WebDAV XML 命名空间
-const XML_HEADER: &str = r#"<?xml version="1.0" encoding="utf-8"?>"#;
-const XML_NS_DAV: &str = r#"<D:multistatus xmlns:D="DAV:">"#;
-const XML_MULTISTATUS_END: &str = "</D:multistatus>";
-
-// HTTP 头常量
-const HEADER_DAV: &str = "dav";
-const HEADER_DAV_VALUE: &str = "1, 2, version-control";
-const HEADER_ALLOW_VALUE: &str = "OPTIONS, GET, HEAD, PUT, DELETE, PROPFIND, PROPPATCH, MKCOL, MOVE, COPY, LOCK, UNLOCK, VERSION-CONTROL, REPORT";
-const CONTENT_TYPE_XML: &str = "application/xml; charset=utf-8";
-const CONTENT_TYPE_HTML: &str = "text/html; charset=utf-8";
-
-#[derive(Clone, Debug)]
-#[allow(dead_code)]
-struct DavLock {
-    token: String,
-    exclusive: bool,
-    expires_at: chrono::NaiveDateTime,
-}
-
-impl DavLock {
-    fn new_exclusive(token: String, timeout_secs: i64) -> Self {
-        Self {
-            token,
-            exclusive: true,
-            expires_at: chrono::Local::now().naive_local()
-                + chrono::Duration::seconds(timeout_secs),
-        }
-    }
-    fn is_expired(&self) -> bool {
-        chrono::Local::now().naive_local() > self.expires_at
-    }
-}
+// constants and types moved into src/webdav/constants.rs and src/webdav/types.rs
 
 /// WebDAV 处理器
 #[derive(Clone)]
@@ -85,7 +48,7 @@ impl WebDavHandler {
         source_http_addr: String,
         version_manager: Arc<crate::version::VersionManager>,
     ) -> Self {
-        Self {
+        let handler = Self {
             storage,
             notifier,
             sync_manager,
@@ -94,11 +57,115 @@ impl WebDavHandler {
             version_manager,
             locks: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
             props: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
-        }
+        };
+        // 尝试加载持久化元数据（非致命）
+        handler.load_persistent_state();
+        handler
     }
 
     fn lock_token() -> String {
         format!("opaquelocktoken:{}", scru128::new_string())
+    }
+
+    fn meta_dir(&self) -> std::path::PathBuf {
+        self.storage.root_dir().join(".webdav")
+    }
+
+    fn locks_file(&self) -> std::path::PathBuf {
+        self.meta_dir().join("locks.json")
+    }
+    fn props_file(&self) -> std::path::PathBuf {
+        self.meta_dir().join("props.json")
+    }
+
+    #[allow(clippy::collapsible_if)]
+    fn load_persistent_state(&self) {
+        let meta_dir = self.meta_dir();
+        let _ = std::fs::create_dir_all(&meta_dir);
+        // 加载 locks
+        if let Ok(bytes) = std::fs::read(self.locks_file())
+            && let Ok(map) =
+                serde_json::from_slice::<std::collections::HashMap<String, DavLock>>(&bytes)
+        {
+            let rt = tokio::runtime::Handle::current();
+            let locks = self.locks.clone();
+            rt.spawn(async move {
+                *locks.write().await = map;
+            });
+        }
+        // 加载 props
+        if let Ok(bytes) = std::fs::read(self.props_file())
+            && let Ok(map) = serde_json::from_slice::<
+                std::collections::HashMap<String, std::collections::HashMap<String, String>>,
+            >(&bytes)
+        {
+            let rt = tokio::runtime::Handle::current();
+            let props = self.props.clone();
+            rt.spawn(async move {
+                *props.write().await = map;
+            });
+        }
+    }
+
+    async fn persist_locks(&self) {
+        let map = self.locks.read().await.clone();
+        let _ = std::fs::create_dir_all(self.meta_dir());
+        if let Ok(bytes) = serde_json::to_vec_pretty(&map) {
+            let _ = std::fs::write(self.locks_file(), bytes);
+        }
+    }
+
+    async fn persist_props(&self) {
+        let map = self.props.read().await.clone();
+        let _ = std::fs::create_dir_all(self.meta_dir());
+        if let Ok(bytes) = serde_json::to_vec_pretty(&map) {
+            let _ = std::fs::write(self.props_file(), bytes);
+        }
+    }
+
+    fn parse_timeout(req: &Request) -> i64 {
+        if let Some(v) = req.headers().get("Timeout").and_then(|h| h.to_str().ok()) {
+            // e.g., Second-60 or Infinite
+            if v.to_lowercase().contains("infinite") {
+                return 3600; // 1小时上限，避免永久锁
+            }
+            if let Some(num) = v.split(['-', ',']).find_map(|s| s.parse::<i64>().ok()) {
+                return num.clamp(1, 3600);
+            }
+        }
+        60
+    }
+
+    fn extract_if_lock_token(req: &Request) -> Option<String> {
+        // 朴素提取 If: (<opaquelocktoken:...>)
+        req.headers()
+            .get("If")
+            .and_then(|h| h.to_str().ok())
+            .and_then(|s| {
+                let s = s.to_string();
+                let start = s.find("opaquelocktoken:")?;
+                let end = s[start..].find('>').map(|i| start + i).unwrap_or(s.len());
+                Some(s[start..end].to_string())
+            })
+    }
+
+    async fn ensure_lock_ok(&self, path: &str, req: &Request) -> silent::Result<()> {
+        let locks = self.locks.read().await;
+        if let Some(l) = locks.get(path)
+            && !l.is_expired()
+        {
+            let provided = Self::extract_if_lock_token(req);
+            if let Some(tok) = provided
+                && tok == l.token
+            {
+                return Ok(());
+            }
+            return Err(SilentError::business_error(
+                StatusCode::LOCKED,
+                "资源被锁定或令牌缺失",
+            ));
+        }
+        Ok(())
     }
 
     /// 解码 URL 路径
@@ -132,6 +199,7 @@ impl WebDavHandler {
     /// PROPPATCH - 设置/移除自定义属性（简化实现）
     async fn handle_proppatch(&self, path: &str, req: &mut Request) -> silent::Result<Response> {
         let path = Self::decode_path(path)?;
+        self.ensure_lock_ok(&path, req).await?;
         let body = req.take_body();
         let _xml = match body {
             ReqBody::Incoming(b) => b
@@ -158,6 +226,7 @@ impl WebDavHandler {
             chrono::Local::now().naive_local().to_string(),
         );
 
+        self.persist_props().await;
         let mut resp = Response::text("");
         resp.set_status(StatusCode::MULTI_STATUS);
         resp.headers_mut().insert(
@@ -228,7 +297,7 @@ impl WebDavHandler {
     }
 
     /// LOCK - 锁定资源（简化，支持独占锁）
-    async fn handle_lock(&self, path: &str, _req: &Request) -> silent::Result<Response> {
+    async fn handle_lock(&self, path: &str, req: &Request) -> silent::Result<Response> {
         let path = Self::decode_path(path)?;
         let mut locks = self.locks.write().await;
         if let Some(l) = locks.get(&path)
@@ -240,8 +309,11 @@ impl WebDavHandler {
             ));
         }
         let token = Self::lock_token();
-        let info = DavLock::new_exclusive(token.clone(), 60);
+        let timeout = Self::parse_timeout(req);
+        let info = DavLock::new_exclusive(token.clone(), timeout);
         locks.insert(path.clone(), info);
+        drop(locks);
+        self.persist_locks().await;
 
         let xml = format!(
             "{}<D:prop xmlns:D=\"DAV:\"><D:lockdiscovery><D:activelock><D:locktype><D:write/></D:locktype><D:lockscope><D:exclusive/></D:lockscope><D:locktoken><D:href>{}</D:href></D:locktoken></D:activelock></D:lockdiscovery></D:prop>",
@@ -286,6 +358,8 @@ impl WebDavHandler {
                 ));
             }
         }
+        drop(locks);
+        self.persist_locks().await;
         Ok(Response::empty())
     }
 
@@ -530,6 +604,7 @@ impl WebDavHandler {
     /// PUT - 上传文件
     async fn handle_put(&self, path: &str, req: &mut Request) -> silent::Result<Response> {
         let path = Self::decode_path(path)?;
+        self.ensure_lock_ok(&path, req).await?;
 
         let body = req.take_body();
         let body_data = match body {
@@ -613,6 +688,7 @@ impl WebDavHandler {
     /// DELETE - 删除文件或目录
     async fn handle_delete(&self, path: &str) -> silent::Result<Response> {
         let path = Self::decode_path(path)?;
+        // 删除前无需 If 检查（DELETE 通过 LOCK/UNLOCK 流程受控），略过
 
         let storage_path = self.storage.get_full_path(&path);
         let metadata = fs::metadata(&storage_path)
@@ -685,6 +761,7 @@ impl WebDavHandler {
     /// MOVE - 移动/重命名文件
     async fn handle_move(&self, path: &str, req: &Request) -> silent::Result<Response> {
         let path = Self::decode_path(path)?;
+        self.ensure_lock_ok(&path, req).await?;
 
         let dest = req
             .headers()
@@ -743,6 +820,7 @@ impl WebDavHandler {
     /// COPY - 复制文件
     async fn handle_copy(&self, path: &str, req: &Request) -> silent::Result<Response> {
         let path = Self::decode_path(path)?;
+        self.ensure_lock_ok(&path, req).await?;
 
         let dest = req
             .headers()

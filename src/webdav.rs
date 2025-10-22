@@ -1,4 +1,4 @@
-use crate::models::{EventType, FileEvent, FileMetadata};
+use crate::models::{EventType, FileEvent};
 use crate::notify::EventNotifier;
 use crate::storage::StorageManager;
 use crate::sync::crdt::SyncManager;
@@ -12,6 +12,9 @@ use tracing::{debug, info};
 
 // WebDAV 方法常量
 const METHOD_PROPFIND: &[u8] = b"PROPFIND";
+const METHOD_PROPPATCH: &[u8] = b"PROPPATCH";
+const METHOD_LOCK: &[u8] = b"LOCK";
+const METHOD_UNLOCK: &[u8] = b"UNLOCK";
 const METHOD_MKCOL: &[u8] = b"MKCOL";
 const METHOD_MOVE: &[u8] = b"MOVE";
 const METHOD_COPY: &[u8] = b"COPY";
@@ -28,10 +31,31 @@ const XML_MULTISTATUS_END: &str = "</D:multistatus>";
 // HTTP 头常量
 const HEADER_DAV: &str = "dav";
 const HEADER_DAV_VALUE: &str = "1, 2, version-control";
-const HEADER_ALLOW_VALUE: &str =
-    "OPTIONS, GET, HEAD, PUT, DELETE, PROPFIND, MKCOL, MOVE, COPY, VERSION-CONTROL, REPORT";
+const HEADER_ALLOW_VALUE: &str = "OPTIONS, GET, HEAD, PUT, DELETE, PROPFIND, PROPPATCH, MKCOL, MOVE, COPY, LOCK, UNLOCK, VERSION-CONTROL, REPORT";
 const CONTENT_TYPE_XML: &str = "application/xml; charset=utf-8";
 const CONTENT_TYPE_HTML: &str = "text/html; charset=utf-8";
+
+#[derive(Clone, Debug)]
+#[allow(dead_code)]
+struct DavLock {
+    token: String,
+    exclusive: bool,
+    expires_at: chrono::NaiveDateTime,
+}
+
+impl DavLock {
+    fn new_exclusive(token: String, timeout_secs: i64) -> Self {
+        Self {
+            token,
+            exclusive: true,
+            expires_at: chrono::Local::now().naive_local()
+                + chrono::Duration::seconds(timeout_secs),
+        }
+    }
+    fn is_expired(&self) -> bool {
+        chrono::Local::now().naive_local() > self.expires_at
+    }
+}
 
 /// WebDAV 处理器
 #[derive(Clone)]
@@ -43,6 +67,13 @@ pub struct WebDavHandler {
     pub source_http_addr: String,
     #[allow(dead_code)]
     pub version_manager: Arc<crate::version::VersionManager>,
+    // 简易锁与属性存储（内存）
+    locks: Arc<tokio::sync::RwLock<std::collections::HashMap<String, DavLock>>>,
+    props: Arc<
+        tokio::sync::RwLock<
+            std::collections::HashMap<String, std::collections::HashMap<String, String>>,
+        >,
+    >,
 }
 
 impl WebDavHandler {
@@ -61,7 +92,13 @@ impl WebDavHandler {
             base_path,
             source_http_addr,
             version_manager,
+            locks: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+            props: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         }
+    }
+
+    fn lock_token() -> String {
+        format!("opaquelocktoken:{}", scru128::new_string())
     }
 
     /// 解码 URL 路径
@@ -90,6 +127,166 @@ impl WebDavHandler {
             http::HeaderValue::from_static(HEADER_ALLOW_VALUE),
         );
         Ok(resp)
+    }
+
+    /// PROPPATCH - 设置/移除自定义属性（简化实现）
+    async fn handle_proppatch(&self, path: &str, req: &mut Request) -> silent::Result<Response> {
+        let path = Self::decode_path(path)?;
+        let body = req.take_body();
+        let _xml = match body {
+            ReqBody::Incoming(b) => b
+                .collect()
+                .await
+                .map_err(|e| {
+                    SilentError::business_error(
+                        StatusCode::BAD_REQUEST,
+                        format!("读取请求体失败: {}", e),
+                    )
+                })?
+                .to_bytes()
+                .to_vec(),
+            ReqBody::Once(bytes) => bytes.to_vec(),
+            ReqBody::Empty => Vec::new(),
+        };
+        // 简化：不做真实解析，直接记录一次 PROPPATCH 时间戳，返回 207
+
+        // 记录一个示例属性，标识已处理过 PROPPATCH
+        let mut props = self.props.write().await;
+        let entry = props.entry(path.clone()).or_default();
+        entry.insert(
+            "prop:last-proppatch".to_string(),
+            chrono::Local::now().naive_local().to_string(),
+        );
+
+        let mut resp = Response::text("");
+        resp.set_status(StatusCode::MULTI_STATUS);
+        resp.headers_mut().insert(
+            http::header::CONTENT_TYPE,
+            http::HeaderValue::from_static(CONTENT_TYPE_XML),
+        );
+        Ok(resp)
+    }
+
+    /// VERSION-CONTROL - 启用版本控制（简化为标记属性）
+    async fn handle_version_control(&self, path: &str) -> silent::Result<Response> {
+        let path = Self::decode_path(path)?;
+        let mut props = self.props.write().await;
+        let entry = props.entry(path).or_default();
+        entry.insert("dav:version-controlled".to_string(), "true".to_string());
+        Ok(Response::empty())
+    }
+
+    /// REPORT - 返回版本列表（简化 XML）
+    async fn handle_report(&self, path: &str) -> silent::Result<Response> {
+        let path = Self::decode_path(path)?;
+        // 通过路径查找文件 ID（朴素遍历）
+        let files = self.storage.list_files().await.map_err(|e| {
+            SilentError::business_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("列出文件失败: {}", e),
+            )
+        })?;
+        let file_id = files.iter().find(|m| m.path == path).map(|m| m.id.clone());
+        if file_id.is_none() {
+            return Err(SilentError::business_error(
+                StatusCode::NOT_FOUND,
+                "文件未找到",
+            ));
+        }
+        let file_id = file_id.unwrap();
+        let versions = self
+            .version_manager
+            .list_versions(&file_id)
+            .await
+            .map_err(|e| {
+                SilentError::business_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("获取版本失败: {}", e),
+                )
+            })?;
+
+        let mut xml = String::new();
+        xml.push_str(XML_HEADER);
+        xml.push_str("<D:multistatus xmlns:D=\"DAV:\">");
+        for v in versions {
+            xml.push_str(&format!(
+                "<D:response><D:href>{}</D:href><D:propstat><D:prop><D:version-name>{}</D:version-name><D:version-created>{}</D:version-created></D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>",
+                self.build_full_href(&path),
+                v.version_id,
+                v.created_at
+            ));
+        }
+        xml.push_str(XML_MULTISTATUS_END);
+
+        let mut resp = Response::text(&xml);
+        resp.set_status(StatusCode::MULTI_STATUS);
+        resp.headers_mut().insert(
+            http::header::CONTENT_TYPE,
+            http::HeaderValue::from_static(CONTENT_TYPE_XML),
+        );
+        Ok(resp)
+    }
+
+    /// LOCK - 锁定资源（简化，支持独占锁）
+    async fn handle_lock(&self, path: &str, _req: &Request) -> silent::Result<Response> {
+        let path = Self::decode_path(path)?;
+        let mut locks = self.locks.write().await;
+        if let Some(l) = locks.get(&path)
+            && !l.is_expired()
+        {
+            return Err(SilentError::business_error(
+                StatusCode::LOCKED,
+                "资源已被锁定",
+            ));
+        }
+        let token = Self::lock_token();
+        let info = DavLock::new_exclusive(token.clone(), 60);
+        locks.insert(path.clone(), info);
+
+        let xml = format!(
+            "{}<D:prop xmlns:D=\"DAV:\"><D:lockdiscovery><D:activelock><D:locktype><D:write/></D:locktype><D:lockscope><D:exclusive/></D:lockscope><D:locktoken><D:href>{}</D:href></D:locktoken></D:activelock></D:lockdiscovery></D:prop>",
+            XML_HEADER, token
+        );
+        let mut resp = Response::text(&xml);
+        resp.headers_mut().insert(
+            http::header::HeaderName::from_static("lock-token"),
+            http::HeaderValue::from_str(&format!("<{}>", token)).unwrap(),
+        );
+        resp.set_status(StatusCode::OK);
+        resp.headers_mut().insert(
+            http::header::CONTENT_TYPE,
+            http::HeaderValue::from_static(CONTENT_TYPE_XML),
+        );
+        Ok(resp)
+    }
+
+    /// UNLOCK - 解除资源锁
+    async fn handle_unlock(&self, path: &str, req: &Request) -> silent::Result<Response> {
+        let path = Self::decode_path(path)?;
+        let token = req
+            .headers()
+            .get("Lock-Token")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .trim_matches(['<', '>']);
+        if token.is_empty() {
+            return Err(SilentError::business_error(
+                StatusCode::BAD_REQUEST,
+                "缺少 Lock-Token",
+            ));
+        }
+        let mut locks = self.locks.write().await;
+        if let Some(l) = locks.get(&path) {
+            if l.token == token {
+                locks.remove(&path);
+            } else {
+                return Err(SilentError::business_error(
+                    StatusCode::CONFLICT,
+                    "锁令牌不匹配",
+                ));
+            }
+        }
+        Ok(Response::empty())
     }
 
     /// PROPFIND - 列出文件和目录
@@ -367,33 +564,30 @@ impl WebDavHandler {
             })?;
         }
 
-        fs::write(&storage_path, &body_data).await.map_err(|e| {
-            SilentError::business_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("写入文件失败: {}", e),
-            )
-        })?;
+        // 使用存储管理器按路径保存，确保元数据一致，并便于版本管理
+        let metadata = self
+            .storage
+            .save_at_path(&path, &body_data)
+            .await
+            .map_err(|e| {
+                SilentError::business_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("写入文件失败: {}", e),
+                )
+            })?;
+        let file_id = metadata.id.clone();
 
-        // 构造元数据（保留原始WebDAV路径，便于对端按路径拉取）
-        let file_id = scru128::new_string();
-        let metadata = FileMetadata {
-            id: file_id.clone(),
-            name: storage_path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("unknown")
-                .to_string(),
-            path: path.clone(),
-            size: body_data.len() as u64,
-            hash: {
-                use sha2::{Digest, Sha256};
-                let mut h = Sha256::new();
-                h.update(&body_data);
-                hex::encode(h.finalize())
-            },
-            created_at: chrono::Local::now().naive_local(),
-            modified_at: chrono::Local::now().naive_local(),
-        };
+        // 如果启用版本管理，则记录版本（DeltaV 最小闭环）
+        if let Err(e) = self
+            .version_manager
+            .create_version(
+                &file_id,
+                crate::models::FileVersion::from_metadata(&metadata, Some("webdav".to_string())),
+            )
+            .await
+        {
+            debug!("创建版本失败(可忽略): {}", e);
+        }
 
         // 通知 SyncManager 处理本地变更
         if let Err(e) = self
@@ -672,6 +866,7 @@ impl Handler for WebDavHandler {
         match method.as_str() {
             "OPTIONS" => self.handle_options().await,
             "PROPFIND" => self.handle_propfind(&relative_path, &req).await,
+            "PROPPATCH" => self.handle_proppatch(&relative_path, &mut req).await,
             "HEAD" => self.handle_head(&relative_path).await,
             "GET" => self.handle_get(&relative_path).await,
             "PUT" => self.handle_put(&relative_path, &mut req).await,
@@ -679,6 +874,10 @@ impl Handler for WebDavHandler {
             "MKCOL" => self.handle_mkcol(&relative_path).await,
             "MOVE" => self.handle_move(&relative_path, &req).await,
             "COPY" => self.handle_copy(&relative_path, &req).await,
+            "LOCK" => self.handle_lock(&relative_path, &req).await,
+            "UNLOCK" => self.handle_unlock(&relative_path, &req).await,
+            "VERSION-CONTROL" => self.handle_version_control(&relative_path).await,
+            "REPORT" => self.handle_report(&relative_path).await,
             _ => Err(SilentError::business_error(
                 StatusCode::METHOD_NOT_ALLOWED,
                 "不支持的方法",
@@ -700,9 +899,15 @@ fn register_webdav_methods(route: Route, handler: Arc<WebDavHandler>) -> Route {
             Method::from_bytes(METHOD_PROPFIND).unwrap(),
             handler.clone(),
         )
+        .insert_handler(
+            Method::from_bytes(METHOD_PROPPATCH).unwrap(),
+            handler.clone(),
+        )
         .insert_handler(Method::from_bytes(METHOD_MKCOL).unwrap(), handler.clone())
         .insert_handler(Method::from_bytes(METHOD_MOVE).unwrap(), handler.clone())
-        .insert_handler(Method::from_bytes(METHOD_COPY).unwrap(), handler)
+        .insert_handler(Method::from_bytes(METHOD_COPY).unwrap(), handler.clone())
+        .insert_handler(Method::from_bytes(METHOD_LOCK).unwrap(), handler.clone())
+        .insert_handler(Method::from_bytes(METHOD_UNLOCK).unwrap(), handler)
 }
 
 /// 创建 WebDAV 路由

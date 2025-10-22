@@ -344,6 +344,7 @@ impl NodeSyncService for NodeSyncServiceImpl {
         let mut file_id = String::new();
         let mut total_bytes = 0u64;
         let mut temp_data = Vec::new();
+        let mut chunk_index: u64 = 0;
 
         info!("开始接收流式文件传输");
 
@@ -358,8 +359,24 @@ impl NodeSyncService for NodeSyncServiceImpl {
                 info!("接收文件: {}", file_id);
             }
 
+            // 校验分块校验和（MD5），提升端到端一致性
+            let calc = format!("{:x}", md5::compute(&chunk.data));
+            if !chunk.checksum.is_empty() && calc != chunk.checksum {
+                let msg = format!(
+                    "分块校验失败: file_id={}, index={}, offset={}, expect={}, got={}",
+                    file_id, chunk_index, chunk.offset, chunk.checksum, calc
+                );
+                tracing::warn!("{}", msg);
+                return Ok(Response::new(StreamFileResponse {
+                    success: false,
+                    bytes_received: total_bytes,
+                    error_message: msg,
+                }));
+            }
+
             total_bytes += chunk.data.len() as u64;
             temp_data.extend_from_slice(&chunk.data);
+            chunk_index += 1;
 
             debug!(
                 "接收块: 偏移 {}, 大小 {} 字节, 是否最后: {}",
@@ -422,7 +439,7 @@ fn convert_from_proto_node(
     // 使用新的 DateTime API 进行转换
     let datetime = DateTime::<Utc>::from_timestamp_millis(proto.last_seen)
         .ok_or_else(|| "无效的时间戳".to_string())?;
-    let last_seen = datetime.naive_utc();
+    let last_seen = datetime.with_timezone(&chrono::Local).naive_local();
 
     Ok(crate::sync::node::NodeInfo {
         node_id: proto.node_id.clone(),

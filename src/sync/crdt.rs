@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use silent_crdt::crdt::{LWWRegister, VectorClock};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, broadcast};
 use tracing::{debug, info, warn};
 
 /// 文件同步状态
@@ -100,6 +100,8 @@ pub struct SyncManager {
     sync_states: Arc<RwLock<HashMap<String, FileSync>>>,
     /// 每个文件最近一次已知的源HTTP地址（用于补拉）
     last_sources: Arc<RwLock<HashMap<String, String>>>,
+    /// 本地变更事件通道（广播 file_id）
+    local_change_tx: broadcast::Sender<String>,
 }
 
 impl SyncManager {
@@ -108,12 +110,14 @@ impl SyncManager {
         storage: Arc<StorageManager>,
         notifier: Option<Arc<EventNotifier>>,
     ) -> Arc<Self> {
+        let (tx, _rx) = broadcast::channel(1024);
         Arc::new(Self {
             node_id,
             storage,
             notifier,
             sync_states: Arc::new(RwLock::new(HashMap::new())),
             last_sources: Arc::new(RwLock::new(HashMap::new())),
+            local_change_tx: tx,
         })
     }
 
@@ -155,7 +159,15 @@ impl SyncManager {
             }
         }
 
+        // 广播本地变更事件（触发快速同步）
+        let _ = self.local_change_tx.send(file_id.clone());
+
         Ok(())
+    }
+
+    /// 订阅本地变更事件（file_id）
+    pub fn subscribe(&self) -> broadcast::Receiver<String> {
+        self.local_change_tx.subscribe()
     }
 
     /// 处理远程同步请求

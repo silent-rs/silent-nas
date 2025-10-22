@@ -9,6 +9,10 @@ pub struct Config {
     pub nats: NatsConfig,
     pub s3: S3Config,
     pub auth: AuthConfig,
+    /// 节点发现/心跳配置
+    pub node: NodeConfig,
+    /// 跨节点同步行为配置
+    pub sync: SyncBehaviorConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -38,6 +42,32 @@ pub struct S3Config {
     pub access_key: String,
     pub secret_key: String,
     pub enable_auth: bool,
+}
+
+/// 节点发现配置（对应 NodeDiscoveryConfig）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NodeConfig {
+    /// 是否启用节点功能
+    pub enable: bool,
+    /// 种子节点地址列表（host:grpc_port）
+    pub seed_nodes: Vec<String>,
+    /// 心跳间隔（秒）
+    pub heartbeat_interval: u64,
+    /// 节点超时（秒）
+    pub node_timeout: i64,
+}
+
+/// 跨节点同步行为配置（对应 SyncConfig）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SyncBehaviorConfig {
+    /// 是否自动同步
+    pub auto_sync: bool,
+    /// 同步间隔（秒）
+    pub sync_interval: u64,
+    /// 每次同步的最大文件数
+    pub max_files_per_sync: usize,
+    /// 失败重试次数
+    pub max_retries: u32,
 }
 
 /// 认证配置
@@ -78,6 +108,18 @@ impl Default for Config {
                 access_key: "minioadmin".to_string(),
                 secret_key: "minioadmin".to_string(),
                 enable_auth: false,
+            },
+            node: NodeConfig {
+                enable: true,
+                seed_nodes: Vec::new(),
+                heartbeat_interval: 10,
+                node_timeout: 30,
+            },
+            sync: SyncBehaviorConfig {
+                auto_sync: true,
+                sync_interval: 60,
+                max_files_per_sync: 100,
+                max_retries: 3,
             },
             auth: AuthConfig {
                 enable: false,
@@ -126,6 +168,48 @@ impl Config {
             && let Ok(seconds) = exp.parse::<u64>()
         {
             self.auth.refresh_token_exp = seconds;
+        }
+
+        // 节点与同步配置（可选）
+        if let Ok(enable_node) = std::env::var("NODE_ENABLE") {
+            self.node.enable = enable_node.to_lowercase() == "true" || enable_node == "1";
+        }
+        if let Ok(seeds) = std::env::var("NODE_SEEDS") {
+            // 以逗号分隔的种子节点列表
+            self.node.seed_nodes = seeds
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+        }
+        if let Ok(hb) = std::env::var("NODE_HEARTBEAT")
+            && let Ok(v) = hb.parse::<u64>()
+        {
+            self.node.heartbeat_interval = v;
+        }
+        if let Ok(nt) = std::env::var("NODE_TIMEOUT")
+            && let Ok(v) = nt.parse::<i64>()
+        {
+            self.node.node_timeout = v;
+        }
+
+        if let Ok(auto) = std::env::var("SYNC_AUTO") {
+            self.sync.auto_sync = auto.to_lowercase() == "true" || auto == "1";
+        }
+        if let Ok(si) = std::env::var("SYNC_INTERVAL")
+            && let Ok(v) = si.parse::<u64>()
+        {
+            self.sync.sync_interval = v;
+        }
+        if let Ok(mfps) = std::env::var("SYNC_MAX_FILES")
+            && let Ok(v) = mfps.parse::<usize>()
+        {
+            self.sync.max_files_per_sync = v;
+        }
+        if let Ok(retry) = std::env::var("SYNC_MAX_RETRIES")
+            && let Ok(v) = retry.parse::<u32>()
+        {
+            self.sync.max_retries = v;
         }
     }
 }

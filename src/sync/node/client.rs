@@ -7,8 +7,10 @@ use crate::rpc::file_service::*;
 use crate::sync::node::{NodeInfo, manager::NodeStatus};
 use chrono::{DateTime, Utc};
 use std::sync::Arc;
+use std::time::Duration as StdDuration;
 use tokio::sync::RwLock;
-use tonic::transport::Channel;
+use tonic::transport::{Channel, Endpoint};
+use tonic::{Code, Status};
 use tracing::{debug, info};
 
 /// gRPC 客户端连接配置
@@ -55,14 +57,38 @@ impl NodeSyncClient {
         }
     }
 
+    fn should_retry(&self, status: &Status) -> bool {
+        matches!(
+            status.code(),
+            Code::Unavailable
+                | Code::DeadlineExceeded
+                | Code::ResourceExhausted
+                | Code::Aborted
+                | Code::Unknown
+                | Code::Internal
+        )
+    }
+
+    fn backoff_delay(&self, attempt: u32) -> tokio::time::Duration {
+        let base = self.config.retry_interval;
+        let factor = 1u64 << attempt.min(5); // 上限 2^5 = 32
+        let secs = (base.saturating_mul(factor)).min(60);
+        tokio::time::Duration::from_secs(secs)
+    }
+
     /// 连接到远程节点
     pub async fn connect(&self) -> Result<()> {
         info!("连接到节点: {}", self.address);
 
         let endpoint = format!("http://{}", self.address);
 
-        let channel = Channel::from_shared(endpoint)
+        let ep = Endpoint::from_shared(endpoint)
             .map_err(|e| NasError::Other(format!("无效的地址: {}", e)))?
+            .connect_timeout(StdDuration::from_secs(self.config.connect_timeout))
+            .timeout(StdDuration::from_secs(self.config.request_timeout))
+            .tcp_nodelay(true);
+
+        let channel = ep
             .connect()
             .await
             .map_err(|e| NasError::Other(format!("连接失败: {}", e)))?;
@@ -108,25 +134,42 @@ impl NodeSyncClient {
             metadata: node.metadata.clone(),
         };
 
-        let request = tonic::Request::new(RegisterNodeRequest {
+        let payload = RegisterNodeRequest {
             node: Some(proto_node),
-        });
-
-        let response = client
-            .register_node(request)
-            .await
-            .map_err(|e| NasError::Other(format!("注册节点失败: {}", e)))?;
-
-        let resp = response.into_inner();
-
-        // 转换返回的节点列表
-        let nodes = resp
-            .known_nodes
-            .into_iter()
-            .filter_map(|proto_node| convert_from_proto_node(&proto_node).ok())
-            .collect();
-
-        Ok(nodes)
+        };
+        // 重试调用
+        let mut last_err = None;
+        for attempt in 0..=self.config.max_retries {
+            let request = tonic::Request::new(payload.clone());
+            match client.register_node(request).await {
+                Ok(resp) => {
+                    let resp = resp.into_inner();
+                    // 转换返回的节点列表
+                    let nodes = resp
+                        .known_nodes
+                        .into_iter()
+                        .filter_map(|proto_node| convert_from_proto_node(&proto_node).ok())
+                        .collect();
+                    return Ok(nodes);
+                }
+                Err(e) => {
+                    last_err = Some(e);
+                    if attempt < self.config.max_retries {
+                        if let Some(ref st) = last_err
+                            && !self.should_retry(st)
+                        {
+                            break;
+                        }
+                        tokio::time::sleep(self.backoff_delay(attempt)).await;
+                        continue;
+                    }
+                }
+            }
+        }
+        Err(NasError::Other(format!(
+            "注册节点失败: {}",
+            last_err.unwrap()
+        )))
     }
 
     /// 发送心跳
@@ -135,18 +178,32 @@ impl NodeSyncClient {
 
         let mut client = self.ensure_connected().await?;
 
-        let request = tonic::Request::new(HeartbeatRequest {
-            node_id: node_id.to_string(),
-            timestamp: chrono::Local::now().timestamp_millis(),
-        });
-
-        let response = client
-            .heartbeat(request)
-            .await
-            .map_err(|e| NasError::Other(format!("心跳失败: {}", e)))?;
-
-        let resp = response.into_inner();
-        Ok(resp.server_timestamp)
+        let mut last_err = None;
+        for attempt in 0..=self.config.max_retries {
+            let request = tonic::Request::new(HeartbeatRequest {
+                node_id: node_id.to_string(),
+                timestamp: chrono::Local::now().timestamp_millis(),
+            });
+            match client.heartbeat(request).await {
+                Ok(resp) => {
+                    let resp = resp.into_inner();
+                    return Ok(resp.server_timestamp);
+                }
+                Err(e) => {
+                    last_err = Some(e);
+                    if attempt < self.config.max_retries {
+                        if let Some(ref st) = last_err
+                            && !self.should_retry(st)
+                        {
+                            break;
+                        }
+                        tokio::time::sleep(self.backoff_delay(attempt)).await;
+                        continue;
+                    }
+                }
+            }
+        }
+        Err(NasError::Other(format!("心跳失败: {}", last_err.unwrap())))
     }
 
     /// 获取节点列表
@@ -155,22 +212,37 @@ impl NodeSyncClient {
 
         let mut client = self.ensure_connected().await?;
 
-        let request = tonic::Request::new(ListNodesRequest {});
-
-        let response = client
-            .list_nodes(request)
-            .await
-            .map_err(|e| NasError::Other(format!("获取节点列表失败: {}", e)))?;
-
-        let resp = response.into_inner();
-
-        let nodes = resp
-            .nodes
-            .into_iter()
-            .filter_map(|proto_node| convert_from_proto_node(&proto_node).ok())
-            .collect();
-
-        Ok(nodes)
+        let mut last_err = None;
+        for attempt in 0..=self.config.max_retries {
+            let request = tonic::Request::new(ListNodesRequest {});
+            match client.list_nodes(request).await {
+                Ok(resp) => {
+                    let resp = resp.into_inner();
+                    let nodes = resp
+                        .nodes
+                        .into_iter()
+                        .filter_map(|proto_node| convert_from_proto_node(&proto_node).ok())
+                        .collect();
+                    return Ok(nodes);
+                }
+                Err(e) => {
+                    last_err = Some(e);
+                    if attempt < self.config.max_retries {
+                        if let Some(ref st) = last_err
+                            && !self.should_retry(st)
+                        {
+                            break;
+                        }
+                        tokio::time::sleep(self.backoff_delay(attempt)).await;
+                        continue;
+                    }
+                }
+            }
+        }
+        Err(NasError::Other(format!(
+            "获取节点列表失败: {}",
+            last_err.unwrap()
+        )))
     }
 
     /// 同步文件状态到远程节点
@@ -183,18 +255,36 @@ impl NodeSyncClient {
 
         let mut client = self.ensure_connected().await?;
 
-        let request = tonic::Request::new(SyncFileStateRequest {
+        let payload = SyncFileStateRequest {
             source_node_id: source_node_id.to_string(),
             states,
-        });
-
-        let response = client
-            .sync_file_state(request)
-            .await
-            .map_err(|e| NasError::Other(format!("同步文件状态失败: {}", e)))?;
-
-        let resp = response.into_inner();
-        Ok(resp.conflicts)
+        };
+        let mut last_err = None;
+        for attempt in 0..=self.config.max_retries {
+            let request = tonic::Request::new(payload.clone());
+            match client.sync_file_state(request).await {
+                Ok(resp) => {
+                    let resp = resp.into_inner();
+                    return Ok(resp.conflicts);
+                }
+                Err(e) => {
+                    last_err = Some(e);
+                    if attempt < self.config.max_retries {
+                        if let Some(ref st) = last_err
+                            && !self.should_retry(st)
+                        {
+                            break;
+                        }
+                        tokio::time::sleep(self.backoff_delay(attempt)).await;
+                        continue;
+                    }
+                }
+            }
+        }
+        Err(NasError::Other(format!(
+            "同步文件状态失败: {}",
+            last_err.unwrap()
+        )))
     }
 
     /// 请求从远程节点同步文件
@@ -203,18 +293,37 @@ impl NodeSyncClient {
 
         let mut client = self.ensure_connected().await?;
 
-        let request = tonic::Request::new(RequestFileSyncRequest {
+        let payload = RequestFileSyncRequest {
             node_id: node_id.to_string(),
             file_ids,
-        });
+        };
 
-        let response = client
-            .request_file_sync(request)
-            .await
-            .map_err(|e| NasError::Other(format!("请求文件同步失败: {}", e)))?;
-
-        let resp = response.into_inner();
-        Ok(resp.synced_count)
+        let mut last_err = None;
+        for attempt in 0..=self.config.max_retries {
+            let request = tonic::Request::new(payload.clone());
+            match client.request_file_sync(request).await {
+                Ok(resp) => {
+                    let resp = resp.into_inner();
+                    return Ok(resp.synced_count);
+                }
+                Err(e) => {
+                    last_err = Some(e);
+                    if attempt < self.config.max_retries {
+                        if let Some(ref st) = last_err
+                            && !self.should_retry(st)
+                        {
+                            break;
+                        }
+                        tokio::time::sleep(self.backoff_delay(attempt)).await;
+                        continue;
+                    }
+                }
+            }
+        }
+        Err(NasError::Other(format!(
+            "请求文件同步失败: {}",
+            last_err.unwrap()
+        )))
     }
 
     /// 获取远程节点的同步状态
@@ -280,27 +389,44 @@ impl NodeSyncClient {
             modified_at: m.modified_at.to_string(),
         });
 
-        let request = tonic::Request::new(crate::rpc::file_service::TransferFileRequest {
+        let payload = crate::rpc::file_service::TransferFileRequest {
             file_id: file_id.to_string(),
             source_node_id: String::new(), // 将由服务端填充
             metadata: proto_metadata,
-        });
+        };
 
-        let response = client
-            .transfer_file(request)
-            .await
-            .map_err(|e| NasError::Other(format!("文件传输失败: {}", e)))?;
-
-        let resp = response.into_inner();
-
-        if !resp.success {
-            return Err(NasError::Other(format!(
-                "文件传输失败: {}",
-                resp.error_message
-            )));
+        let mut last_err = None;
+        for attempt in 0..=self.config.max_retries {
+            let request = tonic::Request::new(payload.clone());
+            match client.transfer_file(request).await {
+                Ok(resp) => {
+                    let resp = resp.into_inner();
+                    if !resp.success {
+                        return Err(NasError::Other(format!(
+                            "文件传输失败: {}",
+                            resp.error_message
+                        )));
+                    }
+                    return Ok(true);
+                }
+                Err(e) => {
+                    last_err = Some(e);
+                    if attempt < self.config.max_retries {
+                        if let Some(ref st) = last_err
+                            && !self.should_retry(st)
+                        {
+                            break;
+                        }
+                        tokio::time::sleep(self.backoff_delay(attempt)).await;
+                        continue;
+                    }
+                }
+            }
         }
-
-        Ok(true)
+        Err(NasError::Other(format!(
+            "文件传输失败: {}",
+            last_err.unwrap()
+        )))
     }
 
     /// 流式传输大文件到远程节点
@@ -338,26 +464,40 @@ impl NodeSyncClient {
             })
             .collect();
 
-        // 转换为 Stream
-        let stream = tokio_stream::iter(chunks);
-
-        let request = tonic::Request::new(stream);
-
-        let response = client
-            .stream_file_content(request)
-            .await
-            .map_err(|e| NasError::Other(format!("流式传输失败: {}", e)))?;
-
-        let resp = response.into_inner();
-
-        if !resp.success {
-            return Err(NasError::Other(format!(
-                "流式传输失败: {}",
-                resp.error_message
-            )));
+        let mut last_err = None;
+        for attempt in 0..=self.config.max_retries {
+            // 转换为 Stream（每次重试都需重建流）
+            let stream = tokio_stream::iter(chunks.clone());
+            let request = tonic::Request::new(stream);
+            match client.stream_file_content(request).await {
+                Ok(resp) => {
+                    let resp = resp.into_inner();
+                    if !resp.success {
+                        return Err(NasError::Other(format!(
+                            "流式传输失败: {}",
+                            resp.error_message
+                        )));
+                    }
+                    return Ok(resp.bytes_received);
+                }
+                Err(e) => {
+                    last_err = Some(e);
+                    if attempt < self.config.max_retries {
+                        if let Some(ref st) = last_err
+                            && !self.should_retry(st)
+                        {
+                            break;
+                        }
+                        tokio::time::sleep(self.backoff_delay(attempt)).await;
+                        continue;
+                    }
+                }
+            }
         }
-
-        Ok(resp.bytes_received)
+        Err(NasError::Other(format!(
+            "流式传输失败: {}",
+            last_err.unwrap()
+        )))
     }
 }
 
@@ -376,7 +516,7 @@ pub struct SyncStatusInfo {
 fn convert_from_proto_node(proto: &crate::rpc::file_service::NodeInfo) -> Result<NodeInfo> {
     let datetime = DateTime::<Utc>::from_timestamp_millis(proto.last_seen)
         .ok_or_else(|| NasError::Other("无效的时间戳".to_string()))?;
-    let last_seen = datetime.naive_utc();
+    let last_seen = datetime.with_timezone(&chrono::Local).naive_local();
 
     Ok(NodeInfo {
         node_id: proto.node_id.clone(),

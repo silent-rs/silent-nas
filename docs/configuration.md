@@ -187,14 +187,32 @@ enable_auth = true
 region = "us-west-2"
 ```
 
-### [sync] - 同步配置
+### [node] - 节点发现与心跳（gRPC 节点同步）
+
+| 配置项 | 类型 | 默认值 | 说明 |
+|--------|------|--------|------|
+| `enable` | boolean | true | 启用节点功能（节点注册/心跳/跨节点同步）|
+| `seed_nodes` | array(string) | [] | 种子节点地址列表，`host:grpc_port` |
+| `heartbeat_interval` | integer | 10 | 心跳间隔（秒） |
+| `node_timeout` | integer | 30 | 判定离线的超时时间（秒） |
+
+**示例**:
+```toml
+[node]
+enable = true
+seed_nodes = ["192.168.1.10:50051", "192.168.1.11:50051"]
+heartbeat_interval = 10
+node_timeout = 30
+```
+
+### [sync] - 跨节点同步行为
 
 | 配置项 | 类型 | 默认值 | 说明 |
 |--------|------|--------|------|
 | `auto_sync` | boolean | true | 启用自动同步 |
 | `sync_interval` | integer | 60 | 同步间隔（秒） |
 | `max_files_per_sync` | integer | 100 | 每次最大同步文件数 |
-| `enable_incremental` | boolean | true | 启用增量同步 |
+| `max_retries` | integer | 3 | 失败重试次数 |
 
 **集群配置**:
 ```toml
@@ -202,7 +220,7 @@ region = "us-west-2"
 auto_sync = true
 sync_interval = 30  # 30秒同步一次
 max_files_per_sync = 200
-enable_incremental = true
+max_retries = 3
 ```
 
 ### [versioning] - 版本控制配置
@@ -287,20 +305,20 @@ max_backups = 10
 
 ## 环境变量
 
-配置项也可以通过环境变量覆盖，格式为 `SILENT_NAS_SECTION_KEY`：
+除全局环境变量外，以下关键选项可直接覆盖：
 
 ```bash
-# 覆盖 HTTP 端口
-export SILENT_NAS_SERVER_HTTP_PORT=9000
+export NODE_ENABLE=true                         # 启用节点
+export NODE_SEEDS=host1:50051,host2:50051      # 逗号分隔的种子列表
+export NODE_HEARTBEAT=10                       # 心跳间隔
+export NODE_TIMEOUT=30                         # 节点超时
 
-# 覆盖日志级别
-export SILENT_NAS_LOG_LEVEL=debug
+export SYNC_AUTO=true                          # 自动同步
+export SYNC_INTERVAL=60                        # 同步间隔
+export SYNC_MAX_FILES=200                      # 每次最大同步文件数
+export SYNC_MAX_RETRIES=3                      # 重试次数
 
-# 覆盖存储路径
-export SILENT_NAS_STORAGE_ROOT_PATH=/data/storage
-
-# 启动服务
-silent-nas
+export ENABLE_AUTH=false                       # 其它覆盖示例
 ```
 
 ## 配置模板

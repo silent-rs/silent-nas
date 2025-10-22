@@ -162,6 +162,33 @@ impl NodeManager {
             .collect()
     }
 
+    /// 启动对外心跳发送任务（周期性向已知节点发送心跳）
+    pub async fn start_outbound_heartbeat(self: Arc<Self>) {
+        let mut interval = interval(Duration::from_secs(self.config.heartbeat_interval));
+
+        tokio::spawn(async move {
+            loop {
+                interval.tick().await;
+
+                let nodes_snapshot: Vec<(String, String)> = {
+                    let nodes = self.nodes.read().await;
+                    nodes
+                        .values()
+                        .map(|n| (n.node_id.clone(), n.address.clone()))
+                        .collect()
+                };
+
+                for (node_id, address) in nodes_snapshot {
+                    if let Err(e) = self.send_heartbeat_to_node(&node_id, &address).await {
+                        warn!("向节点发送心跳失败: {} @ {}, 错误: {}", node_id, address, e);
+                    } else {
+                        debug!("已发送心跳: {} @ {}", node_id, address);
+                    }
+                }
+            }
+        });
+    }
+
     /// 启动心跳检查任务
     pub async fn start_heartbeat_check(self: Arc<Self>) {
         let mut interval = interval(Duration::from_secs(self.config.heartbeat_interval));
@@ -316,18 +343,50 @@ impl NodeSyncCoordinator {
         sync_manager: Arc<SyncManager>,
         storage: Arc<crate::storage::StorageManager>,
     ) -> Arc<Self> {
-        Arc::new(Self {
+        let this = Arc::new(Self {
             config,
             node_manager,
             sync_manager,
             storage,
             stats: Arc::new(RwLock::new(SyncStats::default())),
-        })
+        });
+
+        // 订阅本地变更事件，触发快速 push
+        let this_clone = this.clone();
+        let mut rx = this_clone.sync_manager.subscribe();
+        tokio::spawn(async move {
+            while let Ok(file_id) = rx.recv().await {
+                let nodes = this_clone.node_manager.list_online_nodes().await;
+                if nodes.is_empty() {
+                    debug!("快速同步跳过：无在线节点");
+                    continue;
+                }
+                info!(
+                    "快速同步触发: file_id={}, 在线节点数={}",
+                    file_id,
+                    nodes.len()
+                );
+                for n in nodes {
+                    if let Err(e) = this_clone
+                        .sync_to_node(&n.node_id, vec![file_id.clone()])
+                        .await
+                    {
+                        warn!("快速同步失败: {} -> {}: {}", file_id, n.node_id, e);
+                    }
+                }
+            }
+        });
+
+        this
     }
 
     /// 同步文件到指定节点
     pub async fn sync_to_node(&self, node_id: &str, file_ids: Vec<String>) -> Result<usize> {
+        use crate::rpc::file_service::{
+            FileMetadata as ProtoFileMetadata, FileSyncState as ProtoFileSyncState,
+        };
         use crate::sync::node::client::{ClientConfig, NodeSyncClient};
+        use tokio::fs;
 
         info!("开始同步 {} 个文件到节点: {}", file_ids.len(), node_id);
 
@@ -343,6 +402,10 @@ impl NodeSyncCoordinator {
         // 创建 gRPC 客户端
         let client = NodeSyncClient::new(node_address.clone(), ClientConfig::default());
         client.connect().await?;
+        debug!(
+            "gRPC 客户端已连接: {} -> {}",
+            self.node_manager.config.node_id, node_address
+        );
 
         let mut synced = 0;
         let mut retry_count = 0;
@@ -350,35 +413,76 @@ impl NodeSyncCoordinator {
         for file_id in file_ids.iter().take(self.config.max_files_per_sync) {
             // 获取文件的同步状态
             if let Some(file_sync) = self.sync_manager.get_sync_state(file_id).await {
-                // 读取文件内容
-                match self.storage.read_file(file_id).await {
+                // 先同步状态（VectorClock/LWW），以便对端处理冲突
+                let proto_meta = file_sync.metadata.value.clone().map(|m| ProtoFileMetadata {
+                    id: m.id,
+                    name: m.name,
+                    path: m.path,
+                    size: m.size,
+                    hash: m.hash,
+                    created_at: m.created_at.to_string(),
+                    modified_at: m.modified_at.to_string(),
+                });
+
+                let vc_json = serde_json::to_string(&file_sync.vector_clock)
+                    .unwrap_or_else(|_| "{}".to_string());
+
+                let state = ProtoFileSyncState {
+                    file_id: file_id.clone(),
+                    metadata: proto_meta,
+                    deleted: file_sync.deleted.value.unwrap_or(false),
+                    vector_clock: vc_json,
+                    timestamp: chrono::Local::now().timestamp_millis(),
+                };
+
+                // 忽略返回的冲突列表，由服务端记录日志与审计
+                let _ = client
+                    .sync_file_states(self.sync_manager.node_id(), vec![state])
+                    .await;
+
+                // 读取文件内容：优先按路径（WebDAV/S3场景），否则按ID
+                let content_res = if let Some(meta) = file_sync.metadata.value.as_ref() {
+                    let full_path = self.storage.get_full_path(&meta.path);
+                    debug!(
+                        "读取文件内容(按路径): file_id={}, path={}, addr={}",
+                        file_id, meta.path, node_address
+                    );
+                    fs::read(full_path)
+                        .await
+                        .map_err(|e| NasError::Other(e.to_string()))
+                } else {
+                    debug!(
+                        "读取文件内容(按ID): file_id={}, addr={}",
+                        file_id, node_address
+                    );
+                    self.storage.read_file(file_id).await
+                };
+
+                match content_res {
                     Ok(content) => {
                         let file_size = content.len();
 
-                        // 从 LWWRegister 中获取元数据（value已经是Option<T>）
-                        let metadata = file_sync.metadata.value.clone();
-
-                        // 根据文件大小选择传输方式
-                        let transfer_result = if file_size < 5 * 1024 * 1024 {
-                            // 小于 5MB 使用直接传输
-                            client.transfer_file(file_id, content, metadata).await
-                        } else {
-                            // 大于 5MB 使用流式传输
-                            const CHUNK_SIZE: usize = 1024 * 1024; // 1MB chunks
-                            client
-                                .stream_file_content(file_id, content, CHUNK_SIZE)
-                                .await
-                                .map(|_| true)
-                        };
+                        // 统一采用流式传输，避免与服务端 TransferFile（拉取语义）不一致
+                        const CHUNK_SIZE: usize = 1024 * 1024; // 1MB
+                        let transfer_result = client
+                            .stream_file_content(file_id, content, CHUNK_SIZE)
+                            .await
+                            .map(|_| true);
 
                         match transfer_result {
                             Ok(_) => {
                                 synced += 1;
                                 retry_count = 0; // 重置重试计数
-                                debug!("文件同步成功: {}, 大小: {} 字节", file_id, file_size);
+                                info!(
+                                    "文件同步成功: {}, 大小: {} 字节 -> {}",
+                                    file_id, file_size, node_address
+                                );
                             }
                             Err(e) => {
-                                error!("文件同步失败: {}, 错误: {}", file_id, e);
+                                error!(
+                                    "文件同步失败: {} -> {}, 错误: {}",
+                                    file_id, node_address, e
+                                );
                                 retry_count += 1;
 
                                 if retry_count >= self.config.max_retries {
@@ -406,6 +510,12 @@ impl NodeSyncCoordinator {
         // 断开连接
         client.disconnect().await;
 
+        info!(
+            "同步任务完成: 目标={}, 文件数={}, 成功数={}",
+            node_address,
+            file_ids.len().min(self.config.max_files_per_sync),
+            synced
+        );
         Ok(synced)
     }
 
@@ -459,6 +569,7 @@ impl NodeSyncCoordinator {
 
                 // 获取所有在线节点
                 let nodes = self.node_manager.list_online_nodes().await;
+                let total_nodes = nodes.len();
 
                 if nodes.is_empty() {
                     debug!("没有在线节点，跳过同步");
@@ -467,7 +578,16 @@ impl NodeSyncCoordinator {
 
                 // 获取所有需要同步的文件
                 let all_states = self.sync_manager.get_all_sync_states().await;
-                let file_ids: Vec<String> = all_states.iter().map(|s| s.file_id.clone()).collect();
+                let file_ids: Vec<String> = all_states
+                    .iter()
+                    .filter(|s| !s.is_deleted())
+                    .map(|s| s.file_id.clone())
+                    .collect();
+                info!(
+                    "自动同步准备: 在线节点={}, 待同步文件数={}",
+                    total_nodes,
+                    file_ids.len()
+                );
 
                 // 同步到每个节点
                 for node in nodes {

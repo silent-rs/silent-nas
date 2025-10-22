@@ -207,12 +207,18 @@ async fn main() -> Result<()> {
     let notifier_clone = notifier.clone();
     let source_http_addr_clone = source_http_addr.clone();
 
+    let sync_for_grpc = sync_manager.clone();
+    let node_cfg = config.node.clone();
+    let sync_cfg = config.sync.clone();
     let grpc_handle = tokio::spawn(async move {
         if let Err(e) = start_grpc_server(
             grpc_addr,
             storage_clone,
             notifier_clone,
             source_http_addr_clone,
+            sync_for_grpc,
+            node_cfg,
+            sync_cfg,
         )
         .await
         {
@@ -353,13 +359,82 @@ async fn start_grpc_server(
     storage: StorageManager,
     notifier: Option<EventNotifier>,
     source_http_addr: String,
+    sync_manager: Arc<SyncManager>,
+    node_cfg: config::NodeConfig,
+    sync_cfg: config::SyncBehaviorConfig,
 ) -> Result<()> {
-    let file_service = FileServiceImpl::new(storage, notifier, Some(source_http_addr));
+    use crate::sync::node::manager::{
+        NodeDiscoveryConfig, NodeManager, NodeSyncCoordinator, SyncConfig,
+    };
+    use crate::sync::node::service::NodeSyncServiceImpl;
+
+    let file_service = FileServiceImpl::new(
+        storage.clone(),
+        notifier.clone(),
+        Some(source_http_addr.clone()),
+    );
+
+    // 初始化节点同步服务（NodeSyncService）
+    let listen_addr = addr.to_string();
+    let node_discovery = NodeDiscoveryConfig {
+        node_id: sync_manager.node_id().to_string(),
+        listen_addr: listen_addr.clone(),
+        seed_nodes: if node_cfg.enable {
+            node_cfg.seed_nodes.clone()
+        } else {
+            Vec::new()
+        },
+        heartbeat_interval: node_cfg.heartbeat_interval,
+        node_timeout: node_cfg.node_timeout,
+    };
+
+    let node_manager = NodeManager::new(node_discovery, sync_manager.clone());
+    let node_sync = NodeSyncCoordinator::new(
+        SyncConfig {
+            auto_sync: sync_cfg.auto_sync,
+            sync_interval: sync_cfg.sync_interval,
+            max_files_per_sync: sync_cfg.max_files_per_sync,
+            max_retries: sync_cfg.max_retries,
+        },
+        node_manager.clone(),
+        sync_manager.clone(),
+        Arc::new(storage.clone()),
+    );
+
+    // 启动节点心跳与自动同步任务
+    if node_cfg.enable {
+        let nm_for_heartbeat = node_manager.clone();
+        tokio::spawn(async move { nm_for_heartbeat.start_heartbeat_check().await });
+        // 启动向外发送心跳任务，降低节点离线误判概率
+        let nm_for_outbound = node_manager.clone();
+        tokio::spawn(async move { nm_for_outbound.start_outbound_heartbeat().await });
+    }
+
+    if node_cfg.enable && sync_cfg.auto_sync {
+        let nsc_for_auto = node_sync.clone();
+        tokio::spawn(async move { nsc_for_auto.start_auto_sync().await });
+    }
+
+    // 可选：连接到种子节点（默认空列表）
+    if node_cfg.enable
+        && !node_cfg.seed_nodes.is_empty()
+        && let Err(e) = node_manager.connect_to_seeds().await
+    {
+        tracing::warn!("连接种子节点失败: {}", e);
+    }
+
+    let node_service = NodeSyncServiceImpl::new(
+        node_manager,
+        node_sync,
+        sync_manager,
+        Arc::new(storage.clone()),
+    );
 
     info!("gRPC 服务器启动: {}", addr);
 
     TonicServer::builder()
         .add_service(file_service.into_server())
+        .add_service(node_service.into_server())
         .serve(addr)
         .await
         .map_err(|e| error::NasError::Storage(format!("gRPC 服务器错误: {}", e)))?;

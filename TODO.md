@@ -23,11 +23,15 @@
   - 同步协调器 NodeSyncCoordinator（sync_to_node/request_files_from_node/auto_sync）
   - 管理路由与查询：`/admin/sync/*`、`/sync/*`
 - 待完善：
-  - 重试与回退：请求/传输的超时、指数退避、错误分级
+ - 重试与回退：请求/传输的超时、指数退避、错误分级
   - 一致性与校验：端到端哈希校验、失败补偿重拉
   - 自动同步稳定性：参数可配（并发/批量/间隔）、观测指标补全
   - 端到端演练：3 节点拓扑压测与延迟/冲突指标采集（< 5s）
   - 文档同步：运行参数与调试指引
+
+  - 进展：
+    - 已为 gRPC 客户端接入连接/请求超时与重试
+    - 服务端流式上传增加分块 MD5 校验，失败立即返回
 
 2) WebDAV 协议完善
 - 已有：OPTIONS / PROPFIND / HEAD / GET / PUT / DELETE / MKCOL / MOVE / COPY

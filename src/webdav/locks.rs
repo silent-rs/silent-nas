@@ -1,5 +1,5 @@
 use silent::prelude::*;
-// use tracing::warn;
+// use http_body_util::BodyExt;
 
 use super::{WebDavHandler, constants::*, types::DavLock};
 
@@ -16,6 +16,14 @@ impl WebDavHandler {
                 "资源已被锁定",
             ));
         }
+        // 简易共享锁检测（请求体包含 <shared/> 则视为共享，内部仍使用独占策略存储）
+        // 简化共享锁检测：从 If 头或 UA 约定头中判断（占位实现）
+        let _is_shared = req
+            .headers()
+            .get("X-WebDAV-Shared")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
         let token = Self::lock_token();
         let timeout = Self::parse_timeout(req);
         let info = DavLock::new_exclusive(token.clone(), timeout);
@@ -31,6 +39,11 @@ impl WebDavHandler {
         resp.headers_mut().insert(
             http::header::HeaderName::from_static("lock-token"),
             http::HeaderValue::from_str(&format!("<{}>", token)).unwrap(),
+        );
+        // 回写 Timeout 响应头
+        resp.headers_mut().insert(
+            http::header::HeaderName::from_static("timeout"),
+            http::HeaderValue::from_str(&format!("Second-{}", timeout)).unwrap(),
         );
         resp.set_status(StatusCode::OK);
         resp.headers_mut().insert(

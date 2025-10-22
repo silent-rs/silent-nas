@@ -515,6 +515,40 @@ response = stub.DownloadFile(file_service_pb2.DownloadFileRequest(
 print(f"Downloaded: {response.data}")
 ```
 
+## 节点同步（管理员 API）
+
+在自动同步之外，提供两个管理接口便于联调与运维：
+
+### 触发推送（push）
+
+- `POST /api/admin/sync/push`
+- 请求体：
+  ```json
+  { "target": "<grpc_host:port>", "file_ids": ["可选: 指定文件ID数组"] }
+  ```
+- 示例：
+  ```bash
+  curl -H 'Content-Type: application/json' \
+    -d '{"target":"127.0.0.1:50052"}' \
+    http://127.0.0.1:8080/api/admin/sync/push
+  ```
+
+### 触发请求（request，对端执行 push）
+
+- `POST /api/admin/sync/request`
+- 请求体：
+  ```json
+  { "source": "<grpc_host:port>", "file_ids": ["必填: 文件ID数组"] }
+  ```
+- 示例：
+  ```bash
+  curl -H 'Content-Type: application/json' \
+    -d '{"source":"127.0.0.1:50051","file_ids":["01JE..."]}' \
+    http://127.0.0.1:8080/api/admin/sync/request
+  ```
+
+说明：若开启认证，以上接口需要管理员权限；未开启认证时默认开放用于内网联调。
+
 ## 性能监控
 
 ### Prometheus Metrics

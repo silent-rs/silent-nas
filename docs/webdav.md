@@ -37,6 +37,12 @@
   - VERSION‑CONTROL 标记
   - REPORT 列出版本（version‑name/version‑created）
 
+### 新增能力（本迭代）
+- ETag/Last-Modified：GET/HEAD 返回 `ETag` 与 `Last-Modified`，并正确处理 `If-None-Match`
+- Depth: infinity：`PROPFIND` 支持 `Depth: infinity` 递归枚举
+- OPTIONS DAV：返回 `1, 2, ordered-collections`
+- REPORT：新增 `sync-collection`（RFC 6578，简化实现，支持 `Depth: 1/infinity`）
+
 ## 路由挂载
 ```
 use silent_nas::webdav::create_webdav_routes;
@@ -91,6 +97,10 @@ let route = create_webdav_routes(
 
 ## REPORT（简化）
 - 通过路径查询文件 id 并返回版本列表（version‑name/version‑created）
+- 新增 `sync-collection`：
+  - 当请求体包含 `<sync-collection>` 时，返回 207 多状态，其中包含：
+    - `<D:sync-token>`：形如 `urn:sync:<scru128>:<local-time>`
+    - `<D:response>`：按 Depth 列出资源，包含 `getetag`/`getlastmodified`
 - 后续可扩展：更多 DeltaV 报告类型与过滤条件
 
 ## 互通建议

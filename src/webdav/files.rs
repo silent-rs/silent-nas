@@ -42,27 +42,32 @@ impl WebDavHandler {
             let full_href = self.build_full_href(&path);
             Self::add_prop_response(&mut xml, &full_href, &storage_path, true).await;
             if depth != "0" {
-                let mut entries = fs::read_dir(&storage_path).await.map_err(|e| {
-                    SilentError::business_error(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        format!("读取目录失败: {}", e),
-                    )
-                })?;
-                while let Some(entry) = entries.next_entry().await.map_err(|e| {
-                    SilentError::business_error(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        format!("读取目录项失败: {}", e),
-                    )
-                })? {
-                    let entry_path = entry.path();
-                    let relative_path = if path.is_empty() || path == "/" {
-                        format!("/{}", entry.file_name().to_string_lossy())
-                    } else {
-                        format!("{}/{}", path, entry.file_name().to_string_lossy())
-                    };
-                    let full_href = self.build_full_href(&relative_path);
-                    let is_dir = entry_path.is_dir();
-                    Self::add_prop_response(&mut xml, &full_href, &entry_path, is_dir).await;
+                if depth.eq_ignore_ascii_case("infinity") {
+                    self.walk_propfind_recursive(&storage_path, &path, &mut xml)
+                        .await?;
+                } else {
+                    let mut entries = fs::read_dir(&storage_path).await.map_err(|e| {
+                        SilentError::business_error(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            format!("读取目录失败: {}", e),
+                        )
+                    })?;
+                    while let Some(entry) = entries.next_entry().await.map_err(|e| {
+                        SilentError::business_error(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            format!("读取目录项失败: {}", e),
+                        )
+                    })? {
+                        let entry_path = entry.path();
+                        let relative_path = if path.is_empty() || path == "/" {
+                            format!("/{}", entry.file_name().to_string_lossy())
+                        } else {
+                            format!("{}/{}", path, entry.file_name().to_string_lossy())
+                        };
+                        let full_href = self.build_full_href(&relative_path);
+                        let is_dir = entry_path.is_dir();
+                        Self::add_prop_response(&mut xml, &full_href, &entry_path, is_dir).await;
+                    }
                 }
             }
         } else {
@@ -106,6 +111,9 @@ impl WebDavHandler {
                 let mime = mime_guess::from_ext(&ext.to_string_lossy()).first_or_octet_stream();
                 xml.push_str(&format!("<D:getcontenttype>{}</D:getcontenttype>", mime));
             }
+            if let Some(etag) = Self::calc_etag_from_meta(&metadata) {
+                xml.push_str(&format!("<D:getetag>{}</D:getetag>", etag));
+            }
         }
         if let Ok(modified) = metadata.modified()
             && let Ok(datetime) = modified.duration_since(std::time::UNIX_EPOCH)
@@ -124,7 +132,56 @@ impl WebDavHandler {
         xml.push_str("</D:response>");
     }
 
-    pub(super) async fn handle_head(&self, path: &str) -> silent::Result<Response> {
+    fn calc_etag_from_meta(metadata: &std::fs::Metadata) -> Option<String> {
+        let len = metadata.len();
+        let ts = metadata
+            .modified()
+            .ok()?
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?
+            .as_secs();
+        Some(format!("\"{}-{}\"", len, ts))
+    }
+
+    pub(super) async fn walk_propfind_recursive(
+        &self,
+        storage_dir: &Path,
+        relative_dir: &str,
+        xml: &mut String,
+    ) -> silent::Result<()> {
+        let mut stack: Vec<(std::path::PathBuf, String)> =
+            vec![(storage_dir.to_path_buf(), relative_dir.to_string())];
+        while let Some((dir_path, rel_path)) = stack.pop() {
+            let mut entries = fs::read_dir(&dir_path).await.map_err(|e| {
+                SilentError::business_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("读取目录失败: {}", e),
+                )
+            })?;
+            while let Some(entry) = entries.next_entry().await.map_err(|e| {
+                SilentError::business_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("读取目录项失败: {}", e),
+                )
+            })? {
+                let entry_path = entry.path();
+                let relative_path = if rel_path.is_empty() || rel_path == "/" {
+                    format!("/{}", entry.file_name().to_string_lossy())
+                } else {
+                    format!("{}/{}", rel_path, entry.file_name().to_string_lossy())
+                };
+                let full_href = self.build_full_href(&relative_path);
+                let is_dir = entry_path.is_dir();
+                Self::add_prop_response(xml, &full_href, &entry_path, is_dir).await;
+                if is_dir {
+                    stack.push((entry_path, relative_path));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) async fn handle_head(&self, path: &str, req: &Request) -> silent::Result<Response> {
         let path = Self::decode_path(path)?;
         let storage_path = self.storage.get_full_path(&path);
         let metadata = fs::metadata(&storage_path)
@@ -154,6 +211,26 @@ impl WebDavHandler {
                     }),
                 );
             }
+            if let Some(etag) = Self::calc_etag_from_meta(&metadata) {
+                if let Ok(val) = http::HeaderValue::from_str(&etag) {
+                    resp.headers_mut().insert(http::header::ETAG, val);
+                }
+                if let Some(if_none_match) = req
+                    .headers()
+                    .get("If-None-Match")
+                    .and_then(|h| h.to_str().ok())
+                {
+                    let matches = if_none_match == "*"
+                        || if_none_match
+                            .split(',')
+                            .map(|s| s.trim())
+                            .any(|t| t == etag);
+                    if matches {
+                        resp.set_status(StatusCode::NOT_MODIFIED);
+                        return Ok(resp);
+                    }
+                }
+            }
             if let Ok(modified) = metadata.modified()
                 && let Ok(datetime) = modified.duration_since(std::time::UNIX_EPOCH)
                 && let Some(dt) = chrono::DateTime::from_timestamp(datetime.as_secs() as i64, 0)
@@ -167,7 +244,7 @@ impl WebDavHandler {
         Ok(resp)
     }
 
-    pub(super) async fn handle_get(&self, path: &str) -> silent::Result<Response> {
+    pub(super) async fn handle_get(&self, path: &str, req: &Request) -> silent::Result<Response> {
         let path = Self::decode_path(path)?;
         let storage_path = self.storage.get_full_path(&path);
         let metadata = fs::metadata(&storage_path)
@@ -181,6 +258,36 @@ impl WebDavHandler {
             );
             resp.set_body(full(b"<!DOCTYPE html><html><body><h1>Directory</h1><p>Use PROPFIND to list contents.</p></body></html>".to_vec()));
             return Ok(resp);
+        }
+        if let Some(etag) = Self::calc_etag_from_meta(&metadata)
+            && let Some(if_none_match) = req
+                .headers()
+                .get("If-None-Match")
+                .and_then(|h| h.to_str().ok())
+        {
+            let matches = if_none_match == "*"
+                || if_none_match
+                    .split(',')
+                    .map(|s| s.trim())
+                    .any(|t| t == etag);
+            if matches {
+                let mut resp = Response::empty();
+                if let Ok(val) = http::HeaderValue::from_str(&etag) {
+                    resp.headers_mut().insert(http::header::ETAG, val);
+                }
+                if let Ok(modified) = metadata.modified()
+                    && let Ok(datetime) = modified.duration_since(std::time::UNIX_EPOCH)
+                    && let Some(dt) = chrono::DateTime::from_timestamp(datetime.as_secs() as i64, 0)
+                    && let Ok(last_modified) = http::HeaderValue::from_str(
+                        &dt.format("%a, %d %b %Y %H:%M:%S GMT").to_string(),
+                    )
+                {
+                    resp.headers_mut()
+                        .insert(http::header::LAST_MODIFIED, last_modified);
+                }
+                resp.set_status(StatusCode::NOT_MODIFIED);
+                return Ok(resp);
+            }
         }
         let data = fs::read(&storage_path).await.map_err(|e| {
             SilentError::business_error(
@@ -206,6 +313,11 @@ impl WebDavHandler {
             http::header::CONTENT_LENGTH,
             http::HeaderValue::from_str(&data.len().to_string()).unwrap(),
         );
+        if let Some(etag) = Self::calc_etag_from_meta(&metadata)
+            && let Ok(val) = http::HeaderValue::from_str(&etag)
+        {
+            resp.headers_mut().insert(http::header::ETAG, val);
+        }
         if let Ok(modified) = metadata.modified()
             && let Ok(datetime) = modified.duration_since(std::time::UNIX_EPOCH)
             && let Some(dt) = chrono::DateTime::from_timestamp(datetime.as_secs() as i64, 0)

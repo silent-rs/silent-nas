@@ -37,6 +37,10 @@
 - 版本控制：DeltaV 基础能力（版本创建/查询/回滚的最小闭环）
 - 属性扩展：`PROPFIND/PROPPATCH` 支持扩展属性读写
 - 兼容性：对 Cyberduck、Nextcloud 等主流客户端进行互通验证
+ - ETag/Last-Modified：GET/HEAD 返回 `ETag` 与 `Last-Modified`，并正确处理 `If-None-Match`
+ - Depth: infinity：`PROPFIND` 与 `REPORT sync-collection` 支持 `Depth: infinity`
+ - DAV 能力：`OPTIONS` 的 `DAV` 头返回 `1, 2, ordered-collections`
+ - 报告：支持 `REPORT sync-collection`（RFC 6578，简化实现）
 
 —
 

@@ -20,14 +20,11 @@ impl WebDavHandler {
                 format!("列出文件失败: {}", e),
             )
         })?;
-        let file_id = files.iter().find(|m| m.path == path).map(|m| m.id.clone());
-        if file_id.is_none() {
-            return Err(SilentError::business_error(
-                StatusCode::NOT_FOUND,
-                "文件未找到",
-            ));
-        }
-        let file_id = file_id.unwrap();
+        let file_id = files
+            .iter()
+            .find(|m| m.path == path)
+            .map(|m| m.id.clone())
+            .unwrap_or_else(|| path.trim_start_matches('/').to_string());
         let versions = self
             .version_manager
             .list_versions(&file_id)

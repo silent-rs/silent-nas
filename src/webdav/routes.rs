@@ -22,6 +22,11 @@ fn register_webdav_methods(route: Route, handler: Arc<WebDavHandler>) -> Route {
         .insert_handler(Method::from_bytes(METHOD_MOVE).unwrap(), handler.clone())
         .insert_handler(Method::from_bytes(METHOD_COPY).unwrap(), handler.clone())
         .insert_handler(Method::from_bytes(METHOD_LOCK).unwrap(), handler.clone())
+        .insert_handler(
+            Method::from_bytes(METHOD_VERSION_CONTROL).unwrap(),
+            handler.clone(),
+        )
+        .insert_handler(Method::from_bytes(METHOD_REPORT).unwrap(), handler.clone())
         .insert_handler(Method::from_bytes(METHOD_UNLOCK).unwrap(), handler)
 }
 
@@ -40,7 +45,6 @@ pub fn create_webdav_routes(
         source_http_addr,
         version_manager,
     ));
-
     let root_route = register_webdav_methods(Route::new(""), handler.clone());
     let path_route = register_webdav_methods(Route::new("<path:**>"), handler);
     root_route.append(path_route)

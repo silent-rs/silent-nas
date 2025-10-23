@@ -34,12 +34,18 @@
     - 服务端流式上传增加分块 MD5 校验，失败立即返回
 
 2) WebDAV 协议完善
-- 已有：OPTIONS / PROPFIND / HEAD / GET / PUT / DELETE / MKCOL / MOVE / COPY
-- 待做：
-  - 锁管理：LOCK / UNLOCK（独占/共享、超时与续约、锁令牌）
-  - 自定义属性：PROPPATCH（扩展属性持久化与校验）
-  - 版本控制：DeltaV 最小闭环（创建/查询/回滚）
-  - 互通验证：Cyberduck / Nextcloud 用例通过
+- 已完成（基础）：
+  - 方法：OPTIONS / PROPFIND / HEAD / GET / PUT / DELETE / MKCOL / MOVE / COPY
+  - 锁管理：LOCK / UNLOCK（独占锁、Timeout 解析、Lock-Token 返回、If 条件校验、持久化）
+  - 自定义属性：PROPPATCH（set/remove 简化 XML 解析，属性持久化）
+  - 版本控制：DeltaV 最小闭环（PUT 后创建版本、VERSION-CONTROL 标记、REPORT 版本列表）
+  - 互通验证：脚本 ./scripts/webdav_interop_test.sh（零配置，端到端验证）
+- 待优化：
+  - 共享锁完整语义与冲突矩阵、LOCK Body 解析完善
+  - If 头完整表达式（多资源/多令牌/并列条件）
+  - PROPPATCH 命名空间与复杂属性校验、属性模型结构化
+  - REPORT 报告类型扩展与过滤场景
+  - 客户端互通用例完善（Cyberduck/Nextcloud）
 
 ---
 

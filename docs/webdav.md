@@ -50,6 +50,17 @@ let route = create_webdav_routes(
 );
 ```
 
+## 快速验证（零配置）
+- 使用提供的脚本运行端到端互通测试（会自动读取 config.toml 并在需要时启动本地服务）：
+
+```
+./scripts/webdav_interop_test.sh
+```
+
+- 流程覆盖：PUT → PROPFIND → LOCK → PROPPATCH → GET → REPORT（版本列表）→ MOVE → UNLOCK → 清理
+- 成功后终端输出：OK: WebDAV 互通基础流程通过
+- 脚本会在退出时清理临时目录与启动的测试进程
+
 ## 锁与并发
 - 客户端在修改类请求（PUT/PROPPATCH/MOVE/COPY）需要携带 If: (<opaquelocktoken:…>) 以通过 ensure_lock_ok 检查
 - Timeout:
@@ -62,6 +73,21 @@ let route = create_webdav_routes(
 - 后续可扩展：
   - 解析/校验多命名空间属性
   - 属性持久化结构化与校验
+
+> 当前实现：支持 <set>/<remove> 简化用法，典型示例：
+>
+> 设置属性：
+> ```xml
+> <D:propertyupdate xmlns:D="DAV:">
+>   <D:set><D:prop><Z:category xmlns:Z="urn:x-example">interop</Z:category></D:prop></D:set>
+> </D:propertyupdate>
+> ```
+> 删除属性：
+> ```xml
+> <D:propertyupdate xmlns:D="DAV:">
+>   <D:remove><D:prop><Z:category xmlns:Z="urn:x-example"/></D:prop></D:remove>
+> </D:propertyupdate>
+> ```
 
 ## REPORT（简化）
 - 通过路径查询文件 id 并返回版本列表（version‑name/version‑created）

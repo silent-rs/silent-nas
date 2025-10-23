@@ -198,10 +198,7 @@ impl WebDavHandler {
                 http::header::CONTENT_TYPE,
                 http::HeaderValue::from_static("application/octet-stream"),
             );
-            resp.headers_mut().insert(
-                http::header::CONTENT_LENGTH,
-                http::HeaderValue::from_str(&metadata.len().to_string()).unwrap(),
-            );
+            // 对于 HEAD，不设置 Content-Length，避免底层对齐逻辑造成阻塞
             if let Some(ext) = storage_path.extension() {
                 let mime = mime_guess::from_ext(&ext.to_string_lossy()).first_or_octet_stream();
                 resp.headers_mut().insert(

@@ -81,6 +81,10 @@ impl WebDavHandler {
             http::header::CONTENT_TYPE,
             http::HeaderValue::from_static(CONTENT_TYPE_XML),
         );
+        // 显式设置 Content-Length 满足严格客户端（例如 Finder）
+        if let Ok(len) = http::HeaderValue::from_str(&xml.len().to_string()) {
+            resp.headers_mut().insert(http::header::CONTENT_LENGTH, len);
+        }
         Ok(resp)
     }
 
@@ -89,16 +93,24 @@ impl WebDavHandler {
             Ok(m) => m,
             Err(_) => return,
         };
-        let href_encoded = urlencoding::encode(href);
-        let href_with_slash = if is_dir && !href.ends_with('/') {
-            format!("{}/", href_encoded)
-        } else {
-            href_encoded.to_string()
-        };
+        // Finder 等客户端希望在 <D:href> 中看到未百分号编码的路径
+        // 且目录以尾斜杠结尾
+        let mut href_with_slash = href.to_string();
+        if is_dir && !href_with_slash.ends_with('/') {
+            href_with_slash.push('/');
+        }
         xml.push_str("<D:response>");
         xml.push_str(&format!("<D:href>{}</D:href>", href_with_slash));
         xml.push_str("<D:propstat>");
         xml.push_str("<D:prop>");
+        // displayname
+        let displayname = if href_with_slash == "/" {
+            "/".to_string()
+        } else {
+            let s = href_with_slash.trim_end_matches('/');
+            s.rsplit('/').next().unwrap_or(s).to_string()
+        };
+        xml.push_str(&format!("<D:displayname>{}</D:displayname>", displayname));
         if is_dir {
             xml.push_str("<D:resourcetype><D:collection/></D:resourcetype>");
         } else {
@@ -114,6 +126,26 @@ impl WebDavHandler {
             if let Some(etag) = Self::calc_etag_from_meta(&metadata) {
                 xml.push_str(&format!("<D:getetag>{}</D:getetag>", etag));
             }
+        }
+        // creationdate（尽量取文件创建时间，否则回退到修改时间）
+        let creation_dt = if let Ok(created) = metadata.created()
+            && let Ok(dur) = created.duration_since(std::time::UNIX_EPOCH)
+            && let Some(dt) = chrono::DateTime::from_timestamp(dur.as_secs() as i64, 0)
+        {
+            Some(dt)
+        } else if let Ok(modified) = metadata.modified()
+            && let Ok(dur) = modified.duration_since(std::time::UNIX_EPOCH)
+            && let Some(dt) = chrono::DateTime::from_timestamp(dur.as_secs() as i64, 0)
+        {
+            Some(dt)
+        } else {
+            None
+        };
+        if let Some(dt) = creation_dt {
+            xml.push_str(&format!(
+                "<D:creationdate>{}</D:creationdate>",
+                dt.format("%Y-%m-%dT%H:%M:%SZ")
+            ));
         }
         if let Ok(modified) = metadata.modified()
             && let Ok(datetime) = modified.duration_since(std::time::UNIX_EPOCH)

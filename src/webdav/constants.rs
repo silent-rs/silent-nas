@@ -21,5 +21,6 @@ pub const HEADER_DAV: &str = "dav";
 // 需求：OPTIONS DAV: 返回 1,2,ordered-collections
 pub const HEADER_DAV_VALUE: &str = "1, 2, ordered-collections";
 pub const HEADER_ALLOW_VALUE: &str = "OPTIONS, GET, HEAD, PUT, DELETE, PROPFIND, PROPPATCH, MKCOL, MOVE, COPY, LOCK, UNLOCK, VERSION-CONTROL, REPORT";
-pub const CONTENT_TYPE_XML: &str = "application/xml; charset=utf-8";
+// 为兼容 Finder，使用 text/xml
+pub const CONTENT_TYPE_XML: &str = "text/xml; charset=utf-8";
 pub const CONTENT_TYPE_HTML: &str = "text/html; charset=utf-8";

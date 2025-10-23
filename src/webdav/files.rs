@@ -198,7 +198,16 @@ impl WebDavHandler {
                 http::header::CONTENT_TYPE,
                 http::HeaderValue::from_static("application/octet-stream"),
             );
-            // 对于 HEAD，不设置 Content-Length，避免底层对齐逻辑造成阻塞
+            // 为提升兼容性（例如 Finder 展示大小），设置 Content-Length
+            resp.headers_mut().insert(
+                http::header::CONTENT_LENGTH,
+                http::HeaderValue::from_str(&metadata.len().to_string()).unwrap(),
+            );
+            // 声明支持范围请求
+            resp.headers_mut().insert(
+                http::header::ACCEPT_RANGES,
+                http::HeaderValue::from_static("bytes"),
+            );
             if let Some(ext) = storage_path.extension() {
                 let mime = mime_guess::from_ext(&ext.to_string_lossy()).first_or_octet_stream();
                 resp.headers_mut().insert(
@@ -309,6 +318,11 @@ impl WebDavHandler {
         resp.headers_mut().insert(
             http::header::CONTENT_LENGTH,
             http::HeaderValue::from_str(&data.len().to_string()).unwrap(),
+        );
+        // 声明支持范围请求，提升客户端兼容性（如 Finder）
+        resp.headers_mut().insert(
+            http::header::ACCEPT_RANGES,
+            http::HeaderValue::from_static("bytes"),
         );
         if let Some(etag) = Self::calc_etag_from_meta(&metadata)
             && let Ok(val) = http::HeaderValue::from_str(&etag)

@@ -4,9 +4,9 @@ set -euo pipefail
 # WebDAV 互通验证脚本（基础流程）
 # 依赖：curl
 
-BASE_URL=${BASE_URL:-"http://127.0.0.1:8081/webdav"}
-SRC_PATH=${SRC_PATH:-"/interop/a.txt"}
-DST_PATH=${DST_PATH:-"/interop/a_renamed.txt"}
+BASE_URL="http://127.0.0.1:8081/webdav"
+SRC_PATH="/interop/a.txt"
+DST_PATH="/interop/a_renamed.txt"
 TMP_DIR=$(mktemp -d)
 HEADERS_FILE="$TMP_DIR/headers.txt"
 BODY_FILE="$TMP_DIR/body.bin"

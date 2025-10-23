@@ -103,6 +103,10 @@ impl WebDavHandler {
         xml.push_str(&format!("<D:href>{}</D:href>", href_with_slash));
         xml.push_str("<D:propstat>");
         xml.push_str("<D:prop>");
+        // 声明支持的锁类型（Finder 通过该属性判断是否支持 LOCK）
+        xml.push_str(
+            "<D:supportedlock><D:lockentry><D:lockscope><D:exclusive/></D:lockscope><D:locktype><D:write/></D:locktype></D:lockentry></D:supportedlock>",
+        );
         // displayname
         let displayname = if href_with_slash == "/" {
             "/".to_string()

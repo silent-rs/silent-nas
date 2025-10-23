@@ -76,18 +76,38 @@ if ! wait_ready "$BASE_URL"; then
   exit 1
 fi
 
-echo "[1/9] PUT 文件: $SRC_PATH"
+echo "[0/15] OPTIONS 能力探测 (DAV/ALLOW)"
+curl -sS -D "$HEADERS_FILE" -o /dev/null --fail -X OPTIONS "$BASE_URL/" || {
+  echo "OPTIONS 失败" >&2; exit 1;
+}
+DAV_CAP=$(grep -i "^dav:" "$HEADERS_FILE" | awk -F': ' '{print tolower($2)}' | tr -d '\r\n ')
+echo "DAV: $DAV_CAP"
+if [[ "$DAV_CAP" != *"1,2,ordered-collections"* && "$DAV_CAP" != *"1,2,ordered-collections"* ]]; then
+  echo "DAV 能力不包含 1,2,ordered-collections" >&2; exit 1
+fi
+
+echo "[1/15] PUT 文件: $SRC_PATH"
 echo "hello-webdav" > "$BODY_FILE"
 curl -sS -X PUT --fail \
   --data-binary @"$BODY_FILE" \
   "$BASE_URL$SRC_PATH" >/dev/null
 
-echo "[2/9] PROPFIND Depth:1"
+echo "[2/15] PROPFIND Depth:1"
 curl -sS -X PROPFIND --fail \
   -H "Depth: 1" \
   "$BASE_URL/interop" >/dev/null
 
-echo "[3/9] LOCK 独占锁"
+echo "[3/15] MKCOL 创建目录"
+DIR_PATH="/interop/dir_${RUN_ID}"
+curl -sS --fail -X MKCOL "$BASE_URL$DIR_PATH" >/dev/null
+
+echo "[4/15] PROPFIND Depth:0 (目录)"
+curl -sS --fail -X PROPFIND -H "Depth: 0" "$BASE_URL$DIR_PATH" >/dev/null
+
+echo "[5/15] PROPFIND Depth: infinity"
+curl -sS --fail -X PROPFIND -H "Depth: infinity" "$BASE_URL/interop" >/dev/null
+
+echo "[6/15] LOCK 独占锁"
 LOCK_BODY='<?xml version="1.0" encoding="utf-8"?>
 <D:lockinfo xmlns:D="DAV:">
   <D:lockscope><D:exclusive/></D:lockscope>
@@ -103,7 +123,7 @@ if [[ -z "$LOCK_TOKEN" ]]; then
 fi
 echo "Lock-Token: $LOCK_TOKEN"
 
-echo "[4/9] PROPPATCH 设置自定义属性"
+echo "[7/15] PROPPATCH 设置自定义属性"
 PROP_BODY='<?xml version="1.0" encoding="utf-8"?>
 <D:propertyupdate xmlns:D="DAV:">
   <D:set>
@@ -117,24 +137,65 @@ curl -sS --fail -X PROPPATCH \
   -H "If: (<$LOCK_TOKEN>)" \
   --data "$PROP_BODY" "$BASE_URL$SRC_PATH" >/dev/null
 
-echo "[5/9] GET 下载校验"
+echo "[8/15] HEAD 获取ETag"
+curl -sS --fail -D "$HEADERS_FILE" -o /dev/null -X HEAD "$BASE_URL$SRC_PATH"
+ETAG=$(grep -i '^etag:' "$HEADERS_FILE" | awk -F': ' '{print $2}' | tr -d '\r\n')
+echo "ETag: $ETAG"
+if [[ -z "$ETAG" ]]; then echo "未获取到ETag" >&2; exit 1; fi
+
+echo "[9/15] If-None-Match 命中304 (GET)"
+CODE=$(curl -s -o /dev/null -w "%{http_code}" -H "If-None-Match: $ETAG" "$BASE_URL$SRC_PATH")
+if [[ "$CODE" != "304" ]]; then echo "GET If-None-Match 预期304 实得$CODE" >&2; exit 1; fi
+
+echo "[10/15] If-None-Match 命中304 (HEAD)"
+CODE=$(curl -s -o /dev/null -w "%{http_code}" -I -H "If-None-Match: $ETAG" "$BASE_URL$SRC_PATH")
+if [[ "$CODE" != "304" ]]; then echo "HEAD If-None-Match 预期304 实得$CODE" >&2; exit 1; fi
+
+echo "[11/15] GET 下载校验"
 curl -sS --fail "$BASE_URL$SRC_PATH" >/dev/null
 
-echo "[6/9] REPORT 版本列表"
+echo "[12/15] VERSION-CONTROL 标记版本控制"
+curl -sS --fail -X VERSION-CONTROL "$BASE_URL$SRC_PATH" >/dev/null
+
+echo "[13/15] REPORT 版本列表"
 curl -sS --fail -X REPORT "$BASE_URL$SRC_PATH" >/dev/null
 
-echo "[7/9] MOVE 重命名"
+echo "[14/15] REPORT sync-collection (Depth: infinity)"
+SYNC_BODY='<?xml version="1.0" encoding="utf-8"?>
+<D:sync-collection xmlns:D="DAV:"></D:sync-collection>'
+CODE=$(curl -sS -o "$TMP_DIR/sync.xml" -w "%{http_code}" --fail -X REPORT -H "Content-Type: application/xml" -H "Depth: infinity" --data "$SYNC_BODY" "$BASE_URL/interop")
+grep -q "sync-token" "$TMP_DIR/sync.xml" || { echo "sync-collection 未返回sync-token" >&2; exit 1; }
+if [[ "$CODE" != "207" ]]; then echo "sync-collection 预期207 实得$CODE" >&2; exit 1; fi
+
+echo "[15/15] MOVE 重命名"
 curl -sS --fail -X MOVE \
   -H "Destination: $BASE_URL$DST_PATH" \
   -H "If: (<$LOCK_TOKEN>)" \
   "$BASE_URL$SRC_PATH" >/dev/null
 
-echo "[8/9] UNLOCK 解锁"
+echo "COPY 复制到新路径 (校验后删除)"
+COPY_PATH="/interop/a_${RUN_ID}_copy.txt"
+curl -sS --fail -X COPY -H "Destination: $BASE_URL$COPY_PATH" "$BASE_URL$DST_PATH" >/dev/null
+curl -sS --fail -X DELETE "$BASE_URL$COPY_PATH" >/dev/null
+
+echo "PROPPATCH 移除属性"
+PROP_BODY_REMOVE='<?xml version="1.0" encoding="utf-8"?>
+<D:propertyupdate xmlns:D="DAV:">
+  <D:remove>
+    <D:prop>
+      <Z:category xmlns:Z="urn:x-example"/>
+    </D:prop>
+  </D:remove>
+</D:propertyupdate>'
+curl -sS --fail -X PROPPATCH -H "Content-Type: application/xml" -H "If: (<$LOCK_TOKEN>)" --data "$PROP_BODY_REMOVE" "$BASE_URL$DST_PATH" >/dev/null
+
+echo "UNLOCK 解锁"
 curl -sS --fail -X UNLOCK \
   -H "Lock-Token: <$LOCK_TOKEN>" \
   "$BASE_URL$DST_PATH" >/dev/null
 
-echo "[9/9] 清理"
+echo "清理（删除文件与目录）"
 curl -sS --fail -X DELETE "$BASE_URL$DST_PATH" >/dev/null || true
+curl -sS --fail -X DELETE "$BASE_URL$DIR_PATH" >/dev/null || true
 
-echo "OK: WebDAV 互通基础流程通过"
+echo "OK: WebDAV 全量接口互通测试通过"

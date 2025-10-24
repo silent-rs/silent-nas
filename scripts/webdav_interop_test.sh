@@ -18,7 +18,8 @@ detect_base_url() {
     [[ -n "$cfg_host" ]] && host="$cfg_host"
     [[ -n "$cfg_port" ]] && port="$cfg_port"
   fi
-  echo "http://$host:$port/webdav"
+  # WebDAV 实际挂载在根路径，避免在存储中生成 /webdav 目录
+  echo "http://$host:$port"
 }
 
 BASE_URL=$(detect_base_url)

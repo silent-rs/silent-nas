@@ -189,7 +189,8 @@ done
 
 echo "[smoke] 通过WebDAV向节点1写入文件..."
 echo "hello from smoke" > "$WORK_DIR/smoke.txt"
-curl -fsS -X PUT --data-binary @"$WORK_DIR/smoke.txt" "http://127.0.0.1:$WEBDAV1/webdav/smoke.txt"
+# WebDAV 实际挂载在根路径，直接写入根路径下的目标
+curl -fsS -X PUT --data-binary @"$WORK_DIR/smoke.txt" "http://127.0.0.1:$WEBDAV1/smoke.txt"
 
 echo "[smoke] 轮询节点2文件列表收敛(自动同步)..."
 ok=false

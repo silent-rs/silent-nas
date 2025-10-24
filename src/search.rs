@@ -6,7 +6,7 @@ use std::sync::Arc;
 use tantivy::schema::*;
 use tantivy::{Index, IndexReader, IndexWriter, ReloadPolicy, TantivyDocument, doc};
 use tokio::sync::RwLock;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 /// 搜索结果
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -77,10 +77,29 @@ impl SearchEngine {
                 .map_err(|e| NasError::Storage(format!("创建索引失败: {}", e)))?
         };
 
-        // 创建索引写入器
-        let writer = index
-            .writer(50_000_000) // 50MB buffer
-            .map_err(|e| NasError::Storage(format!("创建索引写入器失败: {}", e)))?;
+        // 创建索引写入器（处理意外遗留的锁文件）
+        let writer = match index.writer(50_000_000) {
+            Ok(w) => w,
+            Err(e) => {
+                let msg = e.to_string();
+                if msg.contains("LockBusy") {
+                    // 清理可能的陈旧锁并重试一次
+                    let writer_lock = index_path.join(".tantivy-writer.lock");
+                    let meta_lock = index_path.join(".tantivy-meta.lock");
+                    let _ = std::fs::remove_file(&writer_lock);
+                    let _ = std::fs::remove_file(&meta_lock);
+                    warn!(
+                        "检测到索引锁占用，已尝试清理锁文件后重试: {:?}, {:?}",
+                        writer_lock, meta_lock
+                    );
+                    index
+                        .writer(50_000_000)
+                        .map_err(|e| NasError::Storage(format!("创建索引写入器失败: {}", e)))?
+                } else {
+                    return Err(NasError::Storage(format!("创建索引写入器失败: {}", msg)));
+                }
+            }
+        };
 
         // 创建索引读取器（使用 Manual 策略，手动控制重载）
         let reader = index

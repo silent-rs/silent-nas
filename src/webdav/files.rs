@@ -938,4 +938,83 @@ mod tests {
         assert!(handler.storage.get_full_path("/mk/c/z.txt").exists());
         assert!(handler.storage.get_full_path("/mk/b/y.txt").exists());
     }
+
+    #[tokio::test]
+    async fn test_propfind_depth0_and1_and_errors() {
+        let handler = build_handler().await;
+
+        // 创建文件与目录
+        tokio::fs::create_dir_all(handler.storage.get_full_path("/p0"))
+            .await
+            .unwrap();
+        let f = handler.storage.get_full_path("/p0/a.txt");
+        tokio::fs::write(&f, b"x").await.unwrap();
+
+        // Depth: 0 针对文件
+        let mut d0 = Request::empty();
+        d0.headers_mut()
+            .insert("Depth", http::HeaderValue::from_static("0"));
+        let r0 = handler.handle_propfind("/p0/a.txt", &d0).await.unwrap();
+        assert_eq!(r0.status(), StatusCode::MULTI_STATUS);
+
+        // Depth: 1 针对目录
+        let mut d1 = Request::empty();
+        d1.headers_mut()
+            .insert("Depth", http::HeaderValue::from_static("1"));
+        let r1 = handler.handle_propfind("/p0", &d1).await.unwrap();
+        assert_eq!(r1.status(), StatusCode::MULTI_STATUS);
+
+        // PUT 空请求体 -> 400
+        let http_req = http::Request::builder()
+            .method("PUT")
+            .uri("/err.txt")
+            .body(())
+            .unwrap();
+        let (parts, _) = http_req.into_parts();
+        let mut req = Request::from_parts(parts, ReqBody::Empty);
+        let err = handler
+            .handle_put("/err.txt", &mut req)
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+
+        // DELETE 不存在 -> 404
+        let err2 = handler.handle_delete("/not-exist").await.err().unwrap();
+        assert_eq!(err2.status(), StatusCode::NOT_FOUND);
+
+        // MOVE/COPY 缺少 Destination -> 400
+        let http_req2 = http::Request::builder()
+            .method("MOVE")
+            .uri("/p0/a.txt")
+            .body(())
+            .unwrap();
+        let (p2, _) = http_req2.into_parts();
+        let req2 = Request::from_parts(p2, ReqBody::Empty);
+        let emv = handler.handle_move("/p0/a.txt", &req2).await.err().unwrap();
+        assert_eq!(emv.status(), StatusCode::BAD_REQUEST);
+
+        let http_req3 = http::Request::builder()
+            .method("COPY")
+            .uri("/p0/a.txt")
+            .body(())
+            .unwrap();
+        let (p3, _) = http_req3.into_parts();
+        let req3 = Request::from_parts(p3, ReqBody::Empty);
+        let ecp = handler.handle_copy("/p0/a.txt", &req3).await.err().unwrap();
+        assert_eq!(ecp.status(), StatusCode::BAD_REQUEST);
+
+        // extract_path_from_url 无效 URL -> 400
+        let e = handler.extract_path_from_url("invalid").err().unwrap();
+        assert_eq!(e.status(), StatusCode::BAD_REQUEST);
+
+        // HEAD If-None-Match 304
+        let meta = std::fs::metadata(&f).unwrap();
+        let etag = WebDavHandler::calc_etag_from_meta(&meta).unwrap();
+        let mut hreq = Request::empty();
+        hreq.headers_mut()
+            .insert("If-None-Match", http::HeaderValue::from_str(&etag).unwrap());
+        let head_resp = handler.handle_head("/p0/a.txt", &hreq).await.unwrap();
+        assert_eq!(head_resp.status(), StatusCode::NOT_MODIFIED);
+    }
 }

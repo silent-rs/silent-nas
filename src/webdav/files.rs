@@ -21,6 +21,11 @@ impl WebDavHandler {
         Self::insert_header_case(resp.headers_mut(), "DAV", HEADER_DAV_VALUE);
         Self::insert_header_case(resp.headers_mut(), "Allow", HEADER_ALLOW_VALUE);
         Self::insert_header_case(resp.headers_mut(), "Server", "SilentWebDAV/0.1");
+        // 显式 Content-Length: 0，提升部分客户端兼容性
+        resp.headers_mut().insert(
+            http::header::CONTENT_LENGTH,
+            http::HeaderValue::from_static("0"),
+        );
         Ok(resp)
     }
 
@@ -45,12 +50,28 @@ impl WebDavHandler {
 
         let storage_path = self.storage.get_full_path(&path);
         let metadata = fs::metadata(&storage_path).await.map_err(|e| {
-            tracing::error!(
-                "PROPFIND 路径不存在: {} -> {:?}, error: {}",
-                path,
-                storage_path,
-                e
-            );
+            // macOS 系统文件和元数据文件不存在是正常的，只记录 debug 日志
+            let is_macos_metadata = path.starts_with("/._.")
+                || path.starts_with("/._")
+                || path.starts_with("/.metadata_")
+                || path.starts_with("/.Spotlight-")
+                || path.starts_with("/.hidden")
+                || path.starts_with("/.Trash");
+
+            if is_macos_metadata {
+                tracing::debug!(
+                    "PROPFIND macOS 元数据文件不存在（正常）: {} -> {:?}",
+                    path,
+                    storage_path
+                );
+            } else {
+                tracing::warn!(
+                    "PROPFIND 路径不存在: {} -> {:?}, error: {}",
+                    path,
+                    storage_path,
+                    e
+                );
+            }
             SilentError::business_error(StatusCode::NOT_FOUND, "路径不存在")
         })?;
 
@@ -150,11 +171,11 @@ impl WebDavHandler {
         // resourcetype - 必须明确声明集合类型，macOS Finder 严格检查
         if is_dir {
             xml.push_str("<D:resourcetype><D:collection/></D:resourcetype>");
-            // macOS Finder 期望目录也有 getcontentlength (通常为0或目录大小)
-            xml.push_str(&format!(
-                "<D:getcontentlength>{}</D:getcontentlength>",
-                metadata.len()
-            ));
+            // 兼容 Finder：目录不返回 getcontentlength
+            // 为目录生成动态 ETag，基于目录内容
+            if let Some(etag) = Self::calc_dir_etag(path).await {
+                xml.push_str(&format!("<D:getetag>{}</D:getetag>", etag));
+            }
         } else {
             xml.push_str("<D:resourcetype/>");
             xml.push_str(&format!(
@@ -189,6 +210,8 @@ impl WebDavHandler {
                 dt.format("%Y-%m-%dT%H:%M:%SZ")
             ));
         }
+
+        // getlastmodified - 使用文件系统的实际修改时间
         if let Ok(modified) = metadata.modified()
             && let Ok(datetime) = modified.duration_since(std::time::UNIX_EPOCH)
         {
@@ -215,6 +238,39 @@ impl WebDavHandler {
             .ok()?
             .as_secs();
         Some(format!("\"{}-{}\"", len, ts))
+    }
+
+    async fn calc_dir_etag(dir_path: &Path) -> Option<String> {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let mut hasher = DefaultHasher::new();
+        let mut count = 0u64;
+
+        // 读取目录内容并计算哈希
+        let mut entries = match fs::read_dir(dir_path).await {
+            Ok(e) => e,
+            Err(_) => return None,
+        };
+
+        let mut names = Vec::new();
+
+        // 即使某些 entry 读取失败，也继续处理其他的
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let name = entry.file_name();
+            names.push(name);
+        }
+
+        // 排序以确保一致性
+        names.sort();
+
+        for name in names {
+            count += 1;
+            name.hash(&mut hasher);
+        }
+
+        let hash = hasher.finish();
+        Some(format!("\"{}-{}\"", count, hash))
     }
 
     pub(super) async fn walk_propfind_recursive(
@@ -423,6 +479,18 @@ impl WebDavHandler {
     ) -> silent::Result<Response> {
         let path = Self::decode_path(path)?;
         self.ensure_lock_ok(&path, req).await?;
+
+        // 检查文件是否已存在，用于确定返回状态码
+        let storage_path = self.storage.get_full_path(&path);
+        let file_exists = storage_path.exists();
+
+        tracing::debug!(
+            "PUT path='{}' exists={} user-agent={:?}",
+            path,
+            file_exists,
+            req.headers().get("User-Agent")
+        );
+
         let body = req.take_body();
         let body_data = match body {
             ReqBody::Incoming(body) => body
@@ -444,7 +512,7 @@ impl WebDavHandler {
                 ));
             }
         };
-        let storage_path = self.storage.get_full_path(&path);
+
         if let Some(parent) = storage_path.parent() {
             fs::create_dir_all(parent).await.map_err(|e| {
                 SilentError::business_error(
@@ -453,6 +521,7 @@ impl WebDavHandler {
                 )
             })?;
         }
+
         let metadata = self
             .storage
             .save_at_path(&path, &body_data)
@@ -463,6 +532,7 @@ impl WebDavHandler {
                     format!("写入文件失败: {}", e),
                 )
             })?;
+
         let file_id = metadata.id.clone();
         if let Err(e) = self
             .version_manager
@@ -474,23 +544,63 @@ impl WebDavHandler {
         {
             tracing::debug!("创建版本失败(可忽略): {}", e);
         }
+
         // 发布事件
-        let mut event = FileEvent::new(EventType::Created, file_id, Some(metadata));
+        let event_type = if file_exists {
+            EventType::Modified
+        } else {
+            EventType::Created
+        };
+        let mut event = FileEvent::new(event_type, file_id, Some(metadata));
         event.source_http_addr = Some(self.source_http_addr.clone());
+
         if let Some(ref n) = self.notifier {
-            let _ = n.notify_created(event).await;
+            if file_exists {
+                let _ = n.notify_modified(event).await;
+            } else {
+                let _ = n.notify_created(event).await;
+            }
         }
+
         let mut resp = Response::empty();
-        resp.set_status(StatusCode::CREATED);
+        // RFC 4918: 如果资源已存在则返回 204 No Content，新建则返回 201 Created
+        resp.set_status(if file_exists {
+            StatusCode::NO_CONTENT
+        } else {
+            StatusCode::CREATED
+        });
+
+        tracing::debug!(
+            "PUT completed: path='{}' status={} size={}",
+            path,
+            if file_exists { 204 } else { 201 },
+            body_data.len()
+        );
+
         Ok(resp)
     }
 
     pub(super) async fn handle_delete(&self, path: &str) -> silent::Result<Response> {
         let path = Self::decode_path(path)?;
+
+        tracing::debug!(
+            "DELETE path='{}' user-agent={:?}",
+            path,
+            // 从请求中获取 user-agent（这里无法直接访问 req，需要从调用处传入）
+            "N/A"
+        );
+
         let storage_path = self.storage.get_full_path(&path);
-        let metadata = fs::metadata(&storage_path)
-            .await
-            .map_err(|_| SilentError::business_error(StatusCode::NOT_FOUND, "路径不存在"))?;
+        let metadata = fs::metadata(&storage_path).await.map_err(|e| {
+            tracing::warn!(
+                "DELETE 文件不存在: {} -> {:?}, error: {}",
+                path,
+                storage_path,
+                e
+            );
+            SilentError::business_error(StatusCode::NOT_FOUND, "路径不存在")
+        })?;
+
         if metadata.is_dir() {
             fs::remove_dir_all(&storage_path).await.map_err(|e| {
                 SilentError::business_error(
@@ -506,6 +616,9 @@ impl WebDavHandler {
                 )
             })?;
         }
+
+        tracing::debug!("DELETE completed: path='{}'", path);
+
         let file_id = scru128::new_string();
         let mut event = FileEvent::new(EventType::Deleted, file_id, None);
         if let Ok(host) = std::env::var("ADVERTISE_HOST").or_else(|_| std::env::var("HOSTNAME")) {

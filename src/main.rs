@@ -463,7 +463,8 @@ async fn start_webdav_server(
     );
 
     info!("WebDAV 服务器启动: {}", addr);
-    info!("  - WebDAV: http://{}/webdav", addr);
+    // 实际挂载在根路径，避免误导为 /webdav
+    info!("  - WebDAV: http://{}/", addr);
 
     Server::new()
         .bind(addr.parse().expect("无效的 WebDAV 地址"))

@@ -471,12 +471,47 @@ impl NodeSyncCoordinator {
 
                         match transfer_result {
                             Ok(_) => {
-                                synced += 1;
-                                retry_count = 0; // 重置重试计数
-                                info!(
-                                    "文件同步成功: {}, 大小: {} 字节 -> {}",
-                                    file_id, file_size, node_address
-                                );
+                                // 端到端一致性校验（SHA-256）
+                                let mut verified = true;
+                                if let Some(meta) = file_sync.metadata.value.as_ref()
+                                    && !meta.hash.is_empty()
+                                {
+                                    match client.verify_remote_hash(file_id, &meta.hash).await {
+                                        Ok(ok) => {
+                                            verified = ok;
+                                            if !ok {
+                                                error!(
+                                                    "端到端校验失败: {} -> {}，期望哈希不一致",
+                                                    file_id, node_address
+                                                );
+                                            }
+                                        }
+                                        Err(e) => {
+                                            verified = false;
+                                            error!(
+                                                "端到端校验错误: {} -> {}, 错误: {}",
+                                                file_id, node_address, e
+                                            );
+                                        }
+                                    }
+                                }
+
+                                if verified {
+                                    synced += 1;
+                                    retry_count = 0; // 重置重试计数
+                                    info!(
+                                        "文件同步成功: {}, 大小: {} 字节 -> {}",
+                                        file_id, file_size, node_address
+                                    );
+                                } else {
+                                    // 校验不通过，按重试策略处理
+                                    retry_count += 1;
+                                    if retry_count >= self.config.max_retries {
+                                        warn!("达到最大重试次数（含校验失败），停止同步");
+                                        break;
+                                    }
+                                    tokio::time::sleep(Duration::from_secs(2)).await;
+                                }
                             }
                             Err(e) => {
                                 error!(

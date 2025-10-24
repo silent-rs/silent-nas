@@ -69,6 +69,43 @@ impl NodeSyncClient {
         )
     }
 
+    /// 在目标节点校验文件哈希（端到端一致性）
+    pub async fn verify_remote_hash(&self, file_id: &str, expected_hash: &str) -> Result<bool> {
+        use crate::rpc::file_service::file_service_client::FileServiceClient;
+
+        let endpoint = format!("http://{}", self.address);
+        let ep = Endpoint::from_shared(endpoint)
+            .map_err(|e| NasError::Other(format!("无效的地址: {}", e)))?
+            .connect_timeout(StdDuration::from_secs(self.config.connect_timeout))
+            .timeout(StdDuration::from_secs(self.config.request_timeout))
+            .tcp_nodelay(true);
+
+        let channel = ep
+            .connect()
+            .await
+            .map_err(|e| NasError::Other(format!("连接失败: {}", e)))?;
+
+        let mut client = FileServiceClient::new(channel);
+        let req = tonic::Request::new(GetMetadataRequest {
+            file_id: file_id.to_string(),
+        });
+
+        match client.get_metadata(req).await {
+            Ok(resp) => {
+                let meta = resp.into_inner().metadata;
+                if let Some(m) = meta {
+                    Ok(m.hash == expected_hash)
+                } else {
+                    Ok(false)
+                }
+            }
+            Err(e) => Err(NasError::Other(format!(
+                "获取目标元数据失败以校验哈希: {}",
+                e
+            ))),
+        }
+    }
+
     fn backoff_delay(&self, attempt: u32) -> tokio::time::Duration {
         let base = self.config.retry_interval;
         let factor = 1u64 << attempt.min(5); // 上限 2^5 = 32

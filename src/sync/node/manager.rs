@@ -4,8 +4,9 @@
 use crate::error::{NasError, Result};
 use crate::sync::crdt::SyncManager;
 use chrono::{Local, NaiveDateTime};
+use rand::Rng;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tokio::time::{Duration, interval};
@@ -322,6 +323,21 @@ pub struct SyncStats {
     pub error_count: u32,
 }
 
+/// 失败补偿任务
+#[derive(Debug, Clone)]
+struct CompTask {
+    /// 任务 ID（scru128）
+    id: String,
+    /// 目标节点 ID
+    target_node_id: String,
+    /// 文件 ID
+    file_id: String,
+    /// 已尝试次数
+    attempt: u32,
+    /// 下次执行时间
+    next_at: NaiveDateTime,
+}
+
 /// 跨节点同步协调器
 pub struct NodeSyncCoordinator {
     /// 配置
@@ -334,6 +350,8 @@ pub struct NodeSyncCoordinator {
     storage: Arc<crate::storage::StorageManager>,
     /// 同步统计
     stats: Arc<RwLock<SyncStats>>,
+    /// 失败补偿队列
+    fail_queue: Arc<RwLock<VecDeque<CompTask>>>,
 }
 
 impl NodeSyncCoordinator {
@@ -349,7 +367,12 @@ impl NodeSyncCoordinator {
             sync_manager,
             storage,
             stats: Arc::new(RwLock::new(SyncStats::default())),
+            fail_queue: Arc::new(RwLock::new(VecDeque::new())),
         });
+
+        // 启动失败补偿后台任务
+        let comp_clone = this.clone();
+        tokio::spawn(async move { comp_clone.start_compensation_worker().await });
 
         // 订阅本地变更事件，触发快速 push
         let this_clone = this.clone();
@@ -378,6 +401,89 @@ impl NodeSyncCoordinator {
         });
 
         this
+    }
+
+    /// 入队失败补偿任务
+    async fn enqueue_compensation(&self, target_node_id: &str, file_id: &str, attempt: u32) {
+        let next_secs = Self::backoff_secs(attempt);
+        let when = Local::now().naive_local() + chrono::TimeDelta::seconds(next_secs as i64);
+        let task = CompTask {
+            id: scru128::new_string(),
+            target_node_id: target_node_id.to_string(),
+            file_id: file_id.to_string(),
+            attempt,
+            next_at: when,
+        };
+        {
+            let mut q = self.fail_queue.write().await;
+            q.push_back(task);
+        }
+        warn!(
+            "补偿入队: file_id={}, node={}, attempt={}, next_in={}s",
+            file_id, target_node_id, attempt, next_secs
+        );
+    }
+
+    fn backoff_secs(attempt: u32) -> u64 {
+        // 指数退避上限 60s，基础 2s，带抖动（0.8-1.2）
+        let base = 2u64.saturating_mul(1u64 << attempt.min(5));
+        let capped = base.min(60);
+        let mut rng = rand::thread_rng();
+        let jitter: f64 = rng.gen_range(0.8..=1.2);
+        ((capped as f64 * jitter).round() as u64).max(1)
+    }
+
+    /// 后台失败补偿 worker
+    async fn start_compensation_worker(self: Arc<Self>) {
+        let mut tick = interval(Duration::from_secs(1));
+        loop {
+            tick.tick().await;
+
+            let now = Local::now().naive_local();
+            let maybe_task = {
+                let mut q = self.fail_queue.write().await;
+                if let Some(front) = q.front() {
+                    if front.next_at <= now {
+                        q.pop_front()
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            };
+
+            let Some(task) = maybe_task else { continue };
+
+            // 执行单文件补偿同步
+            match self
+                .sync_to_node(&task.target_node_id, vec![task.file_id.clone()])
+                .await
+            {
+                Ok(n) if n > 0 => {
+                    info!(
+                        "补偿成功: file_id={}, node={}, attempt={}",
+                        task.file_id, task.target_node_id, task.attempt
+                    );
+                }
+                Ok(_) | Err(_) => {
+                    let next_attempt = task.attempt.saturating_add(1);
+                    if next_attempt <= (self.config.max_retries * 3).max(3) {
+                        self.enqueue_compensation(
+                            &task.target_node_id,
+                            &task.file_id,
+                            next_attempt,
+                        )
+                        .await;
+                    } else {
+                        error!(
+                            "补偿放弃: file_id={}, node={}, final_attempt={}",
+                            task.file_id, task.target_node_id, task.attempt
+                        );
+                    }
+                }
+            }
+        }
     }
 
     /// 同步文件到指定节点
@@ -504,7 +610,9 @@ impl NodeSyncCoordinator {
                                         file_id, file_size, node_address
                                     );
                                 } else {
-                                    // 校验不通过，按重试策略处理
+                                    // 校验不通过，入队补偿重试
+                                    self.enqueue_compensation(node_id, file_id, 1).await;
+                                    // 维持原有短暂等待与重试退出逻辑，避免阻塞批量
                                     retry_count += 1;
                                     if retry_count >= self.config.max_retries {
                                         warn!("达到最大重试次数（含校验失败），停止同步");
@@ -518,6 +626,8 @@ impl NodeSyncCoordinator {
                                     "文件同步失败: {} -> {}, 错误: {}",
                                     file_id, node_address, e
                                 );
+                                // 传输失败，入队补偿重试
+                                self.enqueue_compensation(node_id, file_id, 1).await;
                                 retry_count += 1;
 
                                 if retry_count >= self.config.max_retries {

@@ -85,7 +85,7 @@ curl -sS -D "$HEADERS_FILE" -o /dev/null --fail "${CURL_OPTS[@]}" -X OPTIONS "$B
 }
 DAV_CAP=$(grep -i "^dav:" "$HEADERS_FILE" | awk -F': ' '{print tolower($2)}' | tr -d '\r\n ')
 echo "DAV: $DAV_CAP"
-if [[ "$DAV_CAP" != *"1,2,ordered-collections"* && "$DAV_CAP" != *"1,2,ordered-collections"* ]]; then
+if [[ "$DAV_CAP" != *"1,2,ordered-collections"* && "$DAV_CAP" != *"1, 2, ordered-collections"* ]]; then
   echo "DAV 能力不包含 1,2,ordered-collections" >&2; exit 1
 fi
 

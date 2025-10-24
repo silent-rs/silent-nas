@@ -3,7 +3,7 @@
 目标：macOS Finder 可直接通过 “连接服务器 (⌘K)” 挂载并读写。
 
 ## 协议与路由
-- 基础路径：`/`（根路径挂载）。
+- 基础路径：`/`（根路径挂载，例如：`http://host:port/file.txt` 可直接访问根目录下文件）。
 - DAV 能力：`DAV: 1, 2, ordered-collections`。
 - Allow 方法：`OPTIONS, GET, HEAD, PUT, DELETE, PROPFIND, PROPPATCH, MKCOL, MOVE, COPY, LOCK, UNLOCK, VERSION-CONTROL, REPORT`。
 

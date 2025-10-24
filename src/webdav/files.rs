@@ -628,7 +628,7 @@ impl WebDavHandler {
                 std::env::var("HTTP_PORT")
                     .ok()
                     .and_then(|p| p.parse().ok())
-                    .unwrap_or(8081 - 1)
+                    .unwrap_or(8080)
             ));
         }
         if let Some(ref n) = self.notifier {

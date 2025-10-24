@@ -88,3 +88,117 @@ impl WebDavHandler {
         Ok(Response::empty())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    async fn build_handler() -> WebDavHandler {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Arc::new(crate::storage::StorageManager::new(
+            dir.path().to_path_buf(),
+            4 * 1024 * 1024,
+        ));
+        storage.init().await.unwrap();
+        let syncm = crate::sync::crdt::SyncManager::new("node-test".into(), storage.clone(), None);
+        let ver = crate::version::VersionManager::new(
+            storage.clone(),
+            Default::default(),
+            dir.path().to_str().unwrap(),
+        );
+        WebDavHandler::new(
+            storage,
+            None,
+            syncm,
+            "".into(),
+            "http://127.0.0.1:8080".into(),
+            ver,
+        )
+    }
+
+    #[tokio::test]
+    async fn test_lock_then_unlock_ok() {
+        let handler = build_handler().await;
+
+        // 发起 LOCK
+        let mut req = Request::empty();
+        req.headers_mut()
+            .insert("Timeout", http::HeaderValue::from_static("Second-120"));
+        let resp = handler.handle_lock("/doc.txt", &req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let lock_header = resp
+            .headers()
+            .get("Lock-Token")
+            .and_then(|v| v.to_str().ok())
+            .unwrap()
+            .to_string();
+        assert!(lock_header.contains("opaquelocktoken:"));
+
+        // 提取 token（去掉 <>）并 UNLOCK
+        let _token = lock_header.trim_matches(['<', '>']).to_string();
+        let mut unlock_req = Request::empty();
+        unlock_req.headers_mut().insert(
+            "Lock-Token",
+            http::HeaderValue::from_str(&lock_header).unwrap(),
+        );
+        let uresp = handler
+            .handle_unlock("/doc.txt", &unlock_req)
+            .await
+            .unwrap();
+        assert_eq!(uresp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_unlock_token_mismatch() {
+        let handler = build_handler().await;
+
+        // 先上锁
+        let req = Request::empty();
+        let _ = handler.handle_lock("/a.txt", &req).await.unwrap();
+
+        // 使用错误的 token 解锁
+        let mut bad = Request::empty();
+        bad.headers_mut().insert(
+            "Lock-Token",
+            http::HeaderValue::from_static("<opaquelocktoken:wrong-token>"),
+        );
+        let err = handler.handle_unlock("/a.txt", &bad).await.err().unwrap();
+        assert_eq!(err.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn test_ensure_lock_ok_with_if_header() {
+        let handler = build_handler().await;
+
+        // 上锁，拿到 token
+        let resp = handler
+            .handle_lock("/b.txt", &Request::empty())
+            .await
+            .unwrap();
+        let lock_header = resp
+            .headers()
+            .get("Lock-Token")
+            .and_then(|v| v.to_str().ok())
+            .unwrap()
+            .to_string();
+        let token = lock_header.trim_matches(['<', '>']).to_string();
+
+        // If 头包含 token 时通过
+        let mut ok_req = Request::empty();
+        ok_req.headers_mut().insert(
+            "If",
+            http::HeaderValue::from_str(&format!("(<{}>)", token)).unwrap(),
+        );
+        handler.ensure_lock_ok("/b.txt", &ok_req).await.unwrap();
+
+        // 无 If 或错误 token 返回 LOCKED
+        let bad_req = Request::empty();
+        let err = handler
+            .ensure_lock_ok("/b.txt", &bad_req)
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(err.status(), StatusCode::LOCKED);
+    }
+}

@@ -199,3 +199,62 @@ impl Handler for WebDavHandler {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_lock_token_format() {
+        let token = WebDavHandler::lock_token();
+        assert!(token.starts_with("opaquelocktoken:"));
+        // scru128 由 [0-9a-z] 和分隔符组成，一般长度固定
+        assert!(token.len() > 20);
+    }
+
+    #[test]
+    fn test_decode_path_ok() {
+        let s = WebDavHandler::decode_path("/dir/%E4%B8%AD%E6%96%87.txt").unwrap();
+        assert_eq!(s, "/dir/中文.txt");
+    }
+
+    #[tokio::test]
+    async fn test_build_full_href_rules() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Arc::new(StorageManager::new(
+            dir.path().to_path_buf(),
+            4 * 1024 * 1024,
+        ));
+        storage.init().await.unwrap();
+        let syncm = SyncManager::new("node-test".into(), storage.clone(), None);
+        let ver = crate::version::VersionManager::new(
+            storage.clone(),
+            Default::default(),
+            dir.path().to_str().unwrap(),
+        );
+        let handler = WebDavHandler::new(
+            storage,
+            None,
+            syncm,
+            "".into(),
+            "http://127.0.0.1:8080".into(),
+            ver,
+        );
+        assert_eq!(handler.build_full_href("/"), "/");
+        assert_eq!(handler.build_full_href("/a/b"), "/a/b");
+        assert_eq!(handler.build_full_href("a/b"), "/a/b");
+    }
+
+    #[test]
+    fn test_parse_timeout() {
+        let mut req = Request::empty();
+        req.headers_mut()
+            .insert("Timeout", http::HeaderValue::from_static("Second-120"));
+        assert_eq!(WebDavHandler::parse_timeout(&req), 120);
+
+        let mut req2 = Request::empty();
+        req2.headers_mut()
+            .insert("Timeout", http::HeaderValue::from_static("Infinite"));
+        assert_eq!(WebDavHandler::parse_timeout(&req2), 3600);
+    }
+}

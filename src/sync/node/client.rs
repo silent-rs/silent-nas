@@ -588,6 +588,32 @@ mod tests {
     }
 
     #[test]
+    fn test_should_retry_and_backoff() {
+        let client = NodeSyncClient::new(
+            "127.0.0.1:50051".into(),
+            ClientConfig {
+                connect_timeout: 1,
+                request_timeout: 1,
+                max_retries: 3,
+                retry_interval: 5,
+            },
+        );
+        // 可重试状态
+        assert!(client.should_retry(&Status::unavailable("")));
+        assert!(client.should_retry(&Status::deadline_exceeded("")));
+        // 不可重试
+        assert!(!client.should_retry(&Status::invalid_argument("")));
+
+        // 退避：5, 10, 20, 40, 60(封顶)
+        assert_eq!(client.backoff_delay(0).as_secs(), 5);
+        assert_eq!(client.backoff_delay(1).as_secs(), 10);
+        assert_eq!(client.backoff_delay(2).as_secs(), 20);
+        assert_eq!(client.backoff_delay(3).as_secs(), 40);
+        assert_eq!(client.backoff_delay(5).as_secs(), 60);
+        assert_eq!(client.backoff_delay(6).as_secs(), 60);
+    }
+
+    #[test]
     fn test_sync_status_info() {
         let status = SyncStatusInfo {
             total_files: 100,

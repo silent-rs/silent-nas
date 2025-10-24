@@ -890,4 +890,32 @@ mod tests {
         assert!(stats.last_sync_time.is_some());
         assert_eq!(stats.error_count, 5);
     }
+
+    #[test]
+    fn test_backoff_secs_bounds_and_cap() {
+        // 所有值应在 [1, 72] 内（60*1.2 抖动上限），不保证严格单调
+        for i in 0..10 {
+            let v = NodeSyncCoordinator::backoff_secs(i);
+            assert!((1..=72).contains(&v), "backoff {} out of range: {}", i, v);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_enqueue_compensation() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Arc::new(crate::storage::StorageManager::new(
+            dir.path().to_path_buf(),
+            4 * 1024 * 1024,
+        ));
+        storage.init().await.unwrap();
+        let syncm = SyncManager::new("node-test".into(), storage.clone(), None);
+        let nm = NodeManager::new(NodeDiscoveryConfig::default(), syncm.clone());
+        let coord = NodeSyncCoordinator::new(SyncConfig::default(), nm, syncm, storage);
+        coord.enqueue_compensation("node-x", "file-1", 0).await;
+        let q = coord.fail_queue.read().await;
+        assert_eq!(q.len(), 1);
+        let t = q.front().unwrap();
+        assert_eq!(t.target_node_id, "node-x");
+        assert_eq!(t.file_id, "file-1");
+    }
 }

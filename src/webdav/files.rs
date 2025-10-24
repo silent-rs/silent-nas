@@ -799,3 +799,143 @@ impl WebDavHandler {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    async fn build_handler() -> WebDavHandler {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Arc::new(crate::storage::StorageManager::new(
+            dir.path().to_path_buf(),
+            4 * 1024 * 1024,
+        ));
+        storage.init().await.unwrap();
+        let syncm = crate::sync::crdt::SyncManager::new("node-test".into(), storage.clone(), None);
+        let ver = crate::version::VersionManager::new(
+            storage.clone(),
+            Default::default(),
+            dir.path().to_str().unwrap(),
+        );
+        WebDavHandler::new(
+            storage,
+            None,
+            syncm,
+            "".into(),
+            "http://127.0.0.1:8080".into(),
+            ver,
+        )
+    }
+
+    #[tokio::test]
+    async fn test_calc_etag_from_meta_and_dir_etag() {
+        // 临时目录与文件
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("a.txt");
+        tokio::fs::write(&file_path, b"hello").await.unwrap();
+
+        // 文件 etag
+        let meta = std::fs::metadata(&file_path).unwrap();
+        let etag = WebDavHandler::calc_etag_from_meta(&meta).unwrap();
+        assert!(etag.starts_with('\"') && etag.ends_with('\"'));
+
+        // 目录 etag（非空目录）
+        let detag = WebDavHandler::calc_dir_etag(dir.path()).await.unwrap();
+        assert!(detag.starts_with('\"') && detag.ends_with('\"'));
+    }
+
+    #[tokio::test]
+    async fn test_propfind_depth_infinity_and_head_get() {
+        let handler = build_handler().await;
+
+        // 准备目录与文件
+        let root = handler.storage.root_dir().to_path_buf();
+        let data_root = root.join("data");
+        tokio::fs::create_dir_all(data_root.join("dir/sub"))
+            .await
+            .unwrap();
+        let fpath = handler.storage.get_full_path("/dir/sub/a.txt");
+        tokio::fs::write(&fpath, b"hello").await.unwrap();
+
+        // PROPFIND Depth: infinity
+        let mut req = Request::empty();
+        req.headers_mut()
+            .insert("Depth", http::HeaderValue::from_static("infinity"));
+        let resp = handler.handle_propfind("/dir", &req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::MULTI_STATUS);
+        // 仅校验头部存在，XML 体内容不做解析（已覆盖生成路径）
+        assert_eq!(
+            resp.headers()
+                .get(http::header::CONTENT_TYPE)
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            CONTENT_TYPE_XML
+        );
+
+        // HEAD 文件
+        let head = handler
+            .handle_head("/dir/sub/a.txt", &Request::empty())
+            .await
+            .unwrap();
+        assert_eq!(head.status(), StatusCode::OK);
+        assert!(head.headers().get(http::header::CONTENT_LENGTH).is_some());
+
+        // GET If-None-Match 命中返回 304
+        let meta = std::fs::metadata(&fpath).unwrap();
+        let etag = WebDavHandler::calc_etag_from_meta(&meta).unwrap();
+        let mut get_req = Request::empty();
+        get_req
+            .headers_mut()
+            .insert("If-None-Match", http::HeaderValue::from_str(&etag).unwrap());
+        let not_mod = handler
+            .handle_get("/dir/sub/a.txt", &get_req)
+            .await
+            .unwrap();
+        assert_eq!(not_mod.status(), StatusCode::NOT_MODIFIED);
+    }
+
+    #[tokio::test]
+    async fn test_mkcol_move_copy() {
+        let handler = build_handler().await;
+
+        // MKCOL 创建目录
+        let mk = handler.handle_mkcol("/mk/a").await.unwrap();
+        assert_eq!(mk.status(), StatusCode::CREATED);
+        assert!(handler.storage.get_full_path("/mk/a").exists());
+
+        // 创建源文件
+        tokio::fs::write(handler.storage.get_full_path("/mk/a/x.txt"), b"data")
+            .await
+            .unwrap();
+
+        // MOVE 到新路径
+        let http_req = http::Request::builder()
+            .method("MOVE")
+            .uri("/mk/a/x.txt")
+            .header("Destination", "/mk/b/y.txt")
+            .body(())
+            .unwrap();
+        let (parts, _) = http_req.into_parts();
+        let req = Request::from_parts(parts, ReqBody::Empty);
+        let mv = handler.handle_move("/mk/a/x.txt", &req).await.unwrap();
+        assert_eq!(mv.status(), StatusCode::CREATED);
+        assert!(handler.storage.get_full_path("/mk/b/y.txt").exists());
+        assert!(!handler.storage.get_full_path("/mk/a/x.txt").exists());
+
+        // COPY 复制文件
+        let http_req2 = http::Request::builder()
+            .method("COPY")
+            .uri("/mk/b/y.txt")
+            .header("Destination", "/mk/c/z.txt")
+            .body(())
+            .unwrap();
+        let (parts2, _) = http_req2.into_parts();
+        let req2 = Request::from_parts(parts2, ReqBody::Empty);
+        let cp = handler.handle_copy("/mk/b/y.txt", &req2).await.unwrap();
+        assert_eq!(cp.status(), StatusCode::CREATED);
+        assert!(handler.storage.get_full_path("/mk/c/z.txt").exists());
+        assert!(handler.storage.get_full_path("/mk/b/y.txt").exists());
+    }
+}

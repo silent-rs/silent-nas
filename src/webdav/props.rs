@@ -118,3 +118,79 @@ impl WebDavHandler {
         Ok(resp)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    async fn build_handler() -> WebDavHandler {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Arc::new(crate::storage::StorageManager::new(
+            dir.path().to_path_buf(),
+            4 * 1024 * 1024,
+        ));
+        storage.init().await.unwrap();
+        let syncm = crate::sync::crdt::SyncManager::new("node-test".into(), storage.clone(), None);
+        let ver = crate::version::VersionManager::new(
+            storage.clone(),
+            Default::default(),
+            dir.path().to_str().unwrap(),
+        );
+        WebDavHandler::new(
+            storage,
+            None,
+            syncm,
+            "".into(),
+            "http://127.0.0.1:8080".into(),
+            ver,
+        )
+    }
+
+    fn make_request_with_body(method: &str, path: &str, body: &str) -> Request {
+        let http_req = http::Request::builder()
+            .method(method)
+            .uri(path)
+            .body(())
+            .unwrap();
+        let (parts, _b) = http_req.into_parts();
+        Request::from_parts(parts, ReqBody::Once(body.as_bytes().to_vec().into()))
+    }
+
+    #[tokio::test]
+    async fn test_proppatch_set_and_remove() {
+        let handler = build_handler().await;
+        let path = "/p.txt";
+
+        // set 属性
+        let set_xml = r#"
+<D:propertyupdate xmlns:D="DAV:">
+  <D:set><D:prop><Z:category xmlns:Z="urn:x-example">interop</Z:category></D:prop></D:set>
+</D:propertyupdate>
+"#;
+        let mut req = make_request_with_body("PROPPATCH", path, set_xml);
+        handler.handle_proppatch(path, &mut req).await.unwrap();
+        {
+            let props = handler.props.read().await;
+            let entry = props.get(path).unwrap();
+            // 记录的键为元素名（包含前缀）
+            assert_eq!(entry.get("Z:category").unwrap(), "interop");
+            assert!(entry.contains_key("prop:last-proppatch"));
+        }
+
+        // remove 属性
+        let remove_xml = r#"
+<D:propertyupdate xmlns:D="DAV:">
+  <D:remove><D:prop><Z:category xmlns:Z="urn:x-example"></Z:category></D:prop></D:remove>
+</D:propertyupdate>
+"#;
+        let mut req2 = make_request_with_body("PROPPATCH", path, remove_xml);
+        handler.handle_proppatch(path, &mut req2).await.unwrap();
+        {
+            let props = handler.props.read().await;
+            let entry = props.get(path).unwrap();
+            assert!(!entry.contains_key("Z:category"));
+            assert!(entry.contains_key("prop:last-proppatch"));
+        }
+    }
+}

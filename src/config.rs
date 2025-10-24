@@ -10,8 +10,10 @@ pub struct Config {
     pub s3: S3Config,
     pub auth: AuthConfig,
     /// 节点发现/心跳配置
+    #[serde(default)]
     pub node: NodeConfig,
     /// 跨节点同步行为配置
+    #[serde(default)]
     pub sync: SyncBehaviorConfig,
 }
 
@@ -57,6 +59,17 @@ pub struct NodeConfig {
     pub node_timeout: i64,
 }
 
+impl Default for NodeConfig {
+    fn default() -> Self {
+        Self {
+            enable: true,
+            seed_nodes: Vec::new(),
+            heartbeat_interval: 10,
+            node_timeout: 30,
+        }
+    }
+}
+
 /// 跨节点同步行为配置（对应 SyncConfig）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncBehaviorConfig {
@@ -68,6 +81,17 @@ pub struct SyncBehaviorConfig {
     pub max_files_per_sync: usize,
     /// 失败重试次数
     pub max_retries: u32,
+}
+
+impl Default for SyncBehaviorConfig {
+    fn default() -> Self {
+        Self {
+            auto_sync: true,
+            sync_interval: 60,
+            max_files_per_sync: 100,
+            max_retries: 3,
+        }
+    }
 }
 
 /// 认证配置

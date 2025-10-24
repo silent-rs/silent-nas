@@ -1,51 +1,39 @@
-# Silent-NAS 开发任务清单
+# Silent-NAS 开发任务清单（仅待完成项）
 
 当前版本: v0.6.0-dev
 
-产品路线图: [ROADMAP.md](ROADMAP.md) | 架构文档: [README.md](README.md)
-
----
-
-## 当前状态
-
-- 已完成: 多协议支持、文件管理、CRDT 同步、监控审计、认证 Phase 1
-- 技术指标: 176 测试(100%通过) | 覆盖率 86.38% | API 60+
+产品路线图: [ROADMAP.md](ROADMAP.md)
 
 ---
 
 ## P0 当前迭代目标（v0.6.0 核心）
 
 1) 分布式文件同步（gRPC 跨节点）
-- 已完成：
-  - gRPC 服务端 NodeSyncService（register_node/heartbeat/list/sync_file_state/request_file_sync/transfer/stream）
-  - gRPC 客户端 NodeSyncClient（注册、心跳、请求同步、状态同步、传输/流式）
-  - 文件状态同步与冲突检测（VectorClock + LWW 兜底）
-  - 同步协调器 NodeSyncCoordinator（sync_to_node/request_files_from_node/auto_sync）
-  - 管理路由与查询：`/admin/sync/*`、`/sync/*`
-- 待完善：
- - 重试与回退：请求/传输的超时、指数退避、错误分级
-  - 一致性与校验：端到端哈希校验、失败补偿重拉
-  - 自动同步稳定性：参数可配（并发/批量/间隔）、观测指标补全
-  - 端到端演练：3 节点拓扑压测与延迟/冲突指标采集（< 5s）
-  - 文档同步：运行参数与调试指引
-
-  - 进展：
-    - 已为 gRPC 客户端接入连接/请求超时与重试
-    - 服务端流式上传增加分块 MD5 校验，失败立即返回
+- 待完成：
+  - 重试与回退：
+    - 统一连接/请求/流式传输超时
+    - 指数退避 + 抖动策略（设置最大退避与总预算时间）
+    - 错误分级：Retriable/Non‑retriable/Fatal 与原因码定义
+  - 一致性与校验：
+    - 端到端 SHA‑256 校验（分块 MD5 已在服务端校验）
+    - 失败补偿重拉：失败队列 + 后台 worker（带退避）
+    - 指标：成功率/重试次数/阶段时延/吞吐量上报
+  - 自动同步稳定性：
+    - 并发/批量/间隔参数可配（支持热更新或定时重载）
+    - 同步阶段埋点：连接/状态同步/内容传输
+  - 端到端演练：
+    - 三节点拓扑压测脚本：`scripts/sync_3nodes_benchmark.sh`
+    - 验收阈值：延迟 < 5s，成功率 > 99.9%
+  - 文档同步：
+    - 运行参数与调试指引、故障注入与排障章节
 
 2) WebDAV 协议完善
-- 已完成（基础）：
-  - 方法：OPTIONS / PROPFIND / HEAD / GET / PUT / DELETE / MKCOL / MOVE / COPY
-  - 锁管理：LOCK / UNLOCK（独占锁、Timeout 解析、Lock-Token 返回、If 条件校验、持久化）
-  - 自定义属性：PROPPATCH（set/remove 简化 XML 解析，属性持久化）
-  - 版本控制：DeltaV 最小闭环（PUT 后创建版本、VERSION-CONTROL 标记、REPORT 版本列表）
-  - 互通验证：脚本 ./scripts/webdav_interop_test.sh（零配置，端到端验证）
-- 待优化：
-  - 共享锁完整语义与冲突矩阵、LOCK Body 解析完善
-  - If 头完整表达式（多资源/多令牌/并列条件）
-  - PROPPATCH 命名空间与复杂属性校验、属性模型结构化
-  - REPORT 报告类型扩展与过滤场景
-  - 客户端互通用例完善（Cyberduck/Nextcloud）
+- 待完成：
+  - 锁与并发：共享锁完整语义与冲突矩阵、LOCK Body 解析完善
+  - 条件请求：If 头完整表达式（多资源/多令牌/并列条件）
+  - 属性模型：PROPPATCH 命名空间解析与属性模型结构化、复杂属性校验
+  - 报告扩展：REPORT 报告类型扩展与过滤场景
+  - 互通用例：完善 Cyberduck/Nextcloud 用例与结果记录
 
 ---
 
@@ -71,18 +59,3 @@
 - 错误码与日志规范统一（跨服务一致性）
 - 事件监听回退链路复查（HTTP 拉取失败 -> WebDAV 回退的健壮性）
 - WebDAV 路径与存储路径的边界与转义规则对齐
-
----
-
-## 开发规范
-
-- Git 分支: `main` | `feat/*` | `fix/*`
-- 提交信息: `feat:` `fix:` `docs:` `refactor:` `test:`（遵循项目提交规范）
-- 测试标准: 单元 > 80% | 关键路径 > 90%
-- DoD: 代码 + 测试 + 审查 + CI + 文档
-
----
-
-## 备注
-
-- 本清单已与最新 ROADMAP 同步，已移出企业级相关内容至“后续拓展（Enterprise）”。

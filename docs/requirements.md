@@ -3,7 +3,7 @@
 目标：macOS Finder 可直接通过 “连接服务器 (⌘K)” 挂载并读写。
 
 ## 协议与路由
-- 基础路径：`/` 或 `/webdav`（以配置为准）。
+- 基础路径：`/`（根路径挂载）。
 - DAV 能力：`DAV: 1, 2, ordered-collections`。
 - Allow 方法：`OPTIONS, GET, HEAD, PUT, DELETE, PROPFIND, PROPPATCH, MKCOL, MOVE, COPY, LOCK, UNLOCK, VERSION-CONTROL, REPORT`。
 
@@ -21,7 +21,7 @@
 ### 命名空间与 href 规则（Finder 关键要求）
 - DAV 命名空间使用带前缀格式：在根元素声明 `xmlns:D="DAV:"`，所有 DAV 元素使用 `D:` 前缀（如 `D:multistatus/D:response/D:resourcetype/D:collection`）。
 - `D:href` 必须为相对路径（不包含 schema/host/port）。
-- 目录必须以尾斜杠结尾：`/`、`/webdav/`、`/dir/`。
+- 目录必须以尾斜杠结尾：`/`、`/dir/`。
 - 根目录使用 `/`。
 
 ## 锁（Class 2 WebDAV）

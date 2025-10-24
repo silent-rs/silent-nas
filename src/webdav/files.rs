@@ -6,16 +6,21 @@ use std::path::Path;
 use tokio::fs;
 
 impl WebDavHandler {
+    fn insert_header_case(headers: &mut http::HeaderMap, name: &str, value: &str) {
+        // 尝试以原始大小写写入（若底层实现不接受，则回退小写）
+        let name_upper = http::header::HeaderName::from_bytes(name.as_bytes())
+            .or_else(|_| http::header::HeaderName::from_bytes(name.to_ascii_lowercase().as_bytes()))
+            .expect("invalid header name");
+        if let Ok(val) = http::HeaderValue::from_str(value) {
+            headers.insert(name_upper, val);
+        }
+    }
     pub(super) async fn handle_options(&self) -> silent::Result<Response> {
         let mut resp = Response::empty();
-        resp.headers_mut().insert(
-            http::header::HeaderName::from_static(HEADER_DAV),
-            http::HeaderValue::from_static(HEADER_DAV_VALUE),
-        );
-        resp.headers_mut().insert(
-            http::header::ALLOW,
-            http::HeaderValue::from_static(HEADER_ALLOW_VALUE),
-        );
+        // 设置 Finder 期望的大小写：DAV / Allow / Server
+        Self::insert_header_case(resp.headers_mut(), "DAV", HEADER_DAV_VALUE);
+        Self::insert_header_case(resp.headers_mut(), "Allow", HEADER_ALLOW_VALUE);
+        Self::insert_header_case(resp.headers_mut(), "Server", "SilentWebDAV/0.1");
         Ok(resp)
     }
 
@@ -30,10 +35,30 @@ impl WebDavHandler {
             .get("Depth")
             .and_then(|v| v.to_str().ok())
             .unwrap_or("0");
+
+        tracing::debug!(
+            "PROPFIND path='{}' depth='{}' user-agent={:?}",
+            path,
+            depth,
+            req.headers().get("User-Agent")
+        );
+
         let storage_path = self.storage.get_full_path(&path);
-        let metadata = fs::metadata(&storage_path)
-            .await
-            .map_err(|_| SilentError::business_error(StatusCode::NOT_FOUND, "路径不存在"))?;
+        let metadata = fs::metadata(&storage_path).await.map_err(|e| {
+            tracing::error!(
+                "PROPFIND 路径不存在: {} -> {:?}, error: {}",
+                path,
+                storage_path,
+                e
+            );
+            SilentError::business_error(StatusCode::NOT_FOUND, "路径不存在")
+        })?;
+
+        tracing::debug!(
+            "PROPFIND metadata: is_dir={}, len={}",
+            metadata.is_dir(),
+            metadata.len()
+        );
 
         let mut xml = String::new();
         xml.push_str(XML_HEADER);
@@ -75,12 +100,21 @@ impl WebDavHandler {
             Self::add_prop_response(&mut xml, &full_href, &storage_path, false).await;
         }
         xml.push_str(XML_MULTISTATUS_END);
+
+        // 添加调试日志，查看实际返回的 XML 内容
+        tracing::debug!("PROPFIND {} Depth:{} XML: {}", path, depth, xml);
+
         let mut resp = Response::text(&xml);
         resp.set_status(StatusCode::MULTI_STATUS);
         resp.headers_mut().insert(
             http::header::CONTENT_TYPE,
             http::HeaderValue::from_static(CONTENT_TYPE_XML),
         );
+        // 额外补充 Server 头,提升 Finder 兼容性
+        Self::insert_header_case(resp.headers_mut(), "Server", "SilentWebDAV/0.1");
+        // 在 PROPFIND 中也返回 DAV/Allow，部分 Finder 版本会检查
+        Self::insert_header_case(resp.headers_mut(), "DAV", HEADER_DAV_VALUE);
+        Self::insert_header_case(resp.headers_mut(), "Allow", HEADER_ALLOW_VALUE);
         // 显式设置 Content-Length 满足严格客户端（例如 Finder）
         if let Ok(len) = http::HeaderValue::from_str(&xml.len().to_string()) {
             resp.headers_mut().insert(http::header::CONTENT_LENGTH, len);
@@ -103,11 +137,8 @@ impl WebDavHandler {
         xml.push_str(&format!("<D:href>{}</D:href>", href_with_slash));
         xml.push_str("<D:propstat>");
         xml.push_str("<D:prop>");
-        // 声明支持的锁类型（Finder 通过该属性判断是否支持 LOCK）
-        xml.push_str(
-            "<D:supportedlock><D:lockentry><D:lockscope><D:exclusive/></D:lockscope><D:locktype><D:write/></D:locktype></D:lockentry></D:supportedlock>",
-        );
-        // displayname
+
+        // displayname - 必须在最前面，macOS Finder 严格要求
         let displayname = if href_with_slash == "/" {
             "/".to_string()
         } else {
@@ -115,8 +146,15 @@ impl WebDavHandler {
             s.rsplit('/').next().unwrap_or(s).to_string()
         };
         xml.push_str(&format!("<D:displayname>{}</D:displayname>", displayname));
+
+        // resourcetype - 必须明确声明集合类型，macOS Finder 严格检查
         if is_dir {
             xml.push_str("<D:resourcetype><D:collection/></D:resourcetype>");
+            // macOS Finder 期望目录也有 getcontentlength (通常为0或目录大小)
+            xml.push_str(&format!(
+                "<D:getcontentlength>{}</D:getcontentlength>",
+                metadata.len()
+            ));
         } else {
             xml.push_str("<D:resourcetype/>");
             xml.push_str(&format!(

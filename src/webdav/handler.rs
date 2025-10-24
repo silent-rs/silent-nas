@@ -157,7 +157,13 @@ impl WebDavHandler {
     }
 
     pub(super) fn build_full_href(&self, relative_path: &str) -> String {
-        format!("{}{}", &self.base_path, relative_path)
+        // Finder 期望 href 为相对路径（不含 schema/host），目录以尾斜杠结尾
+        // base_path 作为相对前缀（通常为空字符串）
+        let mut path = format!("{}{}", &self.base_path, relative_path);
+        if !path.starts_with('/') {
+            path = format!("/{}", path);
+        }
+        path
     }
 }
 

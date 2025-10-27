@@ -22,6 +22,7 @@ use error::Result;
 use event_listener::EventListener;
 use notify::EventNotifier;
 use rpc::FileServiceImpl;
+use sha2::Digest;
 use silent::prelude::*;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -101,6 +102,11 @@ async fn main() -> Result<()> {
             config.nats.topic_prefix.clone(),
             storage.clone(),
             config.storage.chunk_size,
+            config.sync.http_connect_timeout,
+            config.sync.http_request_timeout,
+            config.sync.fetch_max_retries,
+            config.sync.fetch_base_backoff,
+            config.sync.fetch_max_backoff,
         );
         let mut shutdown_rx_clone = shutdown_rx.clone();
         tokio::spawn(async move {
@@ -148,55 +154,79 @@ async fn main() -> Result<()> {
     });
     server_handles.push(http_handle);
 
-    // 启动定期巡检补拉任务
-    let storage_reconcile = storage.clone();
-    let sync_reconcile = sync_manager.clone();
-    let mut shutdown_rx_reconcile = shutdown_rx.clone();
-    tokio::spawn(async move {
-        use tokio::time::{Duration, sleep};
-        loop {
-            tokio::select! {
-                _ = sleep(Duration::from_secs(30)) => {
-                    let states = sync_reconcile.get_all_sync_states().await;
-                    for st in states {
-                        if st.is_deleted() {
-                            continue;
-                        }
-                        if let Some(meta) = st.get_metadata().cloned() {
-                            let need_fetch = match storage_reconcile.get_metadata(&st.file_id).await {
-                                Ok(local) => local.hash != meta.hash || local.size != meta.size,
-                                Err(_) => true,
-                            };
-                            if need_fetch
-                                && let Some(src) = sync_reconcile.get_last_source(&st.file_id).await
-                            {
-                                let url = format!("{}/api/files/{}", src.trim_end_matches('/'), st.file_id);
-                                match reqwest::get(&url).await {
-                                    Ok(resp) if resp.status().is_success() => {
-                                        if let Ok(bytes) = resp.bytes().await {
-                                            if let Err(e) =
-                                                storage_reconcile.save_file(&st.file_id, &bytes).await
-                                            {
-                                                error!("补拉保存失败: {} - {}", st.file_id, e);
-                                            } else {
-                                                info!("📥 补拉已完成: {}", st.file_id);
+    // 启动定期巡检补拉任务（仅在多节点/NATS开启时需要）
+    if notifier.is_some() {
+        let storage_reconcile = storage.clone();
+        let sync_reconcile = sync_manager.clone();
+        let sync_cfg_reconcile = config.sync.clone();
+        let mut shutdown_rx_reconcile = shutdown_rx.clone();
+        tokio::spawn(async move {
+            use tokio::time::{Duration, sleep};
+            loop {
+                tokio::select! {
+                    _ = sleep(Duration::from_secs(30)) => {
+                        let states = sync_reconcile.get_all_sync_states().await;
+                        for st in states {
+                            if st.is_deleted() { continue; }
+                            if let Some(meta) = st.get_metadata().cloned() {
+                                let need_fetch = match storage_reconcile.get_metadata(&st.file_id).await {
+                                    Ok(local) => local.hash != meta.hash || local.size != meta.size,
+                                    Err(_) => true,
+                                };
+                                if need_fetch && let Some(src) = sync_reconcile.get_last_source(&st.file_id).await {
+                                    let client = reqwest::Client::builder()
+                                        .connect_timeout(Duration::from_secs(sync_cfg_reconcile.http_connect_timeout))
+                                        .timeout(Duration::from_secs(sync_cfg_reconcile.http_request_timeout))
+                                        .build()
+                                        .unwrap_or_else(|_| reqwest::Client::new());
+                                    let url = format!("{}/api/files/{}", src.trim_end_matches('/'), st.file_id);
+                                    let mut last_err: Option<String> = None;
+                                    let mut ok = false;
+                                    for attempt in 0..=sync_cfg_reconcile.fetch_max_retries {
+                                        match client.get(&url).send().await {
+                                            Ok(resp) if resp.status().is_success() => {
+                                                if let Ok(bytes) = resp.bytes().await {
+                                                    let actual = format!("{:x}", sha2::Sha256::digest(&bytes));
+                                                    if actual != meta.hash {
+                                                        last_err = Some(format!("哈希不一致 expected={} actual={}", meta.hash, actual));
+                                                    } else if let Err(e) = storage_reconcile.save_file(&st.file_id, &bytes).await {
+                                                        last_err = Some(format!("保存失败: {}", e));
+                                                    } else {
+                                                        info!("📥 补拉已完成: {}", st.file_id);
+                                                        ok = true;
+                                                        break;
+                                                    }
+                                                }
                                             }
+                                            Ok(resp) => { last_err = Some(format!("HTTP {}", resp.status())); }
+                                            Err(e) => { last_err = Some(format!("请求失败: {}", e)); }
+                                        }
+                                        if attempt < sync_cfg_reconcile.fetch_max_retries {
+                                            let factor = 1u64 << (attempt.min(6));
+                                            let mut secs = sync_cfg_reconcile.fetch_base_backoff.saturating_mul(factor);
+                                            if secs > sync_cfg_reconcile.fetch_max_backoff { secs = sync_cfg_reconcile.fetch_max_backoff; }
+                                            let jitter = rand::random::<f64>() * 0.4 + 0.8;
+                                            let dur = Duration::from_secs(((secs as f64) * jitter).round() as u64);
+                                            sleep(dur).await;
                                         }
                                     }
-                                    Ok(resp) => warn!("补拉HTTP失败: {} - {}", st.file_id, resp.status()),
-                                    Err(e) => warn!("补拉请求失败: {} - {}", st.file_id, e),
+                                    if !ok {
+                                        warn!("补拉失败: {} - {}", st.file_id, last_err.unwrap_or_else(||"unknown".into()));
+                                    }
                                 }
                             }
                         }
                     }
-                }
-                _ = shutdown_rx_reconcile.changed() => {
-                    info!("巡检补拉任务收到退出信号");
-                    break;
+                    _ = shutdown_rx_reconcile.changed() => {
+                        info!("巡检补拉任务收到退出信号");
+                        break;
+                    }
                 }
             }
-        }
-    });
+        });
+    } else {
+        debug!("跳过巡检补拉任务（单节点或 NATS 未启用）");
+    }
 
     // 启动 gRPC 服务器
     let grpc_addr: SocketAddr = format!("{}:{}", config.server.host, config.server.grpc_port)

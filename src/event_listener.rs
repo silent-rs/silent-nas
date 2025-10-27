@@ -4,8 +4,15 @@ use crate::storage::StorageManager;
 use crate::sync::crdt::{FileSync, SyncManager};
 use crate::sync::incremental::IncrementalSyncHandler;
 use futures_util::StreamExt;
+use sha2::{Digest, Sha256};
 use std::sync::Arc;
+use tokio::time::{Duration, sleep};
 use tracing::{debug, error, info, warn};
+
+fn jittered_secs(base: u64) -> u64 {
+    let jitter = rand::random::<f64>() * 0.4 + 0.8; // 0.8~1.2
+    ((base as f64) * jitter).round() as u64
+}
 
 /// NATS 事件监听器
 /// 监听其他节点的文件变更事件并触发本地同步
@@ -15,16 +22,28 @@ pub struct EventListener {
     topic_prefix: String,
     storage: Arc<StorageManager>,
     inc_sync_handler: Arc<IncrementalSyncHandler>,
+    // 拉取/退避配置
+    http_connect_timeout: u64,
+    http_request_timeout: u64,
+    fetch_max_retries: u32,
+    fetch_base_backoff: u64,
+    fetch_max_backoff: u64,
 }
 
 impl EventListener {
     /// 创建事件监听器
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         sync_manager: Arc<SyncManager>,
         nats_client: async_nats::Client,
         topic_prefix: String,
         storage: StorageManager,
         chunk_size: usize,
+        http_connect_timeout: u64,
+        http_request_timeout: u64,
+        fetch_max_retries: u32,
+        fetch_base_backoff: u64,
+        fetch_max_backoff: u64,
     ) -> Self {
         let storage_arc = Arc::new(storage);
         let inc_sync_handler =
@@ -36,7 +55,21 @@ impl EventListener {
             topic_prefix,
             storage: storage_arc,
             inc_sync_handler,
+            http_connect_timeout,
+            http_request_timeout,
+            fetch_max_retries,
+            fetch_base_backoff,
+            fetch_max_backoff,
         }
+    }
+
+    fn backoff_delay(&self, attempt: u32) -> Duration {
+        let factor = 1u64 << attempt.min(6);
+        let mut secs = self.fetch_base_backoff.saturating_mul(factor);
+        if secs > self.fetch_max_backoff {
+            secs = self.fetch_max_backoff;
+        }
+        Duration::from_secs(jittered_secs(secs).max(1))
     }
 
     /// 启动事件监听
@@ -108,7 +141,7 @@ impl EventListener {
                             };
 
                             if need_fetch {
-                                // 优先尝试增量同步
+                                // 优先尝试增量同步（完成后进行端到端哈希校验）
                                 info!("尝试增量同步文件: {}", event.file_id);
                                 match self
                                     .inc_sync_handler
@@ -116,133 +149,154 @@ impl EventListener {
                                     .await
                                 {
                                     Ok(data) => {
-                                        // 优先按元数据路径保存
-                                        let save_res = if let Some(meta) = event.metadata.as_ref() {
-                                            if !meta.path.is_empty() {
-                                                self.storage.save_at_path(&meta.path, &data).await
+                                        let actual = format!("{:x}", Sha256::digest(&data));
+                                        if actual == expected_hash {
+                                            let save_res = if let Some(meta) =
+                                                event.metadata.as_ref()
+                                            {
+                                                if !meta.path.is_empty() {
+                                                    self.storage
+                                                        .save_at_path(&meta.path, &data)
+                                                        .await
+                                                } else {
+                                                    self.storage
+                                                        .save_file(&event.file_id, &data)
+                                                        .await
+                                                }
                                             } else {
                                                 self.storage.save_file(&event.file_id, &data).await
+                                            };
+                                            match save_res {
+                                                Ok(_) => {
+                                                    crate::metrics::record_sync_operation(
+                                                        "incremental",
+                                                        "success",
+                                                        data.len() as u64,
+                                                    );
+                                                    info!(
+                                                        "✅ 增量同步完成并通过哈希校验: {}",
+                                                        event.file_id
+                                                    );
+                                                    return Ok(());
+                                                }
+                                                Err(e) => {
+                                                    error!(
+                                                        "保存增量同步内容失败: {} - {}",
+                                                        event.file_id, e
+                                                    );
+                                                }
                                             }
                                         } else {
-                                            self.storage.save_file(&event.file_id, &data).await
-                                        };
-
-                                        if let Err(e) = save_res {
-                                            error!(
-                                                "保存增量同步内容失败: {} - {}",
-                                                event.file_id, e
+                                            warn!(
+                                                "增量同步哈希不一致: {} expected={} actual={}",
+                                                event.file_id, expected_hash, actual
                                             );
-                                        } else {
-                                            info!("✅ 增量同步完成并保存: {}", event.file_id);
                                         }
-                                        return Ok(()); // 增量同步成功，提前返回
                                     }
                                     Err(e) => {
                                         warn!(
                                             "增量同步失败，回退到全量下载: {} - {}",
                                             event.file_id, e
                                         );
-                                        // 继续执行全量下载逻辑
                                     }
                                 }
 
-                                // Fallback: 全量下载
-                                let url = format!(
+                                // 回退：全量下载（API/WebDAV）带重试、退避与哈希校验
+                                let client = reqwest::Client::builder()
+                                    .connect_timeout(Duration::from_secs(self.http_connect_timeout))
+                                    .timeout(Duration::from_secs(self.http_request_timeout))
+                                    .build()
+                                    .unwrap_or_else(|_| reqwest::Client::new());
+
+                                let api_url = format!(
                                     "{}/api/files/{}",
                                     source_http.trim_end_matches('/'),
                                     event.file_id
                                 );
-                                match reqwest::get(&url).await {
-                                    Ok(resp) if resp.status().is_success() => {
-                                        match resp.bytes().await {
-                                            Ok(bytes) => {
-                                                // 优先按元数据路径保存，避免在 data 下生成ID文件
-                                                let save_res =
-                                                    if let Some(meta) = event.metadata.as_ref() {
-                                                        if !meta.path.is_empty() {
-                                                            self.storage
-                                                                .save_at_path(&meta.path, &bytes)
-                                                                .await
+
+                                let mut last_err: Option<String> = None;
+                                for attempt in 0..=self.fetch_max_retries {
+                                    match client.get(&api_url).send().await {
+                                        Ok(resp) if resp.status().is_success() => {
+                                            match resp.bytes().await {
+                                                Ok(bytes) => {
+                                                    let actual =
+                                                        format!("{:x}", Sha256::digest(&bytes));
+                                                    if actual != expected_hash {
+                                                        last_err = Some(format!(
+                                                            "哈希不一致 expected={} actual={}",
+                                                            expected_hash, actual
+                                                        ));
+                                                    } else {
+                                                        let save_res = if let Some(meta) =
+                                                            event.metadata.as_ref()
+                                                        {
+                                                            if !meta.path.is_empty() {
+                                                                self.storage
+                                                                    .save_at_path(
+                                                                        &meta.path, &bytes,
+                                                                    )
+                                                                    .await
+                                                            } else {
+                                                                self.storage
+                                                                    .save_file(
+                                                                        &event.file_id,
+                                                                        &bytes,
+                                                                    )
+                                                                    .await
+                                                            }
                                                         } else {
                                                             self.storage
                                                                 .save_file(&event.file_id, &bytes)
                                                                 .await
-                                                        }
-                                                    } else {
-                                                        self.storage
-                                                            .save_file(&event.file_id, &bytes)
-                                                            .await
-                                                    };
-                                                if let Err(e) = save_res {
-                                                    error!(
-                                                        "保存拉取内容失败: {} - {}",
-                                                        event.file_id, e
-                                                    );
-                                                } else {
-                                                    info!(
-                                                        "📥 已从源拉取并保存内容: {}",
-                                                        event.file_id
-                                                    );
-                                                }
-                                            }
-                                            Err(e) => error!(
-                                                "读取拉取响应体失败: {} - {}",
-                                                event.file_id, e
-                                            ),
-                                        }
-                                    }
-                                    Ok(resp) => {
-                                        warn!(
-                                            "拉取内容失败: {} - HTTP {}",
-                                            event.file_id,
-                                            resp.status()
-                                        );
-                                        // Fallback: 若提供了原始路径，尝试通过 WebDAV 拉取
-                                        if let Some(meta) = event.metadata.as_ref() {
-                                            let dav_path = if meta.path.starts_with('/') {
-                                                meta.path.clone()
-                                            } else {
-                                                format!("/{}", meta.path)
-                                            };
-                                            let dav_url = format!(
-                                                "{}{}",
-                                                source_http.trim_end_matches('/'),
-                                                dav_path
-                                            );
-                                            match reqwest::get(&dav_url).await {
-                                                Ok(r2) if r2.status().is_success() => {
-                                                    if let Ok(bytes) = r2.bytes().await {
-                                                        let save_res = self
-                                                            .storage
-                                                            .save_at_path(&dav_path, &bytes)
-                                                            .await;
+                                                        };
                                                         if let Err(e) = save_res {
-                                                            error!(
-                                                                "保存DAV拉取内容失败: {} - {}",
-                                                                event.file_id, e
-                                                            );
+                                                            last_err =
+                                                                Some(format!("保存失败: {}", e));
                                                         } else {
+                                                            crate::metrics::record_sync_operation(
+                                                                "full",
+                                                                "success",
+                                                                bytes.len() as u64,
+                                                            );
                                                             info!(
-                                                                "📥 已通过WebDAV回退拉取并保存内容: {}",
+                                                                "📥 全量拉取并保存成功: {}",
                                                                 event.file_id
                                                             );
+                                                            return Ok(());
                                                         }
                                                     }
                                                 }
-                                                Ok(r2) => warn!(
-                                                    "WebDAV回退拉取失败: {} - HTTP {}",
-                                                    event.file_id,
-                                                    r2.status()
-                                                ),
-                                                Err(e) => warn!(
-                                                    "请求WebDAV源失败: {} - {}",
-                                                    event.file_id, e
-                                                ),
+                                                Err(e) => {
+                                                    last_err = Some(format!("读取响应失败: {}", e));
+                                                }
                                             }
                                         }
+                                        Ok(resp) => {
+                                            last_err = Some(format!("HTTP {}", resp.status()));
+                                        }
+                                        Err(e) => {
+                                            last_err = Some(format!("请求失败: {}", e));
+                                        }
                                     }
-                                    Err(e) => warn!("请求源内容失败: {} - {}", event.file_id, e),
+                                    if attempt < self.fetch_max_retries {
+                                        let d = self.backoff_delay(attempt);
+                                        debug!(
+                                            "拉取重试: {} 尝试={} 等待={:?}",
+                                            event.file_id,
+                                            attempt + 1,
+                                            d
+                                        );
+                                        sleep(d).await;
+                                        continue;
+                                    }
                                 }
+                                crate::metrics::record_sync_operation("full", "error", 0);
+                                warn!(
+                                    "全量拉取失败: {} - {}",
+                                    event.file_id,
+                                    last_err.unwrap_or_else(|| "unknown".into())
+                                );
                             } else {
                                 debug!("本地与远端一致，跳过内容拉取: {}", event.file_id);
                             }

@@ -81,6 +81,21 @@ pub struct SyncBehaviorConfig {
     pub max_files_per_sync: usize,
     /// 失败重试次数
     pub max_retries: u32,
+    /// 拉取连接超时（秒）
+    #[serde(default = "SyncBehaviorConfig::default_http_connect_timeout")]
+    pub http_connect_timeout: u64,
+    /// 拉取请求超时（秒）
+    #[serde(default = "SyncBehaviorConfig::default_http_request_timeout")]
+    pub http_request_timeout: u64,
+    /// 拉取最大重试次数
+    #[serde(default = "SyncBehaviorConfig::default_fetch_max_retries")]
+    pub fetch_max_retries: u32,
+    /// 拉取退避基数（秒）
+    #[serde(default = "SyncBehaviorConfig::default_fetch_base_backoff")]
+    pub fetch_base_backoff: u64,
+    /// 拉取退避上限（秒）
+    #[serde(default = "SyncBehaviorConfig::default_fetch_max_backoff")]
+    pub fetch_max_backoff: u64,
 }
 
 impl Default for SyncBehaviorConfig {
@@ -90,7 +105,30 @@ impl Default for SyncBehaviorConfig {
             sync_interval: 60,
             max_files_per_sync: 100,
             max_retries: 3,
+            http_connect_timeout: Self::default_http_connect_timeout(),
+            http_request_timeout: Self::default_http_request_timeout(),
+            fetch_max_retries: Self::default_fetch_max_retries(),
+            fetch_base_backoff: Self::default_fetch_base_backoff(),
+            fetch_max_backoff: Self::default_fetch_max_backoff(),
         }
+    }
+}
+
+impl SyncBehaviorConfig {
+    fn default_http_connect_timeout() -> u64 {
+        5
+    }
+    fn default_http_request_timeout() -> u64 {
+        15
+    }
+    fn default_fetch_max_retries() -> u32 {
+        3
+    }
+    fn default_fetch_base_backoff() -> u64 {
+        1
+    }
+    fn default_fetch_max_backoff() -> u64 {
+        8
     }
 }
 
@@ -144,6 +182,11 @@ impl Default for Config {
                 sync_interval: 60,
                 max_files_per_sync: 100,
                 max_retries: 3,
+                http_connect_timeout: SyncBehaviorConfig::default_http_connect_timeout(),
+                http_request_timeout: SyncBehaviorConfig::default_http_request_timeout(),
+                fetch_max_retries: SyncBehaviorConfig::default_fetch_max_retries(),
+                fetch_base_backoff: SyncBehaviorConfig::default_fetch_base_backoff(),
+                fetch_max_backoff: SyncBehaviorConfig::default_fetch_max_backoff(),
             },
             auth: AuthConfig {
                 enable: false,
@@ -234,6 +277,32 @@ impl Config {
             && let Ok(v) = retry.parse::<u32>()
         {
             self.sync.max_retries = v;
+        }
+        // 可选：覆盖拉取超时与退避配置（仍优先以配置文件驱动）
+        if let Ok(v) = std::env::var("SYNC_HTTP_CONNECT_TIMEOUT")
+            && let Ok(n) = v.parse::<u64>()
+        {
+            self.sync.http_connect_timeout = n;
+        }
+        if let Ok(v) = std::env::var("SYNC_HTTP_REQUEST_TIMEOUT")
+            && let Ok(n) = v.parse::<u64>()
+        {
+            self.sync.http_request_timeout = n;
+        }
+        if let Ok(v) = std::env::var("SYNC_FETCH_MAX_RETRIES")
+            && let Ok(n) = v.parse::<u32>()
+        {
+            self.sync.fetch_max_retries = n;
+        }
+        if let Ok(v) = std::env::var("SYNC_FETCH_BASE_BACKOFF")
+            && let Ok(n) = v.parse::<u64>()
+        {
+            self.sync.fetch_base_backoff = n;
+        }
+        if let Ok(v) = std::env::var("SYNC_FETCH_MAX_BACKOFF")
+            && let Ok(n) = v.parse::<u64>()
+        {
+            self.sync.fetch_max_backoff = n;
         }
     }
 }

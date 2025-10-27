@@ -656,6 +656,13 @@ impl NodeSyncCoordinator {
                     timestamp: chrono::Local::now().timestamp_millis(),
                 };
 
+                // 状态同步阶段埋点
+                let span_state = tracing::info_span!(
+                    "state_sync",
+                    file_id = %file_id,
+                    target = %node_address
+                );
+                let _enter_s = span_state.enter();
                 // 忽略返回的冲突列表，由服务端记录日志与审计
                 let _ = client
                     .sync_file_states(self.sync_manager.node_id(), vec![state])

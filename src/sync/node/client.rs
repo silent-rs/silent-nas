@@ -138,6 +138,8 @@ impl NodeSyncClient {
 
     /// 连接到远程节点
     pub async fn connect(&self) -> Result<()> {
+        let span = tracing::info_span!("grpc_connect", target = %self.address);
+        let _e = span.enter();
         info!("连接到节点: {}", self.address);
 
         let endpoint = format!("http://{}", self.address);
@@ -231,9 +233,6 @@ impl NodeSyncClient {
                         }
                         let d = self.backoff_delay(attempt);
                         tokio::time::sleep(d).await;
-                        if started.elapsed().as_secs() >= self.config.retry_budget_secs {
-                            break;
-                        }
                         continue;
                     }
                 }
@@ -250,10 +249,10 @@ impl NodeSyncClient {
         debug!("向 {} 发送心跳", self.address);
 
         let mut client = self.ensure_connected().await?;
-        let started = std::time::Instant::now();
-        let started = std::time::Instant::now();
+        let _started = std::time::Instant::now();
 
         let mut last_err = None;
+        let _started = std::time::Instant::now();
         for attempt in 0..=self.config.max_retries {
             let request = tonic::Request::new(HeartbeatRequest {
                 node_id: node_id.to_string(),
@@ -281,9 +280,6 @@ impl NodeSyncClient {
                         }
                         let d = self.backoff_delay(attempt);
                         tokio::time::sleep(d).await;
-                        if started.elapsed().as_secs() >= self.config.retry_budget_secs {
-                            break;
-                        }
                         continue;
                     }
                 }
@@ -297,7 +293,7 @@ impl NodeSyncClient {
         debug!("从 {} 获取节点列表", self.address);
 
         let mut client = self.ensure_connected().await?;
-        let started = std::time::Instant::now();
+        let _started = std::time::Instant::now();
 
         let mut last_err = None;
         for attempt in 0..=self.config.max_retries {
@@ -329,9 +325,6 @@ impl NodeSyncClient {
                         }
                         let d = self.backoff_delay(attempt);
                         tokio::time::sleep(d).await;
-                        if started.elapsed().as_secs() >= self.config.retry_budget_secs {
-                            break;
-                        }
                         continue;
                     }
                 }
@@ -358,7 +351,7 @@ impl NodeSyncClient {
             states,
         };
         let mut last_err = None;
-        let started = std::time::Instant::now();
+        let _started = std::time::Instant::now();
         for attempt in 0..=self.config.max_retries {
             let request = tonic::Request::new(payload.clone());
             match client.sync_file_state(request).await {
@@ -376,9 +369,6 @@ impl NodeSyncClient {
                         }
                         let d = self.backoff_delay(attempt);
                         tokio::time::sleep(d).await;
-                        if started.elapsed().as_secs() >= self.config.retry_budget_secs {
-                            break;
-                        }
                         continue;
                     }
                 }
@@ -402,7 +392,7 @@ impl NodeSyncClient {
         };
 
         let mut last_err = None;
-        let started = std::time::Instant::now();
+        let _started = std::time::Instant::now();
         for attempt in 0..=self.config.max_retries {
             let request = tonic::Request::new(payload.clone());
             match client.request_file_sync(request).await {
@@ -420,9 +410,6 @@ impl NodeSyncClient {
                         }
                         let d = self.backoff_delay(attempt);
                         tokio::time::sleep(d).await;
-                        if started.elapsed().as_secs() >= self.config.retry_budget_secs {
-                            break;
-                        }
                         continue;
                     }
                 }
@@ -525,7 +512,8 @@ impl NodeSyncClient {
                         {
                             break;
                         }
-                        tokio::time::sleep(self.backoff_delay(attempt)).await;
+                        let d = self.backoff_delay(attempt);
+                        tokio::time::sleep(d).await;
                         continue;
                     }
                 }
@@ -667,6 +655,8 @@ mod tests {
                 request_timeout: 1,
                 max_retries: 3,
                 retry_interval: 5,
+                max_backoff_secs: 60,
+                retry_budget_secs: 120,
             },
         );
         // 可重试状态

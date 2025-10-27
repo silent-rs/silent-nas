@@ -425,6 +425,8 @@ async fn start_grpc_server(
             sync_interval: sync_cfg.sync_interval,
             max_files_per_sync: sync_cfg.max_files_per_sync,
             max_retries: sync_cfg.max_retries,
+            fail_queue_max: sync_cfg.fail_queue_max,
+            fail_task_ttl_secs: sync_cfg.fail_task_ttl_secs,
         },
         node_manager.clone(),
         sync_manager.clone(),

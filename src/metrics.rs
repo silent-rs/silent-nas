@@ -119,6 +119,15 @@ lazy_static! {
     )
     .unwrap();
 
+    /// 同步阶段时延（秒），按阶段与结果区分
+    pub static ref SYNC_STAGE_DURATION_SECONDS: HistogramVec = register_histogram_vec!(
+        "sync_stage_duration_seconds",
+        "Sync stage duration in seconds",
+        &["stage", "result"],
+        vec![0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0]
+    )
+    .unwrap();
+
     // ============ 缓存指标 ============
     /// 缓存命中率
     pub static ref CACHE_HIT_RATE: Gauge = register_gauge!(
@@ -211,6 +220,13 @@ pub fn record_sync_operation(sync_type: &str, status: &str, bytes: u64) {
 /// 记录同步冲突
 pub fn record_sync_conflict(resolution: &str) {
     SYNC_CONFLICTS_TOTAL.with_label_values(&[resolution]).inc();
+}
+
+/// 记录同步阶段时延
+pub fn record_sync_stage(stage: &str, result: &str, seconds: f64) {
+    SYNC_STAGE_DURATION_SECONDS
+        .with_label_values(&[stage, result])
+        .observe(seconds);
 }
 
 /// 更新缓存统计

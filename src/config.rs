@@ -96,6 +96,12 @@ pub struct SyncBehaviorConfig {
     /// 拉取退避上限（秒）
     #[serde(default = "SyncBehaviorConfig::default_fetch_max_backoff")]
     pub fetch_max_backoff: u64,
+    /// 失败补偿队列容量上限
+    #[serde(default = "SyncBehaviorConfig::default_fail_queue_max")]
+    pub fail_queue_max: usize,
+    /// 失败任务TTL（秒），超过即丢弃
+    #[serde(default = "SyncBehaviorConfig::default_fail_task_ttl_secs")]
+    pub fail_task_ttl_secs: u64,
 }
 
 impl Default for SyncBehaviorConfig {
@@ -110,6 +116,8 @@ impl Default for SyncBehaviorConfig {
             fetch_max_retries: Self::default_fetch_max_retries(),
             fetch_base_backoff: Self::default_fetch_base_backoff(),
             fetch_max_backoff: Self::default_fetch_max_backoff(),
+            fail_queue_max: Self::default_fail_queue_max(),
+            fail_task_ttl_secs: Self::default_fail_task_ttl_secs(),
         }
     }
 }
@@ -130,6 +138,8 @@ impl SyncBehaviorConfig {
     fn default_fetch_max_backoff() -> u64 {
         8
     }
+    fn default_fail_queue_max() -> usize { 1000 }
+    fn default_fail_task_ttl_secs() -> u64 { 24 * 3600 }
 }
 
 /// 认证配置
@@ -187,6 +197,8 @@ impl Default for Config {
                 fetch_max_retries: SyncBehaviorConfig::default_fetch_max_retries(),
                 fetch_base_backoff: SyncBehaviorConfig::default_fetch_base_backoff(),
                 fetch_max_backoff: SyncBehaviorConfig::default_fetch_max_backoff(),
+                fail_queue_max: SyncBehaviorConfig::default_fail_queue_max(),
+                fail_task_ttl_secs: SyncBehaviorConfig::default_fail_task_ttl_secs(),
             },
             auth: AuthConfig {
                 enable: false,
@@ -273,11 +285,7 @@ impl Config {
         {
             self.sync.max_files_per_sync = v;
         }
-        if let Ok(retry) = std::env::var("SYNC_MAX_RETRIES")
-            && let Ok(v) = retry.parse::<u32>()
-        {
-            self.sync.max_retries = v;
-        }
+        if let Ok(retry) = std::env::var("SYNC_MAX_RETRIES") && let Ok(v) = retry.parse::<u32>() { self.sync.max_retries = v; }
         // 可选：覆盖拉取超时与退避配置（仍优先以配置文件驱动）
         if let Ok(v) = std::env::var("SYNC_HTTP_CONNECT_TIMEOUT")
             && let Ok(n) = v.parse::<u64>()
@@ -299,11 +307,10 @@ impl Config {
         {
             self.sync.fetch_base_backoff = n;
         }
-        if let Ok(v) = std::env::var("SYNC_FETCH_MAX_BACKOFF")
-            && let Ok(n) = v.parse::<u64>()
-        {
-            self.sync.fetch_max_backoff = n;
-        }
+        if let Ok(v) = std::env::var("SYNC_FETCH_MAX_BACKOFF") && let Ok(n) = v.parse::<u64>() { self.sync.fetch_max_backoff = n; }
+
+        if let Ok(v) = std::env::var("SYNC_FAIL_QUEUE_MAX") && let Ok(n) = v.parse::<usize>() { self.sync.fail_queue_max = n; }
+        if let Ok(v) = std::env::var("SYNC_FAIL_TASK_TTL") && let Ok(n) = v.parse::<u64>() { self.sync.fail_task_ttl_secs = n; }
     }
 }
 

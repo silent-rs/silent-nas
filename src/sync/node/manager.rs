@@ -295,6 +295,10 @@ pub struct SyncConfig {
     pub max_files_per_sync: usize,
     /// 同步重试次数
     pub max_retries: u32,
+    /// 失败补偿队列容量上限
+    pub fail_queue_max: usize,
+    /// 失败任务TTL（秒）
+    pub fail_task_ttl_secs: u64,
 }
 
 impl Default for SyncConfig {
@@ -304,6 +308,8 @@ impl Default for SyncConfig {
             sync_interval: 60,
             max_files_per_sync: 100,
             max_retries: 3,
+            fail_queue_max: 1000,
+            fail_task_ttl_secs: 24*3600,
         }
     }
 }
@@ -336,6 +342,9 @@ struct CompTask {
     attempt: u32,
     /// 下次执行时间
     next_at: NaiveDateTime,
+    /// 创建时间
+    #[serde(default = "CompTask::default_created_at")]
+    created_at: NaiveDateTime,
 }
 
 /// 跨节点同步协调器
@@ -357,6 +366,19 @@ pub struct NodeSyncCoordinator {
 }
 
 impl NodeSyncCoordinator {
+    fn prune_expired_and_trim(&self, q: &mut VecDeque<CompTask>) {
+        let ttl = self.config.fail_task_ttl_secs as i64;
+        if ttl > 0 {
+            let now = Local::now().naive_local();
+            q.retain(|t| (now - t.created_at).num_seconds() <= ttl);
+        }
+        let max = self.config.fail_queue_max;
+        if max > 0 {
+            while q.len() > max {
+                q.pop_front();
+            }
+        }
+    }
     pub fn new(
         config: SyncConfig,
         node_manager: Arc<NodeManager>,
@@ -424,10 +446,12 @@ impl NodeSyncCoordinator {
             file_id: file_id.to_string(),
             attempt,
             next_at: when,
+            created_at: Local::now().naive_local(),
         };
         {
             let mut q = self.fail_queue.write().await;
             q.push_back(task);
+            self.prune_expired_and_trim(&mut q);
         }
         if let Err(e) = self.persist_fail_queue().await {
             warn!("补偿队列持久化失败: {}", e);
@@ -630,6 +654,7 @@ impl NodeSyncCoordinator {
 
                         // 统一采用流式传输，避免与服务端 TransferFile（拉取语义）不一致
                         const CHUNK_SIZE: usize = 1024 * 1024; // 1MB
+                        let t_transfer = std::time::Instant::now();
                         let transfer_result = client
                             .stream_file_content(file_id, content, CHUNK_SIZE)
                             .await
@@ -637,7 +662,13 @@ impl NodeSyncCoordinator {
 
                         match transfer_result {
                             Ok(_) => {
+                                crate::metrics::record_sync_stage(
+                                    "transfer",
+                                    "success",
+                                    t_transfer.elapsed().as_secs_f64(),
+                                );
                                 // 端到端一致性校验（SHA-256）
+                                let t_verify = std::time::Instant::now();
                                 let mut verified = true;
                                 if let Some(meta) = file_sync.metadata.value.as_ref()
                                     && !meta.hash.is_empty()
@@ -651,6 +682,11 @@ impl NodeSyncCoordinator {
                                                     file_id, node_address
                                                 );
                                                 crate::metrics::record_sync_operation("full", "error", 0);
+                                                crate::metrics::record_sync_stage(
+                                                    "verify",
+                                                    "error",
+                                                    t_verify.elapsed().as_secs_f64(),
+                                                );
                                             }
                                         }
                                         Err(e) => {
@@ -660,6 +696,11 @@ impl NodeSyncCoordinator {
                                                 file_id, node_address, e
                                             );
                                             crate::metrics::record_sync_operation("full", "error", 0);
+                                            crate::metrics::record_sync_stage(
+                                                "verify",
+                                                "error",
+                                                t_verify.elapsed().as_secs_f64(),
+                                            );
                                         }
                                     }
                                 }
@@ -672,6 +713,11 @@ impl NodeSyncCoordinator {
                                         file_id, file_size, node_address
                                     );
                                     crate::metrics::record_sync_operation("full", "success", file_size as u64);
+                                    crate::metrics::record_sync_stage(
+                                        "verify",
+                                        "success",
+                                        t_verify.elapsed().as_secs_f64(),
+                                    );
                                 } else {
                                     // 校验不通过，入队补偿重试
                                     self.enqueue_compensation(node_id, file_id, 1).await;
@@ -701,6 +747,11 @@ impl NodeSyncCoordinator {
                                 // 等待后重试
                                 tokio::time::sleep(Duration::from_secs(2)).await;
                                 crate::metrics::record_sync_operation("full", "error", 0);
+                                crate::metrics::record_sync_stage(
+                                    "transfer",
+                                    "error",
+                                    t_transfer.elapsed().as_secs_f64(),
+                                );
                             }
                         }
                     }
@@ -820,6 +871,12 @@ impl NodeSyncCoordinator {
     }
 }
 
+impl CompTask {
+    fn default_created_at() -> NaiveDateTime {
+        Local::now().naive_local()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -931,6 +988,8 @@ mod tests {
             sync_interval: 120,
             max_files_per_sync: 50,
             max_retries: 5,
+            fail_queue_max: 1000,
+            fail_task_ttl_secs: 24*3600,
         };
 
         assert!(!config.auto_sync);

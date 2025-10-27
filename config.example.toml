@@ -156,6 +156,10 @@ fetch_max_retries = 3
 fetch_base_backoff = 1
 # 拉取退避上限（秒）
 fetch_max_backoff = 8
+# 失败补偿队列容量上限
+fail_queue_max = 1000
+# 失败任务TTL（秒），超过即丢弃
+fail_task_ttl_secs = 86400
 
 # ==================== 部署场景示例 ====================
 

@@ -218,6 +218,8 @@ node_timeout = 30
 | `fetch_max_retries` | integer | 3 | 拉取最大重试次数 |
 | `fetch_base_backoff` | integer | 1 | 拉取退避基数（秒） |
 | `fetch_max_backoff` | integer | 8 | 拉取退避上限（秒） |
+| `fail_queue_max` | integer | 1000 | 失败补偿队列容量上限 |
+| `fail_task_ttl_secs` | integer | 86400 | 失败任务TTL（秒），超过即丢弃 |
 
 提示：当 `[node].enable = false` 且未连接 NATS（单节点部署）时，`[sync]` 段落可省略，相关配置不会被使用。
 

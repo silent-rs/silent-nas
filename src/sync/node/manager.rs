@@ -617,6 +617,8 @@ impl NodeSyncCoordinator {
             max_retries: cfg_now.max_retries,
             connect_timeout: cfg_now.grpc_connect_timeout,
             request_timeout: cfg_now.grpc_request_timeout,
+            max_backoff_secs: 60,
+            retry_budget_secs: 120,
             ..Default::default()
         };
         let client = NodeSyncClient::new(node_address.clone(), client_cfg);
@@ -683,6 +685,12 @@ impl NodeSyncCoordinator {
 
                         // 统一采用流式传输，避免与服务端 TransferFile（拉取语义）不一致
                         const CHUNK_SIZE: usize = 1024 * 1024; // 1MB
+                        let span = tracing::info_span!(
+                            "sync_transfer",
+                            file_id = %file_id,
+                            target = %node_address
+                        );
+                        let _enter = span.enter();
                         // 故障注入：可选的延迟
                         if cfg_now.fault_delay_ms > 0 {
                             tokio::time::sleep(Duration::from_millis(cfg_now.fault_delay_ms)).await;
@@ -707,6 +715,12 @@ impl NodeSyncCoordinator {
                                     t_transfer.elapsed().as_secs_f64(),
                                 );
                                 // 端到端一致性校验（SHA-256）
+                                let span_v = tracing::info_span!(
+                                    "sync_verify",
+                                    file_id = %file_id,
+                                    target = %node_address
+                                );
+                                let _enter_v = span_v.enter();
                                 let t_verify = std::time::Instant::now();
                                 let mut verified = true;
                                 if let Some(meta) = file_sync.metadata.value.as_ref()
@@ -848,6 +862,8 @@ impl NodeSyncCoordinator {
             max_retries: cfg_now.max_retries,
             connect_timeout: cfg_now.grpc_connect_timeout,
             request_timeout: cfg_now.grpc_request_timeout,
+            max_backoff_secs: 60,
+            retry_budget_secs: 120,
             ..Default::default()
         };
         let client = NodeSyncClient::new(node_address.clone(), client_cfg);

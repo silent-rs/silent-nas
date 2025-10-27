@@ -24,6 +24,10 @@ pub struct ClientConfig {
     pub max_retries: u32,
     /// 重试间隔（秒）
     pub retry_interval: u64,
+    /// 最大退避（秒）
+    pub max_backoff_secs: u64,
+    /// 重试总预算时间（秒）
+    pub retry_budget_secs: u64,
 }
 
 impl Default for ClientConfig {
@@ -33,6 +37,8 @@ impl Default for ClientConfig {
             request_timeout: 30,
             max_retries: 3,
             retry_interval: 5,
+            max_backoff_secs: 60,
+            retry_budget_secs: 120,
         }
     }
 }
@@ -124,8 +130,10 @@ impl NodeSyncClient {
     fn backoff_delay(&self, attempt: u32) -> tokio::time::Duration {
         let base = self.config.retry_interval;
         let factor = 1u64 << attempt.min(5); // 上限 2^5 = 32
-        let secs = (base.saturating_mul(factor)).min(60);
-        tokio::time::Duration::from_secs(secs)
+        let capped = (base.saturating_mul(factor)).min(self.config.max_backoff_secs);
+        let jitter = 0.8 + (rand::random::<f64>() * 0.4); // 0.8~1.2
+        let secs = ((capped as f64) * jitter).round() as u64;
+        tokio::time::Duration::from_secs(secs.max(1))
     }
 
     /// 连接到远程节点
@@ -177,6 +185,7 @@ impl NodeSyncClient {
         debug!("向 {} 注册节点: {}", self.address, node.node_id);
 
         let mut client = self.ensure_connected().await?;
+        let _started = std::time::Instant::now();
 
         let proto_node = crate::rpc::file_service::NodeInfo {
             node_id: node.node_id.clone(),
@@ -191,6 +200,7 @@ impl NodeSyncClient {
         };
         // 重试调用
         let mut last_err = None;
+        let _started = std::time::Instant::now();
         for attempt in 0..=self.config.max_retries {
             let request = tonic::Request::new(payload.clone());
             match client.register_node(request).await {
@@ -219,7 +229,11 @@ impl NodeSyncClient {
                                 Self::classify_status(st)
                             );
                         }
-                        tokio::time::sleep(self.backoff_delay(attempt)).await;
+                        let d = self.backoff_delay(attempt);
+                        tokio::time::sleep(d).await;
+                        if started.elapsed().as_secs() >= self.config.retry_budget_secs {
+                            break;
+                        }
                         continue;
                     }
                 }
@@ -236,6 +250,8 @@ impl NodeSyncClient {
         debug!("向 {} 发送心跳", self.address);
 
         let mut client = self.ensure_connected().await?;
+        let started = std::time::Instant::now();
+        let started = std::time::Instant::now();
 
         let mut last_err = None;
         for attempt in 0..=self.config.max_retries {
@@ -263,7 +279,11 @@ impl NodeSyncClient {
                                 Self::classify_status(st)
                             );
                         }
-                        tokio::time::sleep(self.backoff_delay(attempt)).await;
+                        let d = self.backoff_delay(attempt);
+                        tokio::time::sleep(d).await;
+                        if started.elapsed().as_secs() >= self.config.retry_budget_secs {
+                            break;
+                        }
                         continue;
                     }
                 }
@@ -277,6 +297,7 @@ impl NodeSyncClient {
         debug!("从 {} 获取节点列表", self.address);
 
         let mut client = self.ensure_connected().await?;
+        let started = std::time::Instant::now();
 
         let mut last_err = None;
         for attempt in 0..=self.config.max_retries {
@@ -306,7 +327,11 @@ impl NodeSyncClient {
                                 Self::classify_status(st)
                             );
                         }
-                        tokio::time::sleep(self.backoff_delay(attempt)).await;
+                        let d = self.backoff_delay(attempt);
+                        tokio::time::sleep(d).await;
+                        if started.elapsed().as_secs() >= self.config.retry_budget_secs {
+                            break;
+                        }
                         continue;
                     }
                 }
@@ -333,6 +358,7 @@ impl NodeSyncClient {
             states,
         };
         let mut last_err = None;
+        let started = std::time::Instant::now();
         for attempt in 0..=self.config.max_retries {
             let request = tonic::Request::new(payload.clone());
             match client.sync_file_state(request).await {
@@ -348,7 +374,11 @@ impl NodeSyncClient {
                         {
                             break;
                         }
-                        tokio::time::sleep(self.backoff_delay(attempt)).await;
+                        let d = self.backoff_delay(attempt);
+                        tokio::time::sleep(d).await;
+                        if started.elapsed().as_secs() >= self.config.retry_budget_secs {
+                            break;
+                        }
                         continue;
                     }
                 }
@@ -372,6 +402,7 @@ impl NodeSyncClient {
         };
 
         let mut last_err = None;
+        let started = std::time::Instant::now();
         for attempt in 0..=self.config.max_retries {
             let request = tonic::Request::new(payload.clone());
             match client.request_file_sync(request).await {
@@ -387,7 +418,11 @@ impl NodeSyncClient {
                         {
                             break;
                         }
-                        tokio::time::sleep(self.backoff_delay(attempt)).await;
+                        let d = self.backoff_delay(attempt);
+                        tokio::time::sleep(d).await;
+                        if started.elapsed().as_secs() >= self.config.retry_budget_secs {
+                            break;
+                        }
                         continue;
                     }
                 }

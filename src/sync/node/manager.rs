@@ -506,7 +506,8 @@ impl NodeSyncCoordinator {
         drop(nodes);
 
         // 创建 gRPC 客户端
-        let client = NodeSyncClient::new(node_address.clone(), ClientConfig::default());
+        let client_cfg = ClientConfig { max_retries: self.config.max_retries, ..Default::default() };
+        let client = NodeSyncClient::new(node_address.clone(), client_cfg);
         client.connect().await?;
         debug!(
             "gRPC 客户端已连接: {} -> {}",
@@ -590,6 +591,7 @@ impl NodeSyncCoordinator {
                                                     "端到端校验失败: {} -> {}，期望哈希不一致",
                                                     file_id, node_address
                                                 );
+                                                crate::metrics::record_sync_operation("full", "error", 0);
                                             }
                                         }
                                         Err(e) => {
@@ -598,6 +600,7 @@ impl NodeSyncCoordinator {
                                                 "端到端校验错误: {} -> {}, 错误: {}",
                                                 file_id, node_address, e
                                             );
+                                            crate::metrics::record_sync_operation("full", "error", 0);
                                         }
                                     }
                                 }
@@ -609,6 +612,7 @@ impl NodeSyncCoordinator {
                                         "文件同步成功: {}, 大小: {} 字节 -> {}",
                                         file_id, file_size, node_address
                                     );
+                                    crate::metrics::record_sync_operation("full", "success", file_size as u64);
                                 } else {
                                     // 校验不通过，入队补偿重试
                                     self.enqueue_compensation(node_id, file_id, 1).await;
@@ -637,6 +641,7 @@ impl NodeSyncCoordinator {
 
                                 // 等待后重试
                                 tokio::time::sleep(Duration::from_secs(2)).await;
+                                crate::metrics::record_sync_operation("full", "error", 0);
                             }
                         }
                     }
@@ -684,7 +689,8 @@ impl NodeSyncCoordinator {
         drop(nodes);
 
         // 创建 gRPC 客户端
-        let client = NodeSyncClient::new(node_address.clone(), ClientConfig::default());
+        let client_cfg = ClientConfig { max_retries: self.config.max_retries, ..Default::default() };
+        let client = NodeSyncClient::new(node_address.clone(), client_cfg);
         client.connect().await?;
 
         // 通过 gRPC 请求文件同步

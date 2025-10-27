@@ -25,31 +25,29 @@
     - 验收阈值：延迟 < 5s，成功率 > 99.9%
   - 已完成：
     - 三节点拓扑压测脚本（Docker 版本统一）：`scripts/sync_3nodes_benchmark_docker.sh`
+    - 端到端 SHA‑256 校验落地：增量/全量拉取均校验，校验通过才保存（事件监听与巡检补拉）
+    - 拉取超时/重试/退避配置化：`[sync] http_connect_timeout/http_request_timeout/fetch_max_retries/fetch_base_backoff/fetch_max_backoff`
+    - gRPC 重试与上限统一：NodeSyncClient.max_retries 由 `[sync].max_retries` 驱动
+    - 指标埋点（初版）：全量/增量同步成功与失败计数与字节数上报
+    - 单节点优化：未连接 NATS 时不启用巡检补拉任务；单节点可省略 `[sync]` 配置
   - 文档同步：
     - 运行参数与调试指引、故障注入与排障章节
 
   - 下一步计划（按优先级推进）：
-    1) 端到端 SHA‑256 校验落地
-       - 发送端完成写入后通过目标节点元数据比对 `sha256`
-       - 不一致即标记失败，进入重试/补偿链路
-       - 参考：`docs/requirements-sync.md`
-    2) 超时与重试统一化（带指数退避/抖动）
-       - 连接/请求/流式传输超时常量化与配置化
-       - 可重试错误集合与最大重试/总预算时间
-    3) 失败补偿队列 + 后台 worker
+    1) 失败补偿队列 + 后台 worker（增强）
        - 失败任务入队，后台 worker 按退避策略重试
        - 初期内存队列，预留持久化接口
-    4) 指标埋点与统计
+    2) 指标埋点与统计（增强）
        - 成功/失败/重试次数/字节数/阶段时延（直方图）
-       - 输出 P50/P90/P95/Max；暴露到日志或 metrics 端点
-    5) 参数可配与热更新
+       - 输出 P50/P90/P95/Max；暴露到 /metrics 端点
+    3) 参数可配与热更新
        - `sync.{interval, max_concurrency, batch_size, retry_max, timeouts}`
        - 提供定时重载或 SIGHUP 重载配置
-    6) 同步阶段 tracing 埋点
+    4) 同步阶段 tracing 埋点
        - 连接、状态同步、内容传输阶段划分，携带 file_id
-    7) 故障注入与排障指引
+    5) 故障注入与排障指引
        - 环境开关模拟超时/断连/限速；文档化排障流程
-    8) 验收回归
+    6) 验收回归
        - 使用 `scripts/sync_3nodes_benchmark_docker.sh` 达成 P95<8s、成功率>99.9%
 
 2) WebDAV 协议完善

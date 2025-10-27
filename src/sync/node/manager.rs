@@ -324,7 +324,7 @@ pub struct SyncStats {
 }
 
 /// 失败补偿任务
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct CompTask {
     /// 任务 ID（scru128）
     id: String,
@@ -352,6 +352,8 @@ pub struct NodeSyncCoordinator {
     stats: Arc<RwLock<SyncStats>>,
     /// 失败补偿队列
     fail_queue: Arc<RwLock<VecDeque<CompTask>>>,
+    /// 失败补偿队列持久化路径
+    fail_queue_path: std::path::PathBuf,
 }
 
 impl NodeSyncCoordinator {
@@ -361,6 +363,10 @@ impl NodeSyncCoordinator {
         sync_manager: Arc<SyncManager>,
         storage: Arc<crate::storage::StorageManager>,
     ) -> Arc<Self> {
+        // 确定补偿队列持久化路径：<root>/.sync/fail_queue.json
+        let persist_dir = storage.root_dir().join(".sync");
+        let persist_path = persist_dir.join("fail_queue.json");
+
         let this = Arc::new(Self {
             config,
             node_manager,
@@ -368,7 +374,12 @@ impl NodeSyncCoordinator {
             storage,
             stats: Arc::new(RwLock::new(SyncStats::default())),
             fail_queue: Arc::new(RwLock::new(VecDeque::new())),
+            fail_queue_path: persist_path,
         });
+
+        // 尝试加载持久化队列
+        let loader = this.clone();
+        tokio::spawn(async move { loader.load_fail_queue().await });
 
         // 启动失败补偿后台任务
         let comp_clone = this.clone();
@@ -418,6 +429,9 @@ impl NodeSyncCoordinator {
             let mut q = self.fail_queue.write().await;
             q.push_back(task);
         }
+        if let Err(e) = self.persist_fail_queue().await {
+            warn!("补偿队列持久化失败: {}", e);
+        }
         warn!(
             "补偿入队: file_id={}, node={}, attempt={}, next_in={}s",
             file_id, target_node_id, attempt, next_secs
@@ -465,6 +479,9 @@ impl NodeSyncCoordinator {
                         "补偿成功: file_id={}, node={}, attempt={}",
                         task.file_id, task.target_node_id, task.attempt
                     );
+                    if let Err(e) = self.persist_fail_queue().await {
+                        warn!("补偿后持久化失败: {}", e);
+                    }
                 }
                 Ok(_) | Err(_) => {
                     let next_attempt = task.attempt.saturating_add(1);
@@ -480,8 +497,50 @@ impl NodeSyncCoordinator {
                             "补偿放弃: file_id={}, node={}, final_attempt={}",
                             task.file_id, task.target_node_id, task.attempt
                         );
+                        if let Err(e) = self.persist_fail_queue().await {
+                            warn!("放弃后持久化失败: {}", e);
+                        }
                     }
                 }
+            }
+        }
+    }
+
+    /// 将失败补偿队列持久化到磁盘
+    async fn persist_fail_queue(&self) -> Result<()> {
+        use tokio::fs;
+        if let Some(parent) = self.fail_queue_path.parent() {
+            let _ = fs::create_dir_all(parent).await;
+        }
+        let q = self.fail_queue.read().await;
+        let data = serde_json::to_vec_pretty(&*q)
+            .map_err(|e| NasError::Other(format!("序列化补偿队列失败: {}", e)))?;
+        fs::write(&self.fail_queue_path, data)
+            .await
+            .map_err(|e| NasError::Other(format!("写入补偿队列失败: {}", e)))?;
+        Ok(())
+    }
+
+    /// 启动时尝试加载失败补偿队列
+    async fn load_fail_queue(&self) {
+        use tokio::fs;
+        match fs::read(&self.fail_queue_path).await {
+            Ok(bytes) => match serde_json::from_slice::<VecDeque<CompTask>>(&bytes) {
+                Ok(mut items) => {
+                    let mut q = self.fail_queue.write().await;
+                    while let Some(it) = items.pop_front() {
+                        q.push_back(it);
+                    }
+                    info!(
+                        "已加载补偿队列: {} 项 -> {:?}",
+                        q.len(),
+                        self.fail_queue_path
+                    );
+                }
+                Err(e) => warn!("补偿队列解析失败: {}", e),
+            },
+            Err(_) => {
+                // 文件不存在不视为错误
             }
         }
     }

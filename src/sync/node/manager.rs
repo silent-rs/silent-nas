@@ -299,6 +299,16 @@ pub struct SyncConfig {
     pub fail_queue_max: usize,
     /// 失败任务TTL（秒）
     pub fail_task_ttl_secs: u64,
+    /// gRPC 连接超时（秒）
+    pub grpc_connect_timeout: u64,
+    /// gRPC 请求超时（秒）
+    pub grpc_request_timeout: u64,
+    /// 故障注入：传输失败概率（0.0-1.0）
+    pub fault_transfer_error_rate: f64,
+    /// 故障注入：校验失败概率（0.0-1.0）
+    pub fault_verify_error_rate: f64,
+    /// 故障注入：额外延迟（毫秒）
+    pub fault_delay_ms: u64,
 }
 
 impl Default for SyncConfig {
@@ -310,6 +320,11 @@ impl Default for SyncConfig {
             max_retries: 3,
             fail_queue_max: 1000,
             fail_task_ttl_secs: 24*3600,
+            grpc_connect_timeout: 10,
+            grpc_request_timeout: 30,
+            fault_transfer_error_rate: 0.0,
+            fault_verify_error_rate: 0.0,
+            fault_delay_ms: 0,
         }
     }
 }
@@ -598,7 +613,12 @@ impl NodeSyncCoordinator {
 
         // 创建 gRPC 客户端
         let cfg_now = self.config.read().await.clone();
-        let client_cfg = ClientConfig { max_retries: cfg_now.max_retries, ..Default::default() };
+        let client_cfg = ClientConfig {
+            max_retries: cfg_now.max_retries,
+            connect_timeout: cfg_now.grpc_connect_timeout,
+            request_timeout: cfg_now.grpc_request_timeout,
+            ..Default::default()
+        };
         let client = NodeSyncClient::new(node_address.clone(), client_cfg);
         client.connect().await?;
         debug!(
@@ -663,11 +683,21 @@ impl NodeSyncCoordinator {
 
                         // 统一采用流式传输，避免与服务端 TransferFile（拉取语义）不一致
                         const CHUNK_SIZE: usize = 1024 * 1024; // 1MB
+                        // 故障注入：可选的延迟
+                        if cfg_now.fault_delay_ms > 0 {
+                            tokio::time::sleep(Duration::from_millis(cfg_now.fault_delay_ms)).await;
+                        }
                         let t_transfer = std::time::Instant::now();
-                        let transfer_result = client
-                            .stream_file_content(file_id, content, CHUNK_SIZE)
-                            .await
-                            .map(|_| true);
+                        // 故障注入：按概率制造传输失败
+                        let inject_transfer = rand::random::<f64>() < cfg_now.fault_transfer_error_rate;
+                        let transfer_result = if inject_transfer {
+                            Err(NasError::Other("fault_injected_transfer".into()))
+                        } else {
+                            client
+                                .stream_file_content(file_id, content, CHUNK_SIZE)
+                                .await
+                                .map(|_| true)
+                        };
 
                         match transfer_result {
                             Ok(_) => {
@@ -712,6 +742,11 @@ impl NodeSyncCoordinator {
                                             );
                                         }
                                     }
+                                }
+                                // 故障注入：按概率制造校验失败
+                                if verified && (rand::random::<f64>() < cfg_now.fault_verify_error_rate) {
+                                    verified = false;
+                                    warn!("故障注入：校验失败 file_id={}", file_id);
                                 }
 
                                 if verified {
@@ -809,7 +844,12 @@ impl NodeSyncCoordinator {
 
         // 创建 gRPC 客户端
         let cfg_now = self.config.read().await.clone();
-        let client_cfg = ClientConfig { max_retries: cfg_now.max_retries, ..Default::default() };
+        let client_cfg = ClientConfig {
+            max_retries: cfg_now.max_retries,
+            connect_timeout: cfg_now.grpc_connect_timeout,
+            request_timeout: cfg_now.grpc_request_timeout,
+            ..Default::default()
+        };
         let client = NodeSyncClient::new(node_address.clone(), client_cfg);
         client.connect().await?;
 
@@ -1000,6 +1040,11 @@ mod tests {
             max_retries: 5,
             fail_queue_max: 1000,
             fail_task_ttl_secs: 24*3600,
+            grpc_connect_timeout: 10,
+            grpc_request_timeout: 30,
+            fault_transfer_error_rate: 0.0,
+            fault_verify_error_rate: 0.0,
+            fault_delay_ms: 0,
         };
 
         assert!(!config.auto_sync);

@@ -220,6 +220,11 @@ node_timeout = 30
 | `fetch_max_backoff` | integer | 8 | 拉取退避上限（秒） |
 | `fail_queue_max` | integer | 1000 | 失败补偿队列容量上限 |
 | `fail_task_ttl_secs` | integer | 86400 | 失败任务TTL（秒），超过即丢弃 |
+| `grpc_connect_timeout` | integer | 10 | gRPC 连接超时（秒） |
+| `grpc_request_timeout` | integer | 30 | gRPC 请求超时（秒） |
+| `fault_transfer_error_rate` | float | 0.0 | 故障注入：传输失败概率（0-1） |
+| `fault_verify_error_rate` | float | 0.0 | 故障注入：校验失败概率（0-1） |
+| `fault_delay_ms` | integer | 0 | 故障注入：附加延迟（毫秒） |
 
 提示：当 `[node].enable = false` 且未连接 NATS（单节点部署）时，`[sync]` 段落可省略，相关配置不会被使用。
 

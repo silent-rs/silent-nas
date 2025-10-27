@@ -427,6 +427,11 @@ async fn start_grpc_server(
             max_retries: sync_cfg.max_retries,
             fail_queue_max: sync_cfg.fail_queue_max,
             fail_task_ttl_secs: sync_cfg.fail_task_ttl_secs,
+            grpc_connect_timeout: sync_cfg.grpc_connect_timeout,
+            grpc_request_timeout: sync_cfg.grpc_request_timeout,
+            fault_transfer_error_rate: sync_cfg.fault_transfer_error_rate,
+            fault_verify_error_rate: sync_cfg.fault_verify_error_rate,
+            fault_delay_ms: sync_cfg.fault_delay_ms,
         },
         node_manager.clone(),
         sync_manager.clone(),
@@ -462,6 +467,11 @@ async fn start_grpc_server(
                     max_retries: new_sync.max_retries,
                     fail_queue_max: new_sync.fail_queue_max,
                     fail_task_ttl_secs: new_sync.fail_task_ttl_secs,
+                    grpc_connect_timeout: new_sync.grpc_connect_timeout,
+                    grpc_request_timeout: new_sync.grpc_request_timeout,
+                    fault_transfer_error_rate: new_sync.fault_transfer_error_rate,
+                    fault_verify_error_rate: new_sync.fault_verify_error_rate,
+                    fault_delay_ms: new_sync.fault_delay_ms,
                 };
                 nsc_for_reload.update_config(mapped).await;
                 info!("已热更新同步配置");

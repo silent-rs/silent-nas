@@ -160,6 +160,14 @@ fetch_max_backoff = 8
 fail_queue_max = 1000
 # 失败任务TTL（秒），超过即丢弃
 fail_task_ttl_secs = 86400
+# gRPC 连接/请求超时（秒）
+grpc_connect_timeout = 10
+grpc_request_timeout = 30
+# 故障注入（开发/测试用）
+# 0.0-1.0 的概率注入传输/校验失败；或附加延迟（毫秒）
+fault_transfer_error_rate = 0.0
+fault_verify_error_rate = 0.0
+fault_delay_ms = 0
 
 # ==================== 部署场景示例 ====================
 

@@ -447,6 +447,28 @@ async fn start_grpc_server(
         tokio::spawn(async move { nsc_for_auto.start_auto_sync().await });
     }
 
+    // 启动同步配置热更新（每60s重载 config.toml + env 覆盖）
+    if node_cfg.enable {
+        let nsc_for_reload = node_sync.clone();
+        tokio::spawn(async move {
+            use tokio::time::{sleep, Duration};
+            loop {
+                sleep(Duration::from_secs(60)).await;
+                let new_sync = Config::load().sync;
+                let mapped = sync::node::manager::SyncConfig {
+                    auto_sync: new_sync.auto_sync,
+                    sync_interval: new_sync.sync_interval,
+                    max_files_per_sync: new_sync.max_files_per_sync,
+                    max_retries: new_sync.max_retries,
+                    fail_queue_max: new_sync.fail_queue_max,
+                    fail_task_ttl_secs: new_sync.fail_task_ttl_secs,
+                };
+                nsc_for_reload.update_config(mapped).await;
+                info!("已热更新同步配置");
+            }
+        });
+    }
+
     // 可选：连接到种子节点（默认空列表）
     if node_cfg.enable
         && !node_cfg.seed_nodes.is_empty()

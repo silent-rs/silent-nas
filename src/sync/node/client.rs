@@ -48,6 +48,21 @@ pub struct NodeSyncClient {
 }
 
 impl NodeSyncClient {
+    fn classify_status(status: &Status) -> &'static str {
+        match status.code() {
+            Code::Unavailable => "unavailable",
+            Code::DeadlineExceeded => "deadline_exceeded",
+            Code::ResourceExhausted => "resource_exhausted",
+            Code::Aborted => "aborted",
+            Code::Unknown => "unknown",
+            Code::Internal => "internal",
+            Code::InvalidArgument => "invalid_argument",
+            Code::PermissionDenied => "permission_denied",
+            Code::Unauthenticated => "unauthenticated",
+            Code::NotFound => "not_found",
+            _ => "other",
+        }
+    }
     /// 创建新的客户端
     pub fn new(address: String, config: ClientConfig) -> Self {
         Self {
@@ -197,6 +212,13 @@ impl NodeSyncClient {
                         {
                             break;
                         }
+                        if let Some(ref st) = last_err {
+                            debug!(
+                                "list_nodes 重试: attempt={} reason={}",
+                                attempt + 1,
+                                Self::classify_status(st)
+                            );
+                        }
                         tokio::time::sleep(self.backoff_delay(attempt)).await;
                         continue;
                     }
@@ -234,6 +256,13 @@ impl NodeSyncClient {
                         {
                             break;
                         }
+                        if let Some(ref st) = last_err {
+                            debug!(
+                                "sync_file_state 重试: attempt={} reason={}",
+                                attempt + 1,
+                                Self::classify_status(st)
+                            );
+                        }
                         tokio::time::sleep(self.backoff_delay(attempt)).await;
                         continue;
                     }
@@ -269,6 +298,13 @@ impl NodeSyncClient {
                             && !self.should_retry(st)
                         {
                             break;
+                        }
+                        if let Some(ref st) = last_err {
+                            debug!(
+                                "request_file_sync 重试: attempt={} reason={}",
+                                attempt + 1,
+                                Self::classify_status(st)
+                            );
                         }
                         tokio::time::sleep(self.backoff_delay(attempt)).await;
                         continue;

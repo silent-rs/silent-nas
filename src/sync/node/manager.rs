@@ -350,7 +350,7 @@ struct CompTask {
 /// 跨节点同步协调器
 pub struct NodeSyncCoordinator {
     /// 配置
-    config: SyncConfig,
+    config: Arc<RwLock<SyncConfig>>,
     /// 节点管理器
     node_manager: Arc<NodeManager>,
     /// 同步管理器
@@ -366,15 +366,19 @@ pub struct NodeSyncCoordinator {
 }
 
 impl NodeSyncCoordinator {
-    fn prune_expired_and_trim(&self, q: &mut VecDeque<CompTask>) {
-        let ttl = self.config.fail_task_ttl_secs as i64;
-        if ttl > 0 {
+    /// 更新运行时同步配置（热更新）
+    pub async fn update_config(&self, new_cfg: SyncConfig) {
+        let mut cfg = self.config.write().await;
+        *cfg = new_cfg;
+        info!("NodeSync 配置已更新");
+    }
+    fn prune_expired_and_trim(&self, q: &mut VecDeque<CompTask>, ttl_secs: i64, max_len: usize) {
+        if ttl_secs > 0 {
             let now = Local::now().naive_local();
-            q.retain(|t| (now - t.created_at).num_seconds() <= ttl);
+            q.retain(|t| (now - t.created_at).num_seconds() <= ttl_secs);
         }
-        let max = self.config.fail_queue_max;
-        if max > 0 {
-            while q.len() > max {
+        if max_len > 0 {
+            while q.len() > max_len {
                 q.pop_front();
             }
         }
@@ -390,7 +394,7 @@ impl NodeSyncCoordinator {
         let persist_path = persist_dir.join("fail_queue.json");
 
         let this = Arc::new(Self {
-            config,
+            config: Arc::new(RwLock::new(config)),
             node_manager,
             sync_manager,
             storage,
@@ -451,7 +455,8 @@ impl NodeSyncCoordinator {
         {
             let mut q = self.fail_queue.write().await;
             q.push_back(task);
-            self.prune_expired_and_trim(&mut q);
+            let cfg = self.config.read().await.clone();
+            self.prune_expired_and_trim(&mut q, cfg.fail_task_ttl_secs as i64, cfg.fail_queue_max);
         }
         if let Err(e) = self.persist_fail_queue().await {
             warn!("补偿队列持久化失败: {}", e);
@@ -509,7 +514,8 @@ impl NodeSyncCoordinator {
                 }
                 Ok(_) | Err(_) => {
                     let next_attempt = task.attempt.saturating_add(1);
-                    if next_attempt <= (self.config.max_retries * 3).max(3) {
+                    let max_retry = { self.config.read().await.max_retries };
+                    if next_attempt <= (max_retry * 3).max(3) {
                         self.enqueue_compensation(
                             &task.target_node_id,
                             &task.file_id,
@@ -555,6 +561,8 @@ impl NodeSyncCoordinator {
                     while let Some(it) = items.pop_front() {
                         q.push_back(it);
                     }
+                    let cfg = self.config.read().await.clone();
+                    self.prune_expired_and_trim(&mut q, cfg.fail_task_ttl_secs as i64, cfg.fail_queue_max);
                     info!(
                         "已加载补偿队列: {} 项 -> {:?}",
                         q.len(),
@@ -589,7 +597,8 @@ impl NodeSyncCoordinator {
         drop(nodes);
 
         // 创建 gRPC 客户端
-        let client_cfg = ClientConfig { max_retries: self.config.max_retries, ..Default::default() };
+        let cfg_now = self.config.read().await.clone();
+        let client_cfg = ClientConfig { max_retries: cfg_now.max_retries, ..Default::default() };
         let client = NodeSyncClient::new(node_address.clone(), client_cfg);
         client.connect().await?;
         debug!(
@@ -600,7 +609,7 @@ impl NodeSyncCoordinator {
         let mut synced = 0;
         let mut retry_count = 0;
 
-        for file_id in file_ids.iter().take(self.config.max_files_per_sync) {
+        for file_id in file_ids.iter().take(cfg_now.max_files_per_sync) {
             // 获取文件的同步状态
             if let Some(file_sync) = self.sync_manager.get_sync_state(file_id).await {
                 // 先同步状态（VectorClock/LWW），以便对端处理冲突
@@ -723,7 +732,7 @@ impl NodeSyncCoordinator {
                                     self.enqueue_compensation(node_id, file_id, 1).await;
                                     // 维持原有短暂等待与重试退出逻辑，避免阻塞批量
                                     retry_count += 1;
-                                    if retry_count >= self.config.max_retries {
+                                    if retry_count >= cfg_now.max_retries {
                                         warn!("达到最大重试次数（含校验失败），停止同步");
                                         break;
                                     }
@@ -739,7 +748,7 @@ impl NodeSyncCoordinator {
                                 self.enqueue_compensation(node_id, file_id, 1).await;
                                 retry_count += 1;
 
-                                if retry_count >= self.config.max_retries {
+                                if retry_count >= cfg_now.max_retries {
                                     warn!("达到最大重试次数，停止同步");
                                     break;
                                 }
@@ -773,7 +782,7 @@ impl NodeSyncCoordinator {
         info!(
             "同步任务完成: 目标={}, 文件数={}, 成功数={}",
             node_address,
-            file_ids.len().min(self.config.max_files_per_sync),
+            file_ids.len().min(cfg_now.max_files_per_sync),
             synced
         );
         Ok(synced)
@@ -799,7 +808,8 @@ impl NodeSyncCoordinator {
         drop(nodes);
 
         // 创建 gRPC 客户端
-        let client_cfg = ClientConfig { max_retries: self.config.max_retries, ..Default::default() };
+        let cfg_now = self.config.read().await.clone();
+        let client_cfg = ClientConfig { max_retries: cfg_now.max_retries, ..Default::default() };
         let client = NodeSyncClient::new(node_address.clone(), client_cfg);
         client.connect().await?;
 
@@ -816,11 +826,11 @@ impl NodeSyncCoordinator {
 
     /// 启动自动同步任务
     pub async fn start_auto_sync(self: Arc<Self>) {
-        if !self.config.auto_sync {
+        if !self.config.read().await.auto_sync {
             return;
         }
 
-        let mut interval = interval(Duration::from_secs(self.config.sync_interval));
+        let mut interval = interval(Duration::from_secs(self.config.read().await.sync_interval));
 
         tokio::spawn(async move {
             loop {

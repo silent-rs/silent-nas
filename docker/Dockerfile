@@ -23,17 +23,11 @@ COPY silent/ ./silent/
 COPY silent-crdt/ ./silent-crdt/
 COPY odyssey/ ./odyssey/
 
-# 预热依赖缓存（使用临时 main）
-RUN mkdir -p src && echo "fn main() {}" > src/main.rs \
-    && cargo build --release \
-    && rm -rf src
-
 # 复制实际源码
 COPY src/ ./src/
 
-# 为确保主二进制使用真实源码，清理该包缓存后再构建
-RUN cargo clean \
-    && cargo build --release
+# 构建发布版本
+RUN cargo build --release
 
 # ==================== 运行阶段 ====================
 FROM debian:bookworm-slim

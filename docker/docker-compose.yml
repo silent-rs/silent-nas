@@ -34,71 +34,63 @@ services:
     container_name: silent-nas-node1
     hostname: node1
     environment:
-      # 节点配置
-      NODE_ID: node-1
-      LISTEN_ADDR: 0.0.0.0:9000
-      SEED_NODES: ""  # 种子节点不需要配置
-
-      # 发现配置
-      HEARTBEAT_INTERVAL: 10
-      NODE_TIMEOUT: 30
-
-      # 同步配置
-      AUTO_SYNC: "true"
-      SYNC_INTERVAL: 60
-      MAX_FILES_PER_SYNC: 100
+      # 服务配置
+      HTTP_HOST: 0.0.0.0
+      HTTP_PORT: 8080
+      GRPC_PORT: 50051
+      QUIC_PORT: 4433
+      WEBDAV_PORT: 8081
+      S3_PORT: 9001
 
       # 存储配置
       STORAGE_PATH: /data
-      CHUNK_SIZE: 10485760
-
-      # HTTP 配置
-      HTTP_HOST: 0.0.0.0
-      HTTP_PORT: 8080
-
-      # WebDAV 配置
-      WEBDAV_ENABLED: "true"
-      WEBDAV_PORT: 8081
-
-      # S3 配置
-      S3_ENABLED: "true"
-      S3_PORT: 9001
-      S3_ACCESS_KEY: admin
-      S3_SECRET_KEY: password123
+      CHUNK_SIZE: 1048576
 
       # NATS 配置
       NATS_URL: nats://nats:4222
-      NATS_TOPIC_PREFIX: nas
+      NATS_TOPIC_PREFIX: bench.nas
 
-      # 版本控制
-      VERSION_ENABLED: "true"
-      MAX_VERSIONS: 10
-      RETENTION_DAYS: 30
+      # S3 配置
+      S3_ACCESS_KEY: minioadmin
+      S3_SECRET_KEY: minioadmin
+      S3_ENABLE_AUTH: false
 
-      # Rust 日志
+      # 认证配置
+      AUTH_ENABLE: false
+      JWT_SECRET: bench
+      ACCESS_TOKEN_EXP: 3600
+      REFRESH_TOKEN_EXP: 604800
+
+      # 节点配置
+      NODE_ENABLE: true
+      SEED_NODES: ""
+      HEARTBEAT_INTERVAL: 2
+      NODE_TIMEOUT: 120
+
+      # 同步配置
+      AUTO_SYNC: true
+      SYNC_INTERVAL: 2
+      MAX_FILES_PER_SYNC: 200
+      MAX_RETRIES: 3
+
+      # 日志
       RUST_LOG: info
       RUST_BACKTRACE: 1
       ADVERTISE_HOST: node1
     ports:
-      - "9000:9000"  # gRPC 同步
-      - "8080:8080"  # HTTP API
-      - "8081:8081"  # WebDAV
-      - "9001:9001"  # S3 API
+      - "50051:50051"  # gRPC
+      - "8080:8080"    # HTTP API
+      - "8081:8081"    # WebDAV
+      - "9001:9001"    # S3 API
+      - "4433:4433"    # QUIC
     volumes:
       - node1-data:/data
-      - node1-config:/app/config
     networks:
       - nas-network
     depends_on:
-      - nats
+      nats:
+        condition: service_healthy
     restart: unless-stopped
-    user: "0:0"
-    # healthcheck:
-    #   test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
-    #   interval: 30s
-    #   timeout: 10s
-    #   retries: 3
-    #   start_period: 10s
 
   # ==================== 节点 2 ====================
   node2:
@@ -106,53 +98,50 @@ services:
     container_name: silent-nas-node2
     hostname: node2
     environment:
-      NODE_ID: node-2
-      LISTEN_ADDR: 0.0.0.0:9000
-      SEED_NODES: node1:9000
-      HEARTBEAT_INTERVAL: 10
-      NODE_TIMEOUT: 30
-      AUTO_SYNC: "true"
-      SYNC_INTERVAL: 60
-      MAX_FILES_PER_SYNC: 100
-      STORAGE_PATH: /data
-      CHUNK_SIZE: 10485760
       HTTP_HOST: 0.0.0.0
       HTTP_PORT: 8080
-      WEBDAV_ENABLED: "true"
+      GRPC_PORT: 50051
+      QUIC_PORT: 4433
       WEBDAV_PORT: 8081
-      S3_ENABLED: "true"
       S3_PORT: 9001
-      S3_ACCESS_KEY: admin
-      S3_SECRET_KEY: password123
+      STORAGE_PATH: /data
+      CHUNK_SIZE: 1048576
       NATS_URL: nats://nats:4222
-      NATS_TOPIC_PREFIX: nas
-      VERSION_ENABLED: "true"
-      MAX_VERSIONS: 10
-      RETENTION_DAYS: 30
+      NATS_TOPIC_PREFIX: bench.nas
+      S3_ACCESS_KEY: minioadmin
+      S3_SECRET_KEY: minioadmin
+      S3_ENABLE_AUTH: false
+      AUTH_ENABLE: false
+      JWT_SECRET: bench
+      ACCESS_TOKEN_EXP: 3600
+      REFRESH_TOKEN_EXP: 604800
+      NODE_ENABLE: true
+      SEED_NODES: "node1:50051"
+      HEARTBEAT_INTERVAL: 2
+      NODE_TIMEOUT: 120
+      AUTO_SYNC: true
+      SYNC_INTERVAL: 2
+      MAX_FILES_PER_SYNC: 200
+      MAX_RETRIES: 3
       RUST_LOG: info
       RUST_BACKTRACE: 1
       ADVERTISE_HOST: node2
     ports:
-      - "9010:9000"
+      - "50052:50051"
       - "8090:8080"
       - "8091:8081"
       - "9011:9001"
+      - "4434:4433"
     volumes:
       - node2-data:/data
-      - node2-config:/app/config
     networks:
       - nas-network
     depends_on:
-      - nats
-      - node1
+      nats:
+        condition: service_healthy
+      node1:
+        condition: service_started
     restart: unless-stopped
-    user: "0:0"
-    # healthcheck:
-    #   test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
-    #   interval: 30s
-    #   timeout: 10s
-    #   retries: 3
-    #   start_period: 10s
 
   # ==================== 节点 3 ====================
   node3:
@@ -160,79 +149,58 @@ services:
     container_name: silent-nas-node3
     hostname: node3
     environment:
-      NODE_ID: node-3
-      LISTEN_ADDR: 0.0.0.0:9000
-      SEED_NODES: node1:9000
-      HEARTBEAT_INTERVAL: 10
-      NODE_TIMEOUT: 30
-      AUTO_SYNC: "true"
-      SYNC_INTERVAL: 60
-      MAX_FILES_PER_SYNC: 100
-      STORAGE_PATH: /data
-      CHUNK_SIZE: 10485760
       HTTP_HOST: 0.0.0.0
       HTTP_PORT: 8080
-      WEBDAV_ENABLED: "true"
+      GRPC_PORT: 50051
+      QUIC_PORT: 4433
       WEBDAV_PORT: 8081
-      S3_ENABLED: "true"
       S3_PORT: 9001
-      S3_ACCESS_KEY: admin
-      S3_SECRET_KEY: password123
+      STORAGE_PATH: /data
+      CHUNK_SIZE: 1048576
       NATS_URL: nats://nats:4222
-      NATS_TOPIC_PREFIX: nas
-      VERSION_ENABLED: "true"
-      MAX_VERSIONS: 10
-      RETENTION_DAYS: 30
+      NATS_TOPIC_PREFIX: bench.nas
+      S3_ACCESS_KEY: minioadmin
+      S3_SECRET_KEY: minioadmin
+      S3_ENABLE_AUTH: false
+      AUTH_ENABLE: false
+      JWT_SECRET: bench
+      ACCESS_TOKEN_EXP: 3600
+      REFRESH_TOKEN_EXP: 604800
+      NODE_ENABLE: true
+      SEED_NODES: "node1:50051"
+      HEARTBEAT_INTERVAL: 2
+      NODE_TIMEOUT: 120
+      AUTO_SYNC: true
+      SYNC_INTERVAL: 2
+      MAX_FILES_PER_SYNC: 200
+      MAX_RETRIES: 3
       RUST_LOG: info
       RUST_BACKTRACE: 1
       ADVERTISE_HOST: node3
     ports:
-      - "9020:9000"
+      - "50053:50051"
       - "8100:8080"
       - "8101:8081"
       - "9021:9001"
+      - "4435:4433"
     volumes:
       - node3-data:/data
-      - node3-config:/app/config
     networks:
       - nas-network
     depends_on:
-      - nats
-      - node1
+      nats:
+        condition: service_healthy
+      node1:
+        condition: service_started
     restart: unless-stopped
-    user: "0:0"
-    # healthcheck:
-    #   test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
-    #   interval: 30s
-    #   timeout: 10s
-    #   retries: 3
-    #   start_period: 10s
 
 # ==================== 数据卷 ====================
 volumes:
   node1-data:
     driver: local
-    driver_opts:
-      type: none
-      o: bind
-      device: ./data/node1
-  node1-config:
-    driver: local
   node2-data:
     driver: local
-    driver_opts:
-      type: none
-      o: bind
-      device: ./data/node2
-  node2-config:
-    driver: local
   node3-data:
-    driver: local
-    driver_opts:
-      type: none
-      o: bind
-      device: ./data/node3
-  node3-config:
     driver: local
 
 # ==================== 网络 ====================

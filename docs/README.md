@@ -54,11 +54,15 @@
    - 日志查看
    - 故障排查
    - 性能测试
+7. **[测试脚本总览](testing-scripts.md)**
+   - 压测脚本（Docker）
+   - 本地冒烟测试
+   - WebDAV 互通测试
 
 ## 🎯 根据使用场景选择文档
 
 ### 我想快速测试 Silent-NAS
-→ [README 快速开始](../README.md#快速开始) → [运行指南](../RUNNING.md)
+→ [README 快速开始](../README.md#快速开始) → [运行指南](../RUNNING.md) → [测试脚本总览](testing-scripts.md)
 
 ### 我想在生产环境部署
 → [安装指南](installation.md) → [配置指南](configuration.md) → [部署指南](deployment.md)

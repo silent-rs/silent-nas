@@ -7,6 +7,10 @@ use std::sync::Arc;
 
 #[allow(unused_imports)]
 use super::{constants::*, types::DavLock};
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum IfTermKind { LockToken(String), ETag(String) }
+#[derive(Debug, Clone)]
+struct IfTerm { negate: bool, kind: IfTermKind }
 
 #[derive(Clone)]
 pub struct WebDavHandler {
@@ -214,23 +218,176 @@ impl WebDavHandler {
         out
     }
 
-    pub(super) async fn ensure_lock_ok(&self, path: &str, req: &Request) -> silent::Result<()> {
-        let locks = self.locks.read().await;
-        if let Some(list) = locks.get(path) {
-            let active: Vec<&crate::webdav::types::DavLock> = list.iter().filter(|l| !l.is_expired()).collect();
-            if !active.is_empty() {
-                let provided = self.extract_if_tokens_for_path(path, req);
-                if !provided.is_empty() {
-                    // 任一提供 token 匹配即可
-                    if active.iter().any(|l| provided.iter().any(|t| t == &l.token)) {
-                        return Ok(());
+    // 辅助类型定义移动到模块级（impl 内不支持定义）
+
+    fn current_etag(&self, path: &str) -> Option<String> {
+        let full = self.storage.get_full_path(path);
+        if let Ok(meta) = std::fs::metadata(full) {
+            let len = meta.len();
+            let ts = meta
+                .modified().ok()?
+                .duration_since(std::time::UNIX_EPOCH).ok()?
+                .as_secs();
+            Some(format!("\"{}-{}\"", len, ts))
+        } else { None }
+    }
+
+    fn parse_if_header_full(&self, header: &str) -> std::collections::HashMap<Option<String>, Vec<Vec<IfTerm>>> {
+        use std::collections::HashMap;
+        let mut map: HashMap<Option<String>, Vec<Vec<IfTerm>>> = HashMap::new();
+        let bytes = header.as_bytes();
+        let mut i = 0usize;
+        let mut current_tag: Option<String> = None;
+        fn is_ws(b: u8) -> bool { matches!(b, b' ' | b'\t' | b'\r' | b'\n') }
+        while i < bytes.len() {
+            if is_ws(bytes[i]) { i += 1; continue; }
+            match bytes[i] {
+                b'<' => {
+                    // 资源标签 <...>
+                    let start = i + 1;
+                    let mut j = start;
+                    while j < bytes.len() && bytes[j] != b'>' { j += 1; }
+                    if j < bytes.len() {
+                        if let Ok(s) = std::str::from_utf8(&bytes[start..j]) {
+                            current_tag = Some(s.to_string());
+                        }
+                        i = j + 1;
+                    } else { break; }
+                }
+                b'(' => {
+                    // 解析一个列表，直到配对 ')'
+                    i += 1;
+                    let mut terms: Vec<IfTerm> = Vec::new();
+                    loop {
+                        while i < bytes.len() && is_ws(bytes[i]) { i += 1; }
+                        if i >= bytes.len() { break; }
+                        if bytes[i] == b')' { i += 1; break; }
+                        // 可选 Not
+                        let mut negate = false;
+                        if bytes[i..].len() >= 3 {
+                            // 匹配大小写不敏感 "Not"
+                            let s = &header[i..];
+                            if s.to_ascii_lowercase().starts_with("not") {
+                                // 下一个必须是空白或 '<' '"' '('
+                                negate = true;
+                                i += 3;
+                                while i < bytes.len() && is_ws(bytes[i]) { i += 1; }
+                            }
+                        }
+                        if i >= bytes.len() { break; }
+                        match bytes[i] {
+                            b'<' => {
+                                // 锁令牌
+                                let start = i + 1;
+                                let mut j = start;
+                                while j < bytes.len() && bytes[j] != b'>' { j += 1; }
+                                if j < bytes.len() {
+                                    if let Ok(tok) = std::str::from_utf8(&bytes[start..j]) {
+                                        terms.push(IfTerm { negate, kind: IfTermKind::LockToken(tok.to_string()) });
+                                    }
+                                    i = j + 1;
+                                } else { break; }
+                            }
+                            b'"' => {
+                                // ETag（含双引号）
+                                let start = i;
+                                i += 1;
+                                let mut j = i;
+                                while j < bytes.len() && bytes[j] != b'"' { j += 1; }
+                                if j < bytes.len() {
+                                    // 包含引号
+                                    if let Ok(et) = std::str::from_utf8(&bytes[start..=j]) {
+                                        terms.push(IfTerm { negate, kind: IfTermKind::ETag(et.to_string()) });
+                                    }
+                                    i = j + 1;
+                                } else { break; }
+                            }
+                            _ => {
+                                // 未知 token，跳过到下一个空白或 ')'
+                                while i < bytes.len() && !is_ws(bytes[i]) && bytes[i] != b')' { i += 1; }
+                            }
+                        }
+                    }
+                    if !terms.is_empty() {
+                        map.entry(current_tag.clone()).or_default().push(terms);
                     }
                 }
-                return Err(SilentError::business_error(
-                    StatusCode::LOCKED,
-                    "资源被锁定或令牌缺失",
-                ));
+                _ => { i += 1; }
             }
+        }
+        map
+    }
+
+    async fn eval_if_header_for_path(&self, path: &str, req: &Request) -> bool {
+        let header = match req.headers().get("If").and_then(|h| h.to_str().ok()) { Some(s) => s, None => return false };
+        let conds = self.parse_if_header_full(header);
+        // 收集相关条件：未标记和与 path 匹配的标记
+        let target = self.build_full_href(path);
+        let mut lists: Vec<Vec<IfTerm>> = Vec::new();
+        if let Some(v) = conds.get(&None) { lists.extend_from_slice(v); }
+        for (tag, v) in &conds {
+            if let Some(t) = tag {
+                if t == &target || t.ends_with(&target) { lists.extend_from_slice(v); }
+            }
+        }
+        if lists.is_empty() { return false; }
+        // 收集当前锁令牌集（精确路径 + 祖先 depth=infinity）
+        let mut tokens: Vec<String> = Vec::new();
+        let locks = self.locks.read().await;
+        if let Some(list) = locks.get(path) { for l in list.iter().filter(|l| !l.is_expired()) { tokens.push(l.token.clone()); } }
+        // 祖先
+        let mut prefix = String::new();
+        for seg in path.split('/').filter(|s| !s.is_empty()) {
+            prefix.push('/'); prefix.push_str(seg);
+            if &prefix == path { break; }
+            if let Some(list) = locks.get(&prefix) {
+                for l in list.iter().filter(|l| !l.is_expired() && l.depth_infinity) {
+                    tokens.push(l.token.clone());
+                }
+            }
+        }
+        drop(locks);
+        let etag_now = self.current_etag(path);
+
+        // 评估：OR(AND(terms))
+        'outer: for terms in lists {
+            for t in terms {
+                let ok = match t.kind {
+                    IfTermKind::LockToken(ref tok) => tokens.iter().any(|x| x == tok),
+                    IfTermKind::ETag(ref val) => etag_now.as_deref() == Some(val.as_str()),
+                };
+                let final_ok = if t.negate { !ok } else { ok };
+                if !final_ok { continue 'outer; }
+            }
+            // 每个列表全部通过
+            return true;
+        }
+        false
+    }
+
+    pub(super) async fn ensure_lock_ok(&self, path: &str, req: &Request) -> silent::Result<()> {
+        // 若存在锁（本资源或祖先 Depth: infinity），需要 If 条件满足
+        let locks = self.locks.read().await;
+        let mut has_lock = false;
+        if let Some(list) = locks.get(path) {
+            has_lock |= list.iter().any(|l| !l.is_expired());
+        }
+        // 祖先
+        let mut prefix = String::new();
+        for seg in path.split('/').filter(|s| !s.is_empty()) {
+            prefix.push('/'); prefix.push_str(seg);
+            if &prefix == path { break; }
+            if let Some(list) = locks.get(&prefix) {
+                if list.iter().any(|l| !l.is_expired() && l.depth_infinity) {
+                    has_lock = true;
+                    break;
+                }
+            }
+        }
+        drop(locks);
+        if has_lock {
+            if self.eval_if_header_for_path(path, req).await { return Ok(()); }
+            return Err(SilentError::business_error(StatusCode::LOCKED, "资源被锁定或条件不满足"));
         }
         Ok(())
     }

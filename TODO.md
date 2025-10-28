@@ -34,21 +34,7 @@
     - [已完成] 运行参数与调试指引、故障注入与排障（docs/troubleshooting-sync.md）
 
   - 下一步计划（按优先级推进）：
-    1) 失败补偿队列 + 后台 worker（增强）
-       - 已完成：失败队列持久化至 <root>/.sync/fail_queue.json（自动加载/保存）
-       - 待完善：失败任务持久化字段扩充与清理策略（容量/过期）
-    2) 指标埋点与统计（增强）
-       - 成功/失败/重试次数/字节数/阶段时延（直方图）
-       - 输出 P50/P90/P95/Max；暴露到 /metrics 端点
-    3) 参数可配与热更新
-       - `sync.{interval, max_concurrency, batch_size, retry_max, timeouts}`
-       - 提供定时重载或 SIGHUP 重载配置
-    4) 同步阶段 tracing 埋点
-       - 连接、状态同步、内容传输阶段划分，携带 file_id
-    5) 故障注入与排障指引
-       - 环境开关模拟超时/断连/限速；文档化排障流程
-    6) 验收回归（已完成）
-       - 使用 `scripts/sync_3nodes_benchmark_docker.sh`（推荐 5 分钟窗口，N_FILES=200, CONCURRENCY=20）达成 P95<5s、成功率>99.9%
+    - 已全部完成，相关能力已落地并文档化（详见 docs/metrics-enhancements.md 与 docs/troubleshooting-sync.md）
 
 2) WebDAV 协议完善
 - 待完成：

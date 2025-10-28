@@ -41,6 +41,11 @@ impl WebDavHandler {
         };
         let body_str_lower = String::from_utf8_lossy(&xml_bytes).to_lowercase();
 
+        // 版本树（version-tree）：返回目标文件的版本列表
+        if body_str_lower.contains("version-tree") {
+            return self.report_versions(&path).await;
+        }
+
         if body_str_lower.contains("sync-collection") {
             // WebDAV Sync (RFC 6578) 简化实现：返回全量条目 + 新的 sync-token
             // 支持 Depth: 1 与 infinity
@@ -150,7 +155,83 @@ impl WebDavHandler {
             return Ok(resp);
         }
 
-        // 默认：返回 DeltaV 版本列表（保持原有能力）
+        // 自定义过滤（silent:filter）：按 mime/时间范围/limit 过滤（Depth: 1）
+        if body_str_lower.contains("silent:filter") || body_str_lower.contains("silent-filter") {
+            let (mime_prefix, after, before, limit) = Self::parse_filter_request(&xml_bytes);
+            let storage_path = self.storage.get_full_path(&path);
+            let meta = fs::metadata(&storage_path)
+                .await
+                .map_err(|_| SilentError::business_error(StatusCode::NOT_FOUND, "路径不存在"))?;
+            if !meta.is_dir() {
+                return Err(SilentError::business_error(StatusCode::BAD_REQUEST, "仅支持目录"));
+            }
+            let mut xml = String::new();
+            xml.push_str(XML_HEADER);
+            xml.push_str("<D:multistatus xmlns:D=\"DAV:\">");
+            let mut entries = fs::read_dir(&storage_path).await.map_err(|e| {
+                SilentError::business_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("读取目录失败: {}", e),
+                )
+            })?;
+            let mut count = 0usize;
+            while let Some(entry) = entries.next_entry().await.map_err(|e| {
+                SilentError::business_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("读取目录项失败: {}", e),
+                )
+            })? {
+                if let Some(maxn) = limit { if count >= maxn { break; } }
+                let entry_path = entry.path();
+                let m = fs::metadata(&entry_path).await.map_err(|e| {
+                    SilentError::business_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("读取元数据失败: {}", e),
+                    )
+                })?;
+                // 时间过滤
+                if let Some(a) = after {
+                    if !Self::modified_after(&entry_path, Some(a)) { continue; }
+                }
+                if let Some(b) = before {
+                    if Self::modified_after(&entry_path, Some(b)) { continue; }
+                }
+                // mime 过滤（仅文件）
+                if m.is_file() {
+                    if let Some(pref) = &mime_prefix {
+                        if let Some(ext) = entry_path.extension() {
+                            let mime = mime_guess::from_ext(&ext.to_string_lossy()).first_or_octet_stream();
+                            if !mime.essence_str().starts_with(pref) { continue; }
+                        }
+                    }
+                }
+                let relative_path = if path.is_empty() || path == "/" {
+                    format!("/{}", entry.file_name().to_string_lossy())
+                } else {
+                    format!("{}/{}", path, entry.file_name().to_string_lossy())
+                };
+                let href = self.build_full_href(&relative_path);
+                let is_dir = m.is_dir();
+                self.add_prop_response(&mut xml, &href, &entry_path, is_dir).await;
+                count += 1;
+            }
+            xml.push_str(XML_MULTISTATUS_END);
+            let mut resp = Response::text(&xml);
+            resp.set_status(StatusCode::MULTI_STATUS);
+            resp.headers_mut().insert(
+                http::header::CONTENT_TYPE,
+                http::HeaderValue::from_static(CONTENT_TYPE_XML),
+            );
+            return Ok(resp);
+        }
+
+        // 默认：返回版本列表（兼容旧行为）
+        self.report_versions(&path).await
+    }
+}
+
+impl WebDavHandler {
+    async fn report_versions(&self, path: &str) -> silent::Result<Response> {
         let files = self.storage.list_files().await.map_err(|e| {
             SilentError::business_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -172,18 +253,16 @@ impl WebDavHandler {
                     format!("获取版本失败: {}", e),
                 )
             })?;
-
         let mut xml = String::new();
         xml.push_str(XML_HEADER);
         xml.push_str("<D:multistatus xmlns:D=\"DAV:\">");
         for v in versions {
             xml.push_str(&format!(
                 "<D:response><D:href>{}</D:href><D:propstat><D:prop><D:version-name>{}</D:version-name><D:version-created>{}</D:version-created></D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>",
-                self.build_full_href(&path), v.version_id, v.created_at
+                self.build_full_href(path), v.version_id, v.created_at
             ));
         }
         xml.push_str(XML_MULTISTATUS_END);
-
         let mut resp = Response::text(&xml);
         resp.set_status(StatusCode::MULTI_STATUS);
         resp.headers_mut().insert(
@@ -192,9 +271,7 @@ impl WebDavHandler {
         );
         Ok(resp)
     }
-}
 
-impl WebDavHandler {
     fn parse_sync_collection_request(xml: &[u8]) -> (Option<usize>, Option<chrono::NaiveDateTime>) {
         let mut reader = Reader::from_reader(xml);
         reader.config_mut().trim_text(true);
@@ -240,6 +317,61 @@ impl WebDavHandler {
             if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(ts, "%Y-%m-%d %H:%M:%S") { return Some(dt); }
         }
         None
+    }
+
+    fn parse_filter_request(xml: &[u8]) -> (
+        Option<String>,
+        Option<chrono::NaiveDateTime>,
+        Option<chrono::NaiveDateTime>,
+        Option<usize>,
+    ) {
+        let mut reader = Reader::from_reader(xml);
+        reader.config_mut().trim_text(true);
+        let mut buf = Vec::new();
+        let mut in_mime = false;
+        let mut in_after = false;
+        let mut in_before = false;
+        let mut in_limit = false;
+        let mut mime: Option<String> = None;
+        let mut after: Option<chrono::NaiveDateTime> = None;
+        let mut before: Option<chrono::NaiveDateTime> = None;
+        let mut limit: Option<usize> = None;
+        loop {
+            match reader.read_event_into(&mut buf) {
+                Ok(Event::Start(e)) => {
+                    let name = String::from_utf8_lossy(e.name().as_ref()).to_ascii_lowercase();
+                    in_mime = name.ends_with("mime");
+                    in_after = name.ends_with("modified-after");
+                    in_before = name.ends_with("modified-before");
+                    in_limit = name.ends_with("limit");
+                }
+                Ok(Event::End(_)) => {
+                    in_mime = false; in_after = false; in_before = false; in_limit = false;
+                }
+                Ok(Event::Text(t)) => {
+                    let s = String::from_utf8_lossy(&t.into_inner()).trim().to_string();
+                    if in_mime && !s.is_empty() { mime = Some(s.clone()); }
+                    if in_limit && !s.is_empty() { if let Ok(n) = s.parse() { limit = Some(n); } }
+                    if in_after && !s.is_empty() {
+                        if let Some(dt) = Self::parse_datetime(&s) { after = Some(dt); }
+                    }
+                    if in_before && !s.is_empty() {
+                        if let Some(dt) = Self::parse_datetime(&s) { before = Some(dt); }
+                    }
+                }
+                Ok(Event::Eof) => break,
+                Err(_) => break,
+                _ => {}
+            }
+            buf.clear();
+        }
+        (mime, after, before, limit)
+    }
+
+    fn parse_datetime(s: &str) -> Option<chrono::NaiveDateTime> {
+        if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) { return Some(dt.naive_local()); }
+        if let Ok(dt) = chrono::DateTime::parse_from_rfc2822(s) { return Some(dt.naive_local()); }
+        chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S").ok()
     }
 
     fn modified_after(path: &std::path::Path, since: Option<chrono::NaiveDateTime>) -> bool {

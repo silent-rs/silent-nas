@@ -71,7 +71,7 @@ impl WebDavHandler {
                 // 列出自身（仅在全量请求时包含根目录）
                 let href = self.build_full_href(&path);
                 if since_token_time.is_none() {
-                    Self::add_prop_response(&mut xml, &href, &storage_path, true).await;
+                    self.add_prop_response(&mut xml, &href, &storage_path, true).await;
                 }
                 if depth.eq_ignore_ascii_case("infinity") {
                     // 递归列出（仅包含变化项）
@@ -110,7 +110,7 @@ impl WebDavHandler {
                             };
                             let href = self.build_full_href(&relative_path);
                             let is_dir = entry_path.is_dir();
-                            Self::add_prop_response(&mut xml, &href, &entry_path, is_dir).await;
+                            self.add_prop_response(&mut xml, &href, &entry_path, is_dir).await;
                             count += 1;
                         }
                     }
@@ -120,7 +120,7 @@ impl WebDavHandler {
                 // 单文件：若自 token 以来有变化则返回
                 if Self::modified_after(&storage_path, since_token_time) || since_token_time.is_none() {
                     let href = self.build_full_href(&path);
-                    Self::add_prop_response(&mut xml, &href, &storage_path, false).await;
+                    self.add_prop_response(&mut xml, &href, &storage_path, false).await;
                     count_used = 1;
                 }
             }
@@ -295,7 +295,7 @@ impl WebDavHandler {
                 if *count_left == 0 { break; }
                 if Self::modified_after(&p, since) {
                     let href = self.build_full_href(&rel);
-                    Self::add_prop_response(xml, &href, &p, is_dir).await;
+                    self.add_prop_response(xml, &href, &p, is_dir).await;
                     *count_left = count_left.saturating_sub(1);
                 }
                 if is_dir {

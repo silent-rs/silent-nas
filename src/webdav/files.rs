@@ -86,7 +86,7 @@ impl WebDavHandler {
         xml.push_str(XML_NS_DAV);
         if metadata.is_dir() {
             let full_href = self.build_full_href(&path);
-            Self::add_prop_response(&mut xml, &full_href, &storage_path, true).await;
+            self.add_prop_response(&mut xml, &full_href, &storage_path, true).await;
             if depth != "0" {
                 if depth.eq_ignore_ascii_case("infinity") {
                     self.walk_propfind_recursive(&storage_path, &path, &mut xml)
@@ -112,13 +112,13 @@ impl WebDavHandler {
                         };
                         let full_href = self.build_full_href(&relative_path);
                         let is_dir = entry_path.is_dir();
-                        Self::add_prop_response(&mut xml, &full_href, &entry_path, is_dir).await;
+                        self.add_prop_response(&mut xml, &full_href, &entry_path, is_dir).await;
                     }
                 }
             }
         } else {
             let full_href = self.build_full_href(&path);
-            Self::add_prop_response(&mut xml, &full_href, &storage_path, false).await;
+            self.add_prop_response(&mut xml, &full_href, &storage_path, false).await;
         }
         xml.push_str(XML_MULTISTATUS_END);
 
@@ -143,7 +143,7 @@ impl WebDavHandler {
         Ok(resp)
     }
 
-    pub(super) async fn add_prop_response(xml: &mut String, href: &str, path: &Path, is_dir: bool) {
+    pub(super) async fn add_prop_response(&self, xml: &mut String, href: &str, path: &Path, is_dir: bool) {
         let metadata = match fs::metadata(path).await {
             Ok(m) => m,
             Err(_) => return,
@@ -223,11 +223,41 @@ impl WebDavHandler {
                 ));
             }
         }
-        // 注：扩展属性输出在当前实现中由上层处理，标准属性在此处输出
+        // 扩展属性（自定义属性）：仅输出结构化键 ns:{URI}#{local}
+        let key_for_props = if is_dir { href.trim_end_matches('/').to_string() } else { href.to_string() };
+        if let Some(map) = self.props.read().await.get(&key_for_props) {
+            for (k, v) in map {
+                if let Some(rest) = k.strip_prefix("ns:") {
+                    if let Some((uri, local)) = rest.split_once('#') {
+                        let val = v.as_str();
+                        let esc = WebDavHandler::xml_escape(val);
+                        xml.push_str(&format!(
+                            "<x:{} xmlns:x=\"{}\">{}</x:{}>",
+                            local, uri, esc, local
+                        ));
+                    }
+                }
+            }
+        }
         xml.push_str("</D:prop>");
         xml.push_str("<D:status>HTTP/1.1 200 OK</D:status>");
         xml.push_str("</D:propstat>");
         xml.push_str("</D:response>");
+    }
+
+    pub(super) fn xml_escape(s: &str) -> String {
+        let mut out = String::with_capacity(s.len());
+        for ch in s.chars() {
+            match ch {
+                '&' => out.push_str("&amp;"),
+                '<' => out.push_str("&lt;"),
+                '>' => out.push_str("&gt;"),
+                '"' => out.push_str("&quot;"),
+                '\'' => out.push_str("&apos;"),
+                _ => out.push(ch),
+            }
+        }
+        out
     }
 
     fn calc_etag_from_meta(metadata: &std::fs::Metadata) -> Option<String> {
@@ -303,7 +333,7 @@ impl WebDavHandler {
                 };
                 let full_href = self.build_full_href(&relative_path);
                 let is_dir = entry_path.is_dir();
-                Self::add_prop_response(xml, &full_href, &entry_path, is_dir).await;
+                self.add_prop_response(xml, &full_href, &entry_path, is_dir).await;
                 if is_dir {
                     stack.push((entry_path, relative_path));
                 }

@@ -144,6 +144,17 @@ impl WebDavHandler {
     }
 
     pub(super) async fn add_prop_response(&self, xml: &mut String, href: &str, path: &Path, is_dir: bool) {
+        self.add_prop_response_with_filter(xml, href, path, is_dir, None).await;
+    }
+
+    pub(super) async fn add_prop_response_with_filter(
+        &self,
+        xml: &mut String,
+        href: &str,
+        path: &Path,
+        is_dir: bool,
+        props_filter: Option<&std::collections::HashSet<String>>,
+    ) {
         let metadata = match fs::metadata(path).await {
             Ok(m) => m,
             Err(_) => return,
@@ -160,34 +171,48 @@ impl WebDavHandler {
         xml.push_str("<D:prop>");
 
         // displayname - 必须在最前面，macOS Finder 严格要求
-        let displayname = if href_with_slash == "/" {
-            "/".to_string()
-        } else {
-            let s = href_with_slash.trim_end_matches('/');
-            s.rsplit('/').next().unwrap_or(s).to_string()
-        };
-        xml.push_str(&format!("<D:displayname>{}</D:displayname>", displayname));
+        if props_filter.is_none() || props_filter.unwrap().contains("displayname") {
+            let displayname = if href_with_slash == "/" {
+                "/".to_string()
+            } else {
+                let s = href_with_slash.trim_end_matches('/');
+                s.rsplit('/').next().unwrap_or(s).to_string()
+            };
+            xml.push_str(&format!("<D:displayname>{}</D:displayname>", displayname));
+        }
 
         // resourcetype - 必须明确声明集合类型，macOS Finder 严格检查
         if is_dir {
-            xml.push_str("<D:resourcetype><D:collection/></D:resourcetype>");
+            if props_filter.is_none() || props_filter.unwrap().contains("resourcetype") {
+                xml.push_str("<D:resourcetype><D:collection/></D:resourcetype>");
+            }
             // 兼容 Finder：目录不返回 getcontentlength
             // 为目录生成动态 ETag，基于目录内容
-            if let Some(etag) = Self::calc_dir_etag(path).await {
-                xml.push_str(&format!("<D:getetag>{}</D:getetag>", etag));
+            if props_filter.is_none() || props_filter.unwrap().contains("getetag") {
+                if let Some(etag) = Self::calc_dir_etag(path).await {
+                    xml.push_str(&format!("<D:getetag>{}</D:getetag>", etag));
+                }
             }
         } else {
-            xml.push_str("<D:resourcetype/>");
-            xml.push_str(&format!(
-                "<D:getcontentlength>{}</D:getcontentlength>",
-                metadata.len()
-            ));
-            if let Some(ext) = path.extension() {
-                let mime = mime_guess::from_ext(&ext.to_string_lossy()).first_or_octet_stream();
-                xml.push_str(&format!("<D:getcontenttype>{}</D:getcontenttype>", mime));
+            if props_filter.is_none() || props_filter.unwrap().contains("resourcetype") {
+                xml.push_str("<D:resourcetype/>");
             }
-            if let Some(etag) = Self::calc_etag_from_meta(&metadata) {
-                xml.push_str(&format!("<D:getetag>{}</D:getetag>", etag));
+            if props_filter.is_none() || props_filter.unwrap().contains("getcontentlength") {
+                xml.push_str(&format!(
+                    "<D:getcontentlength>{}</D:getcontentlength>",
+                    metadata.len()
+                ));
+            }
+            if props_filter.is_none() || props_filter.unwrap().contains("getcontenttype") {
+                if let Some(ext) = path.extension() {
+                    let mime = mime_guess::from_ext(&ext.to_string_lossy()).first_or_octet_stream();
+                    xml.push_str(&format!("<D:getcontenttype>{}</D:getcontenttype>", mime));
+                }
+            }
+            if props_filter.is_none() || props_filter.unwrap().contains("getetag") {
+                if let Some(etag) = Self::calc_etag_from_meta(&metadata) {
+                    xml.push_str(&format!("<D:getetag>{}</D:getetag>", etag));
+                }
             }
         }
         // creationdate（尽量取文件创建时间，否则回退到修改时间）
@@ -204,27 +229,32 @@ impl WebDavHandler {
         } else {
             None
         };
-        if let Some(dt) = creation_dt {
-            xml.push_str(&format!(
-                "<D:creationdate>{}</D:creationdate>",
-                dt.format("%Y-%m-%dT%H:%M:%SZ")
-            ));
+        if props_filter.is_none() || props_filter.unwrap().contains("creationdate") {
+            if let Some(dt) = creation_dt {
+                xml.push_str(&format!(
+                    "<D:creationdate>{}</D:creationdate>",
+                    dt.format("%Y-%m-%dT%H:%M:%SZ")
+                ));
+            }
         }
 
         // getlastmodified - 使用文件系统的实际修改时间
-        if let Ok(modified) = metadata.modified()
-            && let Ok(datetime) = modified.duration_since(std::time::UNIX_EPOCH)
-        {
-            let timestamp = chrono::DateTime::from_timestamp(datetime.as_secs() as i64, 0);
-            if let Some(dt) = timestamp {
-                xml.push_str(&format!(
-                    "<D:getlastmodified>{}</D:getlastmodified>",
-                    dt.format("%a, %d %b %Y %H:%M:%S GMT")
-                ));
+        if props_filter.is_none() || props_filter.unwrap().contains("getlastmodified") {
+            if let Ok(modified) = metadata.modified()
+                && let Ok(datetime) = modified.duration_since(std::time::UNIX_EPOCH)
+            {
+                let timestamp = chrono::DateTime::from_timestamp(datetime.as_secs() as i64, 0);
+                if let Some(dt) = timestamp {
+                    xml.push_str(&format!(
+                        "<D:getlastmodified>{}</D:getlastmodified>",
+                        dt.format("%a, %d %b %Y %H:%M:%S GMT")
+                    ));
+                }
             }
         }
         // 扩展属性（自定义属性）：仅输出结构化键 ns:{URI}#{local}
         let key_for_props = if is_dir { href.trim_end_matches('/').to_string() } else { href.to_string() };
+        if props_filter.is_none() || props_filter.unwrap().contains("prop") {
         if let Some(map) = self.props.read().await.get(&key_for_props) {
             for (k, v) in map {
                 if let Some(rest) = k.strip_prefix("ns:") {
@@ -238,6 +268,7 @@ impl WebDavHandler {
                     }
                 }
             }
+        }
         }
         xml.push_str("</D:prop>");
         xml.push_str("<D:status>HTTP/1.1 200 OK</D:status>");

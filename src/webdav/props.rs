@@ -174,6 +174,7 @@ impl WebDavHandler {
                         continue;
                     }
                     if let Some(val) = v {
+                        Self::validate_prop_value(&key, &val)?;
                         // 限制属性值大小，防止滥用
                         let vshort = if val.len() > 4096 { val[..4096].to_string() } else { val };
                         entry.insert(key, vshort);
@@ -188,6 +189,7 @@ impl WebDavHandler {
                         continue;
                     }
                     if let Some(val) = v {
+                        Self::validate_prop_value(&key, &val)?;
                         let vshort = if val.len() > 4096 { val[..4096].to_string() } else { val };
                         entry.insert(key, vshort);
                     } else {
@@ -213,6 +215,9 @@ impl WebDavHandler {
         }
         self.persist_props().await;
 
+        // 审计：记录属性变更
+        self.append_change("prop:patch", &path);
+
         let mut resp = Response::text("");
         resp.set_status(StatusCode::MULTI_STATUS);
         resp.headers_mut().insert(
@@ -220,6 +225,33 @@ impl WebDavHandler {
             http::HeaderValue::from_static(CONTENT_TYPE_XML),
         );
         Ok(resp)
+    }
+
+    fn validate_prop_value(key: &str, val: &str) -> silent::Result<()> {
+        // 简单类型约定：local 名以 ".bool" 结尾时必须为 true/false；以 ".int" 结尾时必须为整数
+        let local = if let Some(rest) = key.strip_prefix("ns:") {
+            rest.split('#').nth(1).unwrap_or(rest)
+        } else {
+            key
+        };
+        if local.ends_with(".bool") {
+            let v = val.trim().to_ascii_lowercase();
+            if v != "true" && v != "false" {
+                return Err(SilentError::business_error(
+                    StatusCode::BAD_REQUEST,
+                    format!("属性 {} 期望布尔值", key),
+                ));
+            }
+        }
+        if local.ends_with(".int") {
+            if val.trim().parse::<i64>().is_err() {
+                return Err(SilentError::business_error(
+                    StatusCode::BAD_REQUEST,
+                    format!("属性 {} 期望整数", key),
+                ));
+            }
+        }
+        Ok(())
     }
 }
 

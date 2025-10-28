@@ -6,6 +6,33 @@ use silent::prelude::*;
 use tokio::fs;
 
 impl WebDavHandler {
+    fn parse_prop_filter(xml: &[u8]) -> Option<std::collections::HashSet<String>> {
+        let mut reader = Reader::from_reader(xml);
+        reader.config_mut().trim_text(true);
+        let mut buf = Vec::new();
+        let mut in_prop = false;
+        let mut set = std::collections::HashSet::new();
+        loop {
+            match reader.read_event_into(&mut buf) {
+                Ok(Event::Start(e)) => {
+                    let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                    let lname = name.split(':').last().unwrap_or(&name).to_lowercase();
+                    if lname == "prop" { in_prop = true; }
+                    else if in_prop { set.insert(lname); }
+                }
+                Ok(Event::End(e)) => {
+                    let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                    let lname = name.split(':').last().unwrap_or(&name).to_lowercase();
+                    if lname == "prop" { in_prop = false; }
+                }
+                Ok(Event::Eof) => break,
+                Err(_) => break,
+                _ => {}
+            }
+            buf.clear();
+        }
+        if set.is_empty() { None } else { Some(set) }
+    }
     /// VERSION-CONTROL - 启用版本控制（简化为标记属性）
     pub(super) async fn handle_version_control(&self, path: &str) -> silent::Result<Response> {
         let path = Self::decode_path(path)?;
@@ -60,6 +87,11 @@ impl WebDavHandler {
             let mut xml = String::new();
             xml.push_str(XML_HEADER);
             xml.push_str("<D:multistatus xmlns:D=\"DAV:\">");
+            let props_filter = Self::parse_prop_filter(&xml_bytes);
+            let props_filter = Self::parse_prop_filter(&xml_bytes);
+            let props_filter = Self::parse_prop_filter(&xml_bytes);
+            let props_filter = Self::parse_prop_filter(&xml_bytes);
+            let props_filter = Self::parse_prop_filter(&xml_bytes);
             // 生成新的 sync-token（使用 scru128，符合ID规则；同时包含当前时间）
             let token = format!(
                 "urn:sync:{}:{}",
@@ -87,6 +119,7 @@ impl WebDavHandler {
                         &mut xml,
                         since_token_time,
                         &mut count_left,
+                        props_filter.as_ref(),
                     )
                     .await?;
                     count_used = limit.unwrap_or(usize::MAX) - count_left;
@@ -115,7 +148,11 @@ impl WebDavHandler {
                             };
                             let href = self.build_full_href(&relative_path);
                             let is_dir = entry_path.is_dir();
-                            self.add_prop_response(&mut xml, &href, &entry_path, is_dir).await;
+                            if let Some(ref filt) = props_filter {
+                                self.add_prop_response_with_filter(&mut xml, &href, &entry_path, is_dir, Some(filt)).await;
+                            } else {
+                                self.add_prop_response(&mut xml, &href, &entry_path, is_dir).await;
+                            }
                             count += 1;
                         }
                     }
@@ -125,7 +162,11 @@ impl WebDavHandler {
                 // 单文件：若自 token 以来有变化则返回
                 if Self::modified_after(&storage_path, since_token_time) || since_token_time.is_none() {
                     let href = self.build_full_href(&path);
-                    self.add_prop_response(&mut xml, &href, &storage_path, false).await;
+                    if let Some(ref filt) = props_filter {
+                        self.add_prop_response_with_filter(&mut xml, &href, &storage_path, false, Some(filt)).await;
+                    } else {
+                        self.add_prop_response(&mut xml, &href, &storage_path, false).await;
+                    }
                     count_used = 1;
                 }
             }
@@ -212,7 +253,11 @@ impl WebDavHandler {
                 };
                 let href = self.build_full_href(&relative_path);
                 let is_dir = m.is_dir();
-                self.add_prop_response(&mut xml, &href, &entry_path, is_dir).await;
+                if let Some(filt) = Self::parse_prop_filter(&xml_bytes) {
+                    self.add_prop_response_with_filter(&mut xml, &href, &entry_path, is_dir, Some(&filt)).await;
+                } else {
+                    self.add_prop_response(&mut xml, &href, &entry_path, is_dir).await;
+                }
                 count += 1;
             }
             xml.push_str(XML_MULTISTATUS_END);
@@ -395,6 +440,7 @@ impl WebDavHandler {
         xml: &mut String,
         since: Option<chrono::NaiveDateTime>,
         count_left: &mut usize,
+        props_filter: Option<&std::collections::HashSet<String>>,
     ) -> silent::Result<()> {
         if *count_left == 0 { return Ok(()); }
         let mut stack: Vec<(std::path::PathBuf, String)> = vec![(dir_path.to_path_buf(), relative.to_string())];
@@ -427,7 +473,11 @@ impl WebDavHandler {
                 if *count_left == 0 { break; }
                 if Self::modified_after(&p, since) {
                     let href = self.build_full_href(&rel);
-                    self.add_prop_response(xml, &href, &p, is_dir).await;
+                    if let Some(filt) = props_filter {
+                        self.add_prop_response_with_filter(xml, &href, &p, is_dir, Some(filt)).await;
+                    } else {
+                        self.add_prop_response(xml, &href, &p, is_dir).await;
+                    }
                     *count_left = count_left.saturating_sub(1);
                 }
                 if is_dir {

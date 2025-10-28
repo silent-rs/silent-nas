@@ -39,11 +39,31 @@ impl WebDavHandler {
             let mut current_name: Option<String> = None;
             let mut current_text: Option<String> = None;
             let mut updates: Vec<(String, Option<String>)> = Vec::new();
+            let mut fq_updates: Vec<(String, Option<String>)> = Vec::new();
+            // 命名空间上下文栈
+            let mut ns_stack: Vec<std::collections::HashMap<String, String>> = Vec::new();
 
             loop {
                 match reader.read_event_into(&mut buf) {
                     Ok(Event::Start(e)) => {
                         let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                        // 处理 xmlns 声明
+                        let mut ns_map = ns_stack.last().cloned().unwrap_or_default();
+                        for a in e.attributes().with_checks(false) {
+                            if let Ok(attr) = a {
+                                let key = String::from_utf8_lossy(attr.key.as_ref()).to_string();
+                                if key == "xmlns" {
+                                    if let Ok(val) = String::from_utf8(attr.value.into_owned()) {
+                                        ns_map.insert(String::new(), val);
+                                    }
+                                } else if let Some(suffix) = key.strip_prefix("xmlns:") {
+                                    if let Ok(val) = String::from_utf8(attr.value.into_owned()) {
+                                        ns_map.insert(suffix.to_string(), val);
+                                    }
+                                }
+                            }
+                        }
+                        ns_stack.push(ns_map);
                         match name.as_str() {
                             "set" | "D:set" => in_set = true,
                             "remove" | "D:remove" => in_remove = true,
@@ -63,13 +83,33 @@ impl WebDavHandler {
                             _ => {
                                 if let Some(key) = current_name.take() {
                                     if in_set {
-                                        updates.push((key, current_text.take()));
+                                        // 原始前缀键
+                                        updates.push((key.clone(), current_text.clone()));
+                                        // 生成命名空间完全限定键 ns:{uri}#{local}
+                                        if let Some(ns_ctx) = ns_stack.last() {
+                                            let (pref, local) = key.split_once(':').unwrap_or(("", key.as_str()));
+                                            if let Some(uri) = ns_ctx.get(pref) {
+                                                fq_updates.push((format!("ns:{}#{}", uri, local), current_text.take()));
+                                            } else if let Some(uri) = ns_ctx.get("") {
+                                                fq_updates.push((format!("ns:{}#{}", uri, local), current_text.take()));
+                                            }
+                                        }
                                     } else if in_remove {
-                                        updates.push((key, None));
+                                        updates.push((key.clone(), None));
+                                        if let Some(ns_ctx) = ns_stack.last() {
+                                            let (pref, local) = key.split_once(':').unwrap_or(("", key.as_str()));
+                                            if let Some(uri) = ns_ctx.get(pref) {
+                                                fq_updates.push((format!("ns:{}#{}", uri, local), None));
+                                            } else if let Some(uri) = ns_ctx.get("") {
+                                                fq_updates.push((format!("ns:{}#{}", uri, local), None));
+                                            }
+                                        }
                                     }
                                 }
                             }
                         }
+                        // 出栈当前元素的命名空间上下文
+                        let _ = ns_stack.pop();
                     }
                     Ok(Event::Text(t)) => {
                         if current_text.is_some() {
@@ -85,10 +125,18 @@ impl WebDavHandler {
                 }
                 buf.clear();
             }
-            if !updates.is_empty() {
+            if !updates.is_empty() || !fq_updates.is_empty() {
                 let mut props = self.props.write().await;
                 let entry = props.entry(path.clone()).or_default();
                 for (k, v) in updates {
+                    let key = k.trim().to_string();
+                    if let Some(val) = v {
+                        entry.insert(key, val);
+                    } else {
+                        entry.remove(&key);
+                    }
+                }
+                for (k, v) in fq_updates {
                     let key = k.trim().to_string();
                     if let Some(val) = v {
                         entry.insert(key, val);
@@ -176,6 +224,8 @@ mod tests {
             // 记录的键为元素名（包含前缀）
             assert_eq!(entry.get("Z:category").unwrap(), "interop");
             assert!(entry.contains_key("prop:last-proppatch"));
+            // 记录命名空间完全限定键
+            assert_eq!(entry.get("ns:urn:x-example#category").unwrap(), "interop");
         }
 
         // remove 属性
@@ -190,6 +240,7 @@ mod tests {
             let props = handler.props.read().await;
             let entry = props.get(path).unwrap();
             assert!(!entry.contains_key("Z:category"));
+            assert!(!entry.contains_key("ns:urn:x-example#category"));
             assert!(entry.contains_key("prop:last-proppatch"));
         }
     }

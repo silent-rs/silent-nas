@@ -360,6 +360,9 @@ struct CompTask {
     /// 创建时间
     #[serde(default = "CompTask::default_created_at")]
     created_at: NaiveDateTime,
+    /// 最近一次错误信息（可选，用于诊断）
+    #[serde(default)]
+    last_error: Option<String>,
 }
 
 /// 跨节点同步协调器
@@ -456,9 +459,16 @@ impl NodeSyncCoordinator {
     }
 
     /// 入队失败补偿任务
-    async fn enqueue_compensation(&self, target_node_id: &str, file_id: &str, attempt: u32) {
+    async fn enqueue_compensation(
+        &self,
+        target_node_id: &str,
+        file_id: &str,
+        attempt: u32,
+        last_error: Option<String>,
+    ) {
         let next_secs = Self::backoff_secs(attempt);
         let when = Local::now().naive_local() + chrono::TimeDelta::seconds(next_secs as i64);
+        let err_dbg = last_error.clone();
         let task = CompTask {
             id: scru128::new_string(),
             target_node_id: target_node_id.to_string(),
@@ -466,6 +476,7 @@ impl NodeSyncCoordinator {
             attempt,
             next_at: when,
             created_at: Local::now().naive_local(),
+            last_error,
         };
         {
             let mut q = self.fail_queue.write().await;
@@ -476,9 +487,12 @@ impl NodeSyncCoordinator {
         if let Err(e) = self.persist_fail_queue().await {
             warn!("补偿队列持久化失败: {}", e);
         }
+        // 指标：更新队列长度
+        let q_len = self.fail_queue.read().await.len() as i64;
+        crate::metrics::set_sync_fail_queue_length(q_len);
         warn!(
-            "补偿入队: file_id={}, node={}, attempt={}, next_in={}s",
-            file_id, target_node_id, attempt, next_secs
+            "补偿入队: file_id={}, node={}, attempt={}, next_in={}s, err={:?}",
+            file_id, target_node_id, attempt, next_secs, err_dbg
         );
     }
 
@@ -527,16 +541,42 @@ impl NodeSyncCoordinator {
                         warn!("补偿后持久化失败: {}", e);
                     }
                 }
-                Ok(_) | Err(_) => {
+                Ok(_) => {
                     let next_attempt = task.attempt.saturating_add(1);
                     let max_retry = { self.config.read().await.max_retries };
                     if next_attempt <= (max_retry * 3).max(3) {
-                        self.enqueue_compensation(
-                            &task.target_node_id,
-                            &task.file_id,
-                            next_attempt,
-                        )
-                        .await;
+                        self
+                            .enqueue_compensation(
+                                &task.target_node_id,
+                                &task.file_id,
+                                next_attempt,
+                                Some("no_files_synced".to_string()),
+                            )
+                            .await;
+                        crate::metrics::record_sync_retry("transfer");
+                    } else {
+                        error!(
+                            "补偿放弃: file_id={}, node={}, final_attempt={}",
+                            task.file_id, task.target_node_id, task.attempt
+                        );
+                        if let Err(e) = self.persist_fail_queue().await {
+                            warn!("放弃后持久化失败: {}", e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    let next_attempt = task.attempt.saturating_add(1);
+                    let max_retry = { self.config.read().await.max_retries };
+                    if next_attempt <= (max_retry * 3).max(3) {
+                        self
+                            .enqueue_compensation(
+                                &task.target_node_id,
+                                &task.file_id,
+                                next_attempt,
+                                Some(e.to_string()),
+                            )
+                            .await;
+                        crate::metrics::record_sync_retry("transfer");
                     } else {
                         error!(
                             "补偿放弃: file_id={}, node={}, final_attempt={}",
@@ -563,6 +603,7 @@ impl NodeSyncCoordinator {
         fs::write(&self.fail_queue_path, data)
             .await
             .map_err(|e| NasError::Other(format!("写入补偿队列失败: {}", e)))?;
+        crate::metrics::set_sync_fail_queue_length(q.len() as i64);
         Ok(())
     }
 
@@ -582,6 +623,7 @@ impl NodeSyncCoordinator {
                         cfg.fail_task_ttl_secs as i64,
                         cfg.fail_queue_max,
                     );
+                    crate::metrics::set_sync_fail_queue_length(q.len() as i64);
                     info!(
                         "已加载补偿队列: {} 项 -> {:?}",
                         q.len(),
@@ -770,6 +812,7 @@ impl NodeSyncCoordinator {
                                                 "error",
                                                 t_verify.elapsed().as_secs_f64(),
                                             );
+                                            crate::metrics::record_sync_retry("verify");
                                         }
                                     }
                                 }
@@ -779,6 +822,7 @@ impl NodeSyncCoordinator {
                                 {
                                     verified = false;
                                     warn!("故障注入：校验失败 file_id={}", file_id);
+                                    crate::metrics::record_sync_retry("verify");
                                 }
 
                                 if verified {
@@ -800,9 +844,17 @@ impl NodeSyncCoordinator {
                                     );
                                 } else {
                                     // 校验不通过，入队补偿重试
-                                    self.enqueue_compensation(node_id, file_id, 1).await;
+                                    self
+                                        .enqueue_compensation(
+                                            node_id,
+                                            file_id,
+                                            1,
+                                            Some("verify_failed".to_string()),
+                                        )
+                                        .await;
                                     // 维持原有短暂等待与重试退出逻辑，避免阻塞批量
                                     retry_count += 1;
+                                    crate::metrics::record_sync_retry("verify");
                                     if retry_count >= cfg_now.max_retries {
                                         warn!("达到最大重试次数（含校验失败），停止同步");
                                         break;
@@ -816,8 +868,16 @@ impl NodeSyncCoordinator {
                                     file_id, node_address, e
                                 );
                                 // 传输失败，入队补偿重试
-                                self.enqueue_compensation(node_id, file_id, 1).await;
+                                self
+                                    .enqueue_compensation(
+                                        node_id,
+                                        file_id,
+                                        1,
+                                        Some(e.to_string()),
+                                    )
+                                    .await;
                                 retry_count += 1;
+                                crate::metrics::record_sync_retry("transfer");
 
                                 if retry_count >= cfg_now.max_retries {
                                     warn!("达到最大重试次数，停止同步");
@@ -1128,11 +1188,14 @@ mod tests {
         let syncm = SyncManager::new("node-test".into(), storage.clone(), None);
         let nm = NodeManager::new(NodeDiscoveryConfig::default(), syncm.clone());
         let coord = NodeSyncCoordinator::new(SyncConfig::default(), nm, syncm, storage);
-        coord.enqueue_compensation("node-x", "file-1", 0).await;
+        coord
+            .enqueue_compensation("node-x", "file-1", 0, Some("unit_test".into()))
+            .await;
         let q = coord.fail_queue.read().await;
         assert_eq!(q.len(), 1);
         let t = q.front().unwrap();
         assert_eq!(t.target_node_id, "node-x");
         assert_eq!(t.file_id, "file-1");
+        assert_eq!(t.last_error.as_deref(), Some("unit_test"));
     }
 }

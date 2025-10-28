@@ -276,6 +276,26 @@ impl WebDavHandler {
                         }
                     }
                 }
+                Ok(Event::Empty(e)) => {
+                    // 空元素（如 <D:displayname/> 或 <Q:category xmlns:Q="..."/>）
+                    let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                    let lname = name
+                        .split(':')
+                        .next_back()
+                        .unwrap_or(name.as_str())
+                        .to_lowercase();
+                    if in_prop {
+                        set.insert(lname);
+                    }
+                    for attr in e.attributes().with_checks(false).flatten() {
+                        let key = String::from_utf8_lossy(attr.key.as_ref()).to_string();
+                        if let Some(pref) = key.strip_prefix("xmlns:")
+                            && let Ok(val) = String::from_utf8(attr.value.into_owned())
+                        {
+                            ns_map.insert(val, pref.to_string());
+                        }
+                    }
+                }
                 Ok(Event::End(e)) => {
                     let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
                     let lname = name
@@ -292,6 +312,41 @@ impl WebDavHandler {
                 _ => {}
             }
             buf.clear();
+        }
+        if set.is_empty() {
+            // 回退：简单字符串扫描以兼容空元素未被捕获等情况
+            let s = String::from_utf8_lossy(xml).to_lowercase();
+            if s.contains("<d:prop") || s.contains("<prop") {
+                let bytes = s.as_bytes();
+                let mut i = 0usize;
+                while i < bytes.len() {
+                    if bytes[i] == b'<' {
+                        i += 1;
+                        if i >= bytes.len() {
+                            break;
+                        }
+                        // 跳过结束或声明
+                        if matches!(bytes[i], b'/' | b'?' | b'!') {
+                            continue;
+                        }
+                        let start = i;
+                        while i < bytes.len() && !matches!(bytes[i], b'>' | b' ' | b'/') {
+                            i += 1;
+                        }
+                        let end = i.min(bytes.len());
+                        if end > start {
+                            let tag = &s[start..end];
+                            // 取本地名
+                            let lname = tag.rsplit(':').next().unwrap_or(tag);
+                            if lname != "prop" && lname != "propfind" {
+                                set.insert(lname.to_string());
+                            }
+                        }
+                    } else {
+                        i += 1;
+                    }
+                }
+            }
         }
         let filter = if set.is_empty() { None } else { Some(set) };
         (filter, ns_map)

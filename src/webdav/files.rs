@@ -316,9 +316,7 @@ impl WebDavHandler {
         } else {
             href.to_string()
         };
-        if (props_filter.is_none() || props_filter.unwrap().contains("prop"))
-            && let Some(map) = self.props.read().await.get(&key_for_props)
-        {
+        if let Some(map) = self.props.read().await.get(&key_for_props) {
             for (k, v) in map {
                 if let Some(rest) = k.strip_prefix("ns:")
                     && let Some((uri, local)) = rest.split_once('#')

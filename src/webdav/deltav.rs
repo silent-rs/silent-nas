@@ -181,12 +181,9 @@ impl WebDavHandler {
                 }
             }
 
-            // 追加移动(from->to)与删除(404)差异
+            // 追加移动(from->to)与删除(404)差异（不与前述条目共享 limit 预算，避免被掩盖）
             if let Some(since) = since_token_time {
-                let remain = limit
-                    .map(|l| l.saturating_sub(count_used))
-                    .unwrap_or(usize::MAX);
-                let mut left = remain;
+                let mut left = limit.unwrap_or(usize::MAX);
                 if left > 0 {
                     let moved = self.list_moved_since(&path, since, left);
                     for (from, to) in moved {
@@ -444,7 +441,7 @@ impl WebDavHandler {
                     if in_nresults && let Ok(n) = s.trim().parse::<usize>() {
                         limit = Some(n);
                     }
-                    if in_sync_token && let Some(ts) = Self::parse_sync_token_time(&s) {
+                    if in_sync_token && let Some(ts) = Self::parse_sync_token_time(s.trim()) {
                         since = Some(ts);
                     }
                 }

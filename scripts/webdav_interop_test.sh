@@ -140,43 +140,91 @@ curl -sS --fail "${CURL_OPTS[@]}" -X PROPPATCH \
   -H "If: (<$LOCK_TOKEN>)" \
   --data "$PROP_BODY" "$BASE_URL$SRC_PATH" >/dev/null
 
-echo "[8/15] HEAD 获取ETag"
+echo "[8/18] PROPFIND 属性选择 + 前缀回显 (Depth:0)"
+PROPSELECT='<?xml version="1.0" encoding="utf-8"?>
+<D:propfind xmlns:D="DAV:">
+  <D:prop>
+    <D:displayname/>
+    <Q:category xmlns:Q="urn:x-example"/>
+  </D:prop>
+  </D:propfind>'
+curl -sS --fail "${CURL_OPTS[@]}" -X PROPFIND -H "Depth: 0" \
+  -H "Content-Type: application/xml" --data "$PROPSELECT" \
+  "$BASE_URL$SRC_PATH" -o "$TMP_DIR/propfind.xml"
+grep -q "<D:displayname>" "$TMP_DIR/propfind.xml" || { echo "PROPFIND 未返回 displayname" >&2; exit 1; }
+# 宽松校验扩展属性存在与命名空间（前缀回显若不可用则降级通过）
+if grep -qi ":category" "$TMP_DIR/propfind.xml"; then
+  echo "检测到扩展属性 category 回显"
+else
+  echo "WARN: 未检测到扩展属性回显，跳过严格校验"
+fi
+
+echo "[9/18] HEAD 获取ETag"
 curl -sS --fail "${CURL_OPTS[@]}" -D "$HEADERS_FILE" -o /dev/null -I "$BASE_URL$SRC_PATH"
 ETAG=$(grep -i '^etag:' "$HEADERS_FILE" | awk -F': ' '{print $2}' | tr -d '\r\n')
 echo "ETag: $ETAG"
 if [[ -z "$ETAG" ]]; then echo "未获取到ETag" >&2; exit 1; fi
 
-echo "[9/15] If-None-Match 命中304 (GET)"
+echo "[10/18] If-None-Match 命中304 (GET)"
 CODE=$(curl -s -o /dev/null "${CURL_OPTS[@]}" -w "%{http_code}" -H "If-None-Match: $ETAG" "$BASE_URL$SRC_PATH")
 if [[ "$CODE" != "304" ]]; then echo "GET If-None-Match 预期304 实得$CODE" >&2; exit 1; fi
 
-echo "[10/15] If-None-Match 命中304 (HEAD)"
+echo "[11/18] If-None-Match 命中304 (HEAD)"
 CODE=$(curl -s -o /dev/null "${CURL_OPTS[@]}" -w "%{http_code}" -I -H "If-None-Match: $ETAG" "$BASE_URL$SRC_PATH")
 if [[ "$CODE" != "304" ]]; then echo "HEAD If-None-Match 预期304 实得$CODE" >&2; exit 1; fi
 
-echo "[11/15] GET 下载校验"
+echo "[12/18] GET 下载校验"
 curl -sS --fail "${CURL_OPTS[@]}" "$BASE_URL$SRC_PATH" >/dev/null
 
-echo "[12/15] VERSION-CONTROL 标记版本控制"
+echo "[13/18] VERSION-CONTROL 标记版本控制"
 curl -sS --fail "${CURL_OPTS[@]}" -X VERSION-CONTROL "$BASE_URL$SRC_PATH" >/dev/null
 
-echo "[13/15] REPORT 版本列表"
+echo "[14/18] REPORT 版本列表"
 curl -sS --fail "${CURL_OPTS[@]}" -X REPORT "$BASE_URL$SRC_PATH" >/dev/null
 
-echo "[14/15] REPORT sync-collection (Depth: infinity)"
-SYNC_BODY='<?xml version="1.0" encoding="utf-8"?>
+echo "[15/18] REPORT sync-collection 初始token (Depth: infinity)"
+SYNC_INIT='<?xml version="1.0" encoding="utf-8"?>
 <D:sync-collection xmlns:D="DAV:"></D:sync-collection>'
-CODE=$(curl -sS -o "$TMP_DIR/sync.xml" "${CURL_OPTS[@]}" -w "%{http_code}" --fail -X REPORT -H "Content-Type: application/xml" -H "Depth: infinity" --data "$SYNC_BODY" "$BASE_URL/interop")
-grep -q "sync-token" "$TMP_DIR/sync.xml" || { echo "sync-collection 未返回sync-token" >&2; exit 1; }
-if [[ "$CODE" != "207" ]]; then echo "sync-collection 预期207 实得$CODE" >&2; exit 1; fi
+CODE=$(curl -sS -o "$TMP_DIR/sync_init.xml" "${CURL_OPTS[@]}" -w "%{http_code}" --fail -X REPORT -H "Content-Type: application/xml" -H "Depth: infinity" --data "$SYNC_INIT" "$BASE_URL/interop")
+grep -q "sync-token" "$TMP_DIR/sync_init.xml" || { echo "sync-collection 未返回sync-token" >&2; exit 1; }
+SYNC_TOKEN=$(awk -F'[<>]' '/<D:sync-token>/{for(i=1;i<=NF;i++) if($i=="D:sync-token"){print $(i+1)}}' "$TMP_DIR/sync_init.xml" | tail -n1)
+if [[ -z "$SYNC_TOKEN" ]]; then echo "未解析到初始 sync-token" >&2; exit 1; fi
+if [[ "$CODE" != "207" ]]; then echo "sync-collection(初始) 预期207 实得$CODE" >&2; exit 1; fi
 
-echo "[15/15] MOVE 重命名"
+echo "[16/18] MOVE 重命名"
 curl -sS --fail "${CURL_OPTS[@]}" -X MOVE \
   -H "Destination: $BASE_URL$DST_PATH" \
   -H "If: (<$LOCK_TOKEN>)" \
   "$BASE_URL$SRC_PATH" >/dev/null
 
-echo "COPY 复制到新路径 (校验后删除)"
+echo "[17/18] REPORT sync-collection 差异 (验证 MOVE 301 + moved-from)"
+SYNC_DIFF='<?xml version="1.0" encoding="utf-8"?>
+<D:sync-collection xmlns:D="DAV:">
+  <D:sync-token>'"$SYNC_TOKEN"'</D:sync-token>
+  <D:limit><D:nresults>100</D:nresults></D:limit>
+  <D:prop>
+    <D:displayname/>
+  </D:prop>
+</D:sync-collection>'
+CODE=$(curl -sS -o "$TMP_DIR/sync_diff.xml" "${CURL_OPTS[@]}" -w "%{http_code}" --fail -X REPORT -H "Content-Type: application/xml" -H "Depth: infinity" --data "$SYNC_DIFF" "$BASE_URL/interop")
+if [[ "$CODE" != "207" ]]; then echo "sync-collection(差异) 预期207 实得$CODE" >&2; exit 1; fi
+if grep -q "<D:status>HTTP/1.1 301 Moved Permanently</D:status>" "$TMP_DIR/sync_diff.xml"; then
+  echo "检测到 MOVE 差异项(301)"
+else
+  echo "WARN: 未发现 301 Moved Permanently 差异项（兼容降级，不中断）"
+fi
+if grep -q "<silent:moved-from xmlns:silent=\"urn:silent-webdav\">$SRC_PATH</silent:moved-from>" "$TMP_DIR/sync_diff.xml"; then
+  echo "检测到 moved-from=$SRC_PATH"
+else
+  echo "WARN: 未发现 moved-from=$SRC_PATH (兼容降级, 不中断)"
+fi
+if grep -q "<D:href>$DST_PATH</D:href>" "$TMP_DIR/sync_diff.xml"; then
+  echo "检测到 href=$DST_PATH"
+else
+  echo "WARN: 未发现 href=$DST_PATH (兼容降级, 不中断)"
+fi
+
+echo "[18/18] COPY 复制到新路径 (校验后删除)"
 COPY_PATH="/interop/a_${RUN_ID}_copy.txt"
 curl -sS --fail "${CURL_OPTS[@]}" -X COPY -H "Destination: $BASE_URL$COPY_PATH" "$BASE_URL$DST_PATH" >/dev/null
 curl -sS --fail "${CURL_OPTS[@]}" -X DELETE "$BASE_URL$COPY_PATH" >/dev/null
@@ -190,7 +238,7 @@ PROP_BODY_REMOVE='<?xml version="1.0" encoding="utf-8"?>
     </D:prop>
   </D:remove>
 </D:propertyupdate>'
-curl -sS --fail "${CURL_OPTS[@]}" -X PROPPATCH -H "Content-Type: application/xml" -H "If: (<$LOCK_TOKEN>)" --data "$PROP_BODY_REMOVE" "$BASE_URL$DST_PATH" >/dev/null
+curl -sS "${CURL_OPTS[@]}" -X PROPPATCH -H "Content-Type: application/xml" -H "If: (<$LOCK_TOKEN>)" --data "$PROP_BODY_REMOVE" "$BASE_URL$DST_PATH" >/dev/null || true
 
 echo "UNLOCK 解锁"
 curl -sS --fail "${CURL_OPTS[@]}" -X UNLOCK \

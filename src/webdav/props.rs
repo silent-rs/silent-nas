@@ -128,21 +128,40 @@ impl WebDavHandler {
             if !updates.is_empty() || !fq_updates.is_empty() {
                 let mut props = self.props.write().await;
                 let entry = props.entry(path.clone()).or_default();
+                // 只允许非 DAV: 命名空间的可写属性
+                let mut reject_dav = false;
                 for (k, v) in updates {
                     let key = k.trim().to_string();
+                    if key.starts_with("D:") || key.starts_with("d:") {
+                        reject_dav = true;
+                        continue;
+                    }
                     if let Some(val) = v {
-                        entry.insert(key, val);
+                        // 限制属性值大小，防止滥用
+                        let vshort = if val.len() > 4096 { val[..4096].to_string() } else { val };
+                        entry.insert(key, vshort);
                     } else {
                         entry.remove(&key);
                     }
                 }
                 for (k, v) in fq_updates {
                     let key = k.trim().to_string();
+                    if key.starts_with("ns:DAV:#") || key.starts_with("ns:dav:#") {
+                        reject_dav = true;
+                        continue;
+                    }
                     if let Some(val) = v {
-                        entry.insert(key, val);
+                        let vshort = if val.len() > 4096 { val[..4096].to_string() } else { val };
+                        entry.insert(key, vshort);
                     } else {
                         entry.remove(&key);
                     }
+                }
+                if reject_dav {
+                    return Err(SilentError::business_error(
+                        StatusCode::CONFLICT,
+                        "DAV: 命名空间属性为只读",
+                    ));
                 }
             }
         }

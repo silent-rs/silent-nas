@@ -66,6 +66,7 @@ impl WebDavHandler {
             let meta = fs::metadata(&storage_path)
                 .await
                 .map_err(|_| SilentError::business_error(StatusCode::NOT_FOUND, "路径不存在"))?;
+            let mut count_used = 0usize;
             if meta.is_dir() {
                 // 列出自身（仅在全量请求时包含根目录）
                 let href = self.build_full_href(&path);
@@ -83,6 +84,7 @@ impl WebDavHandler {
                         &mut count_left,
                     )
                     .await?;
+                    count_used = limit.unwrap_or(usize::MAX) - count_left;
                 } else {
                     // 单层（仅包含变化项）
                     let mut entries = fs::read_dir(&storage_path).await.map_err(|e| {
@@ -112,12 +114,29 @@ impl WebDavHandler {
                             count += 1;
                         }
                     }
+                    count_used = count;
                 }
             } else {
                 // 单文件：若自 token 以来有变化则返回
                 if Self::modified_after(&storage_path, since_token_time) || since_token_time.is_none() {
                     let href = self.build_full_href(&path);
                     Self::add_prop_response(&mut xml, &href, &storage_path, false).await;
+                    count_used = 1;
+                }
+            }
+
+            // 追加删除差异（404）
+            if let Some(since) = since_token_time {
+                let remain = limit.map(|l| l.saturating_sub(count_used)).unwrap_or(usize::MAX);
+                if remain > 0 {
+                    let deleted = self.list_deleted_since(&path, since, remain);
+                    for p in deleted {
+                        let href = self.build_full_href(&p);
+                        xml.push_str("<D:response>");
+                        xml.push_str(&format!("<D:href>{}</D:href>", href));
+                        xml.push_str("<D:status>HTTP/1.1 404 Not Found</D:status>");
+                        xml.push_str("</D:response>");
+                    }
                 }
             }
 

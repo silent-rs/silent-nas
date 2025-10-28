@@ -223,6 +223,7 @@ impl WebDavHandler {
                 ));
             }
         }
+        // 注：扩展属性输出在当前实现中由上层处理，标准属性在此处输出
         xml.push_str("</D:prop>");
         xml.push_str("<D:status>HTTP/1.1 200 OK</D:status>");
         xml.push_str("</D:propstat>");
@@ -562,6 +563,13 @@ impl WebDavHandler {
             }
         }
 
+        // 记录变更（用于 REPORT sync-collection 差异集）
+        if file_exists {
+            self.append_change("modified", &path);
+        } else {
+            self.append_change("created", &path);
+        }
+
         let mut resp = Response::empty();
         // RFC 4918: 如果资源已存在则返回 204 No Content，新建则返回 201 Created
         resp.set_status(if file_exists {
@@ -634,6 +642,8 @@ impl WebDavHandler {
         if let Some(ref n) = self.notifier {
             let _ = n.notify_deleted(event).await;
         }
+        // 记录删除
+        self.append_change("deleted", &path);
         let mut resp = Response::empty();
         resp.set_status(StatusCode::NO_CONTENT);
         Ok(resp)
@@ -654,6 +664,8 @@ impl WebDavHandler {
                 format!("创建目录失败: {}", e),
             )
         })?;
+        // 记录创建
+        self.append_change("created", &path);
         let mut resp = Response::empty();
         resp.set_status(StatusCode::CREATED);
         Ok(resp)
@@ -688,6 +700,9 @@ impl WebDavHandler {
                     format!("移动失败: {}", e),
                 )
             })?;
+        // 记录为删除+创建，便于增量同步
+        self.append_change("deleted", &path);
+        self.append_change("created", &dest_path);
         // 发布事件
         let file_id = scru128::new_string();
         let mut event = FileEvent::new(EventType::Modified, file_id, None);
@@ -752,6 +767,8 @@ impl WebDavHandler {
                     )
                 })?;
         }
+        // 记录创建
+        self.append_change("created", &dest_path);
         let mut resp = Response::empty();
         resp.set_status(StatusCode::CREATED);
         Ok(resp)

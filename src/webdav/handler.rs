@@ -7,10 +7,18 @@ use std::sync::Arc;
 
 #[allow(unused_imports)]
 use super::{constants::*, types::DavLock};
+use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum IfTermKind { LockToken(String), ETag(String) }
 #[derive(Debug, Clone)]
 struct IfTerm { negate: bool, kind: IfTermKind }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(super) struct ChangeEntry {
+    pub path: String,
+    pub action: String, // created/modified/deleted
+    pub ts: chrono::NaiveDateTime,
+}
 
 #[derive(Clone)]
 pub struct WebDavHandler {
@@ -66,6 +74,9 @@ impl WebDavHandler {
     pub(super) fn props_file(&self) -> std::path::PathBuf {
         self.meta_dir().join("props.json")
     }
+    pub(super) fn changelog_file(&self) -> std::path::PathBuf {
+        self.meta_dir().join("changelog.json")
+    }
 
     #[allow(clippy::collapsible_if)]
     fn load_persistent_state(&self) {
@@ -107,6 +118,49 @@ impl WebDavHandler {
         if let Ok(bytes) = serde_json::to_vec_pretty(&map) {
             let _ = std::fs::write(self.props_file(), bytes);
         }
+    }
+
+    pub(super) fn append_change(&self, action: &str, path: &str) {
+        let _ = std::fs::create_dir_all(self.meta_dir());
+        let mut list: Vec<ChangeEntry> = std::fs::read(self.changelog_file())
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .unwrap_or_default();
+        list.push(ChangeEntry {
+            path: path.to_string(),
+            action: action.to_string(),
+            ts: chrono::Local::now().naive_local(),
+        });
+        // 简单裁剪：最多 10000 条，超出丢弃最旧
+        const MAX_LEN: usize = 10000;
+        if list.len() > MAX_LEN {
+            let drain = list.len() - MAX_LEN;
+            let _ = list.drain(0..drain);
+        }
+        if let Ok(bytes) = serde_json::to_vec(&list) {
+            let _ = std::fs::write(self.changelog_file(), bytes);
+        }
+    }
+
+    pub(super) fn list_deleted_since(
+        &self,
+        prefix: &str,
+        since: chrono::NaiveDateTime,
+        limit: usize,
+    ) -> Vec<String> {
+        let list: Vec<ChangeEntry> = std::fs::read(self.changelog_file())
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .unwrap_or_default();
+        let mut out = Vec::new();
+        for e in list.iter().filter(|e| e.action == "deleted" && e.ts > since) {
+            if !prefix.is_empty() && prefix != "/" {
+                if !e.path.starts_with(prefix) { continue; }
+            }
+            out.push(e.path.clone());
+            if out.len() >= limit { break; }
+        }
+        out
     }
 
     pub(super) fn parse_timeout(req: &Request) -> i64 {

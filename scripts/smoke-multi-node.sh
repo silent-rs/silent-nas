@@ -9,6 +9,30 @@ TARGET_DIR=$(cargo metadata --format-version 1 2>/dev/null | python3 -c "import 
 TARGET_BIN="$TARGET_DIR/debug/silent-nas"
 WORK_DIR="$ROOT_DIR/scripts/.smoke"
 
+# 确保本地有可用的 NATS（若未运行则临时启动一个Docker容器，测试结束自动清理）
+ensure_nats() {
+  if nc -z 127.0.0.1 4222 >/dev/null 2>&1; then
+    echo "[smoke] 检测到本地 NATS 已运行 (127.0.0.1:4222)"
+    return 0
+  fi
+  if ! command -v docker >/dev/null 2>&1; then
+    echo "[smoke] 未检测到本地 NATS 且无 docker 可用，可能导致冒烟失败"
+    return 0
+  fi
+  echo "[smoke] 启动临时 NATS 容器..."
+  docker rm -f smoke-nats >/dev/null 2>&1 || true
+  docker run -d --rm --name smoke-nats -p 4222:4222 nats:latest >/dev/null 2>&1 || true
+  export _SMOKE_STARTED_NATS=1
+  # 简单等待片刻
+  sleep 1
+}
+
+stop_temp_nats() {
+  if [[ "${_SMOKE_STARTED_NATS:-}" == "1" ]]; then
+    docker rm -f smoke-nats >/dev/null 2>&1 || true
+  fi
+}
+
 get_free_tcp_port() {
   python3 - <<'PY'
 import socket
@@ -60,6 +84,8 @@ cleanup() {
   rm -f /tmp/silent-nas-node1.log /tmp/silent-nas-node2.log 2>/dev/null || true
   rm -rf "$WORK_DIR" 2>/dev/null || true
   sleep 0.2 || true
+  # 停掉临时 NATS
+  stop_temp_nats
 }
 trap cleanup EXIT
 
@@ -71,6 +97,9 @@ if [[ ! -x "$TARGET_BIN" ]]; then
   exit 1
 fi
 echo "[smoke] 使用可执行文件: $TARGET_BIN"
+
+# 确保NATS可用
+ensure_nats
 
 rm -rf "$WORK_DIR" && mkdir -p "$WORK_DIR/node1" "$WORK_DIR/node2"
 

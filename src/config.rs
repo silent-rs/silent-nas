@@ -158,13 +158,27 @@ impl SyncBehaviorConfig {
     fn default_fetch_max_backoff() -> u64 {
         8
     }
-    fn default_fail_queue_max() -> usize { 1000 }
-    fn default_fail_task_ttl_secs() -> u64 { 24 * 3600 }
-    fn default_grpc_connect_timeout() -> u64 { 10 }
-    fn default_grpc_request_timeout() -> u64 { 30 }
-    fn default_fault_transfer_rate() -> f64 { 0.0 }
-    fn default_fault_verify_rate() -> f64 { 0.0 }
-    fn default_fault_delay_ms() -> u64 { 0 }
+    fn default_fail_queue_max() -> usize {
+        1000
+    }
+    fn default_fail_task_ttl_secs() -> u64 {
+        24 * 3600
+    }
+    fn default_grpc_connect_timeout() -> u64 {
+        10
+    }
+    fn default_grpc_request_timeout() -> u64 {
+        30
+    }
+    fn default_fault_transfer_rate() -> f64 {
+        0.0
+    }
+    fn default_fault_verify_rate() -> f64 {
+        0.0
+    }
+    fn default_fault_delay_ms() -> u64 {
+        0
+    }
 }
 
 /// 认证配置
@@ -315,7 +329,11 @@ impl Config {
         {
             self.sync.max_files_per_sync = v;
         }
-        if let Ok(retry) = std::env::var("SYNC_MAX_RETRIES") && let Ok(v) = retry.parse::<u32>() { self.sync.max_retries = v; }
+        if let Ok(retry) = std::env::var("SYNC_MAX_RETRIES")
+            && let Ok(v) = retry.parse::<u32>()
+        {
+            self.sync.max_retries = v;
+        }
         // 可选：覆盖拉取超时与退避配置（仍优先以配置文件驱动）
         if let Ok(v) = std::env::var("SYNC_HTTP_CONNECT_TIMEOUT")
             && let Ok(n) = v.parse::<u64>()
@@ -337,15 +355,47 @@ impl Config {
         {
             self.sync.fetch_base_backoff = n;
         }
-        if let Ok(v) = std::env::var("SYNC_FETCH_MAX_BACKOFF") && let Ok(n) = v.parse::<u64>() { self.sync.fetch_max_backoff = n; }
+        if let Ok(v) = std::env::var("SYNC_FETCH_MAX_BACKOFF")
+            && let Ok(n) = v.parse::<u64>()
+        {
+            self.sync.fetch_max_backoff = n;
+        }
 
-        if let Ok(v) = std::env::var("SYNC_FAIL_QUEUE_MAX") && let Ok(n) = v.parse::<usize>() { self.sync.fail_queue_max = n; }
-        if let Ok(v) = std::env::var("SYNC_FAIL_TASK_TTL") && let Ok(n) = v.parse::<u64>() { self.sync.fail_task_ttl_secs = n; }
-        if let Ok(v) = std::env::var("SYNC_GRPC_CONNECT_TIMEOUT") && let Ok(n) = v.parse::<u64>() { self.sync.grpc_connect_timeout = n; }
-        if let Ok(v) = std::env::var("SYNC_GRPC_REQUEST_TIMEOUT") && let Ok(n) = v.parse::<u64>() { self.sync.grpc_request_timeout = n; }
-        if let Ok(v) = std::env::var("SYNC_FAULT_TRANSFER_RATE") && let Ok(n) = v.parse::<f64>() { self.sync.fault_transfer_error_rate = n.clamp(0.0, 1.0); }
-        if let Ok(v) = std::env::var("SYNC_FAULT_VERIFY_RATE") && let Ok(n) = v.parse::<f64>() { self.sync.fault_verify_error_rate = n.clamp(0.0, 1.0); }
-        if let Ok(v) = std::env::var("SYNC_FAULT_DELAY_MS") && let Ok(n) = v.parse::<u64>() { self.sync.fault_delay_ms = n; }
+        if let Ok(v) = std::env::var("SYNC_FAIL_QUEUE_MAX")
+            && let Ok(n) = v.parse::<usize>()
+        {
+            self.sync.fail_queue_max = n;
+        }
+        if let Ok(v) = std::env::var("SYNC_FAIL_TASK_TTL")
+            && let Ok(n) = v.parse::<u64>()
+        {
+            self.sync.fail_task_ttl_secs = n;
+        }
+        if let Ok(v) = std::env::var("SYNC_GRPC_CONNECT_TIMEOUT")
+            && let Ok(n) = v.parse::<u64>()
+        {
+            self.sync.grpc_connect_timeout = n;
+        }
+        if let Ok(v) = std::env::var("SYNC_GRPC_REQUEST_TIMEOUT")
+            && let Ok(n) = v.parse::<u64>()
+        {
+            self.sync.grpc_request_timeout = n;
+        }
+        if let Ok(v) = std::env::var("SYNC_FAULT_TRANSFER_RATE")
+            && let Ok(n) = v.parse::<f64>()
+        {
+            self.sync.fault_transfer_error_rate = n.clamp(0.0, 1.0);
+        }
+        if let Ok(v) = std::env::var("SYNC_FAULT_VERIFY_RATE")
+            && let Ok(n) = v.parse::<f64>()
+        {
+            self.sync.fault_verify_error_rate = n.clamp(0.0, 1.0);
+        }
+        if let Ok(v) = std::env::var("SYNC_FAULT_DELAY_MS")
+            && let Ok(n) = v.parse::<u64>()
+        {
+            self.sync.fault_delay_ms = n;
+        }
     }
 }
 

@@ -319,7 +319,7 @@ impl Default for SyncConfig {
             max_files_per_sync: 100,
             max_retries: 3,
             fail_queue_max: 1000,
-            fail_task_ttl_secs: 24*3600,
+            fail_task_ttl_secs: 24 * 3600,
             grpc_connect_timeout: 10,
             grpc_request_timeout: 30,
             fault_transfer_error_rate: 0.0,
@@ -577,7 +577,11 @@ impl NodeSyncCoordinator {
                         q.push_back(it);
                     }
                     let cfg = self.config.read().await.clone();
-                    self.prune_expired_and_trim(&mut q, cfg.fail_task_ttl_secs as i64, cfg.fail_queue_max);
+                    self.prune_expired_and_trim(
+                        &mut q,
+                        cfg.fail_task_ttl_secs as i64,
+                        cfg.fail_queue_max,
+                    );
                     info!(
                         "已加载补偿队列: {} 项 -> {:?}",
                         q.len(),
@@ -704,7 +708,8 @@ impl NodeSyncCoordinator {
                         }
                         let t_transfer = std::time::Instant::now();
                         // 故障注入：按概率制造传输失败
-                        let inject_transfer = rand::random::<f64>() < cfg_now.fault_transfer_error_rate;
+                        let inject_transfer =
+                            rand::random::<f64>() < cfg_now.fault_transfer_error_rate;
                         let transfer_result = if inject_transfer {
                             Err(NasError::Other("fault_injected_transfer".into()))
                         } else {
@@ -741,7 +746,9 @@ impl NodeSyncCoordinator {
                                                     "端到端校验失败: {} -> {}，期望哈希不一致",
                                                     file_id, node_address
                                                 );
-                                                crate::metrics::record_sync_operation("full", "error", 0);
+                                                crate::metrics::record_sync_operation(
+                                                    "full", "error", 0,
+                                                );
                                                 crate::metrics::record_sync_stage(
                                                     "verify",
                                                     "error",
@@ -755,7 +762,9 @@ impl NodeSyncCoordinator {
                                                 "端到端校验错误: {} -> {}, 错误: {}",
                                                 file_id, node_address, e
                                             );
-                                            crate::metrics::record_sync_operation("full", "error", 0);
+                                            crate::metrics::record_sync_operation(
+                                                "full", "error", 0,
+                                            );
                                             crate::metrics::record_sync_stage(
                                                 "verify",
                                                 "error",
@@ -765,7 +774,9 @@ impl NodeSyncCoordinator {
                                     }
                                 }
                                 // 故障注入：按概率制造校验失败
-                                if verified && (rand::random::<f64>() < cfg_now.fault_verify_error_rate) {
+                                if verified
+                                    && (rand::random::<f64>() < cfg_now.fault_verify_error_rate)
+                                {
                                     verified = false;
                                     warn!("故障注入：校验失败 file_id={}", file_id);
                                 }
@@ -777,7 +788,11 @@ impl NodeSyncCoordinator {
                                         "文件同步成功: {}, 大小: {} 字节 -> {}",
                                         file_id, file_size, node_address
                                     );
-                                    crate::metrics::record_sync_operation("full", "success", file_size as u64);
+                                    crate::metrics::record_sync_operation(
+                                        "full",
+                                        "success",
+                                        file_size as u64,
+                                    );
                                     crate::metrics::record_sync_stage(
                                         "verify",
                                         "success",
@@ -1062,7 +1077,7 @@ mod tests {
             max_files_per_sync: 50,
             max_retries: 5,
             fail_queue_max: 1000,
-            fail_task_ttl_secs: 24*3600,
+            fail_task_ttl_secs: 24 * 3600,
             grpc_connect_timeout: 10,
             grpc_request_timeout: 30,
             fault_transfer_error_rate: 0.0,

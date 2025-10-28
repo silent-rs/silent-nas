@@ -264,23 +264,15 @@ async fn main() -> Result<()> {
     let notifier_webdav = notifier.clone();
     let sync_webdav = sync_manager.clone();
     let version_webdav = version_manager.clone();
+    let source_http_for_webdav = source_http_addr.clone();
 
     let webdav_handle = tokio::spawn(async move {
-        let webdav_base = format!(
-            "http://{}:{}",
-            advertise_host,
-            // 从监听地址中提取端口以确保一致
-            webdav_addr_clone
-                .rsplit(':')
-                .next()
-                .unwrap_or(&config.server.webdav_port.to_string())
-        );
         if let Err(e) = start_webdav_server(
             &webdav_addr_clone,
             storage_webdav,
             notifier_webdav,
             sync_webdav,
-            webdav_base,
+            source_http_for_webdav,
             version_webdav,
         )
         .await
@@ -405,10 +397,14 @@ async fn start_grpc_server(
     );
 
     // 初始化节点同步服务（NodeSyncService）
-    let listen_addr = addr.to_string();
+    // 监听地址用于实际绑定；对外广播地址使用 ADVERTISE_HOST（容器名/可达主机名）+ gRPC 端口
+    let advertise_host = std::env::var("ADVERTISE_HOST")
+        .or_else(|_| std::env::var("HOSTNAME"))
+        .unwrap_or_else(|_| "127.0.0.1".to_string());
+    let advertised_grpc_addr = format!("{}:{}", advertise_host, addr.port());
     let node_discovery = NodeDiscoveryConfig {
         node_id: sync_manager.node_id().to_string(),
-        listen_addr: listen_addr.clone(),
+        listen_addr: advertised_grpc_addr.clone(),
         seed_nodes: if node_cfg.enable {
             node_cfg.seed_nodes.clone()
         } else {
@@ -456,7 +452,7 @@ async fn start_grpc_server(
     if node_cfg.enable {
         let nsc_for_reload = node_sync.clone();
         tokio::spawn(async move {
-            use tokio::time::{sleep, Duration};
+            use tokio::time::{Duration, sleep};
             loop {
                 sleep(Duration::from_secs(60)).await;
                 let new_sync = Config::load().sync;

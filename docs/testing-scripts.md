@@ -12,9 +12,26 @@
   ```bash
   ./scripts/sync_3nodes_benchmark_docker.sh
   # 自定义：
-  N_FILES=20 CONCURRENCY=5 ./scripts/sync_3nodes_benchmark_docker.sh
+  N_FILES=200 CONCURRENCY=20 ./scripts/sync_3nodes_benchmark_docker.sh
   ```
 - 重要说明：已统一为容器化版本，非容器版本已移除。
+
+- 5分钟窗口推荐配置：
+  - 建议：`N_FILES=200 CONCURRENCY=20 BENCH_TARGET_P95_MS=5000`
+  - Linux：
+    ```bash
+    timeout 5m env N_FILES=200 CONCURRENCY=20 BENCH_TARGET_P95_MS=5000 \
+      ./scripts/sync_3nodes_benchmark_docker.sh | tee bench_runs/bench_200_summary.txt
+    ```
+  - macOS：
+    ```bash
+    gtimeout 5m env N_FILES=200 CONCURRENCY=20 BENCH_TARGET_P95_MS=5000 \
+      ./scripts/sync_3nodes_benchmark_docker.sh | tee bench_runs/bench_200_summary.txt
+    ```
+  - 清理：
+    ```bash
+    ./scripts/cleanup-artifacts.sh
+    ```
 
 ## 多节点冒烟测试（本地进程）
 
@@ -26,6 +43,9 @@
   ```bash
   ./scripts/smoke-multi-node.sh
   ```
+  - 5分钟限时执行（会在本机无 NATS 时自动拉起临时容器并在结束后清理）：
+    - Linux：`timeout 5m ./scripts/smoke-multi-node.sh`
+    - macOS：`gtimeout 5m ./scripts/smoke-multi-node.sh`
 
 ## WebDAV 协议互通测试（本地进程）
 

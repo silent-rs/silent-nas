@@ -7,8 +7,8 @@ services:
     image: nats:2.10-alpine
     container_name: silent-nas-nats
     hostname: nats
+    # 不将 4222 暴露到宿主机，避免与本机 NATS/端口冲突；仅暴露 8222 监控
     ports:
-      - "4222:4222"  # 客户端连接
       - "8222:8222"  # HTTP 监控
     command:
       - "--http_port"

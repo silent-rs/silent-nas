@@ -24,7 +24,7 @@ DOCKER_DIR="$ROOT_DIR/docker"
 WORK_DIR="$ROOT_DIR/scripts/.bench3nodes_docker"
 mkdir -p "$WORK_DIR"
 
-N_FILES=${N_FILES:-100}
+N_FILES=${N_FILES:-200}
 PAYLOAD_SIZE=${PAYLOAD_SIZE:-32768}
 CONCURRENCY=${CONCURRENCY:-10}
 SYNC_TIMEOUT_S=${SYNC_TIMEOUT_S:-30}
@@ -40,11 +40,22 @@ HTTP3=8100
 
 log() { echo "[bench-docker] $*"; }
 
+# 选择 docker compose 命令（兼容 v1/v2）
+if command -v docker-compose >/dev/null 2>&1; then
+  DOCKER_COMPOSE=(docker-compose)
+else
+  DOCKER_COMPOSE=(docker compose)
+fi
+
+COMPOSE_FILE="$DOCKER_DIR/docker-compose.yml"
+dc() {
+  (cd "$DOCKER_DIR" && "${DOCKER_COMPOSE[@]}" -f "$COMPOSE_FILE" "$@")
+}
+
 cleanup() {
   log "清理容器和数据..."
-  cd "$DOCKER_DIR"
-  docker-compose down -v --remove-orphans 2>/dev/null || true
-  docker-compose rm -f -v 2>/dev/null || true
+  dc down -v --remove-orphans 2>/dev/null || true
+  dc rm -f -v 2>/dev/null || true
 
   # 清理数据目录
   rm -rf "$DOCKER_DIR/data/node"{1,2,3} 2>/dev/null || true
@@ -58,11 +69,10 @@ cleanup() {
 trap cleanup EXIT
 
 log "构建 Docker 镜像..."
-cd "$DOCKER_DIR"
-docker-compose build --quiet
+dc build --quiet
 
 log "启动容器（NATS + 3个节点）..."
-docker-compose up -d
+dc up -d
 
 log "等待容器启动..."
 sleep 5
@@ -79,7 +89,7 @@ wait_http() {
     sleep 1
   done
   log "❌ $name 超时未就绪"
-  docker-compose logs "$name" | tail -50
+  dc logs "$name" | tail -50
   return 1
 }
 
@@ -94,7 +104,7 @@ sleep 10
 log "检查节点连接状态..."
 for node in node1 node2 node3; do
   log "$node 日志片段:"
-  docker-compose logs --tail=20 "$node" 2>/dev/null | grep -E "节点|连接|同步|gRPC" | tail -5 || true
+  dc logs --tail=20 "$node" 2>/dev/null | grep -E "节点|连接|同步|gRPC" | tail -5 || true
 done
 
 # 生成 payload
@@ -243,10 +253,9 @@ if [[ "$rc" -eq 0 ]]; then
 else
   log "❌ 压测未通过 (rc=$rc)"
   log "=== 节点日志 ==="
-  cd "$DOCKER_DIR"
-  docker-compose logs --tail=50 node1
-  docker-compose logs --tail=50 node2
-  docker-compose logs --tail=50 node3
+  dc logs --tail=50 node1
+  dc logs --tail=50 node2
+  dc logs --tail=50 node3
 fi
 
 exit "$rc"

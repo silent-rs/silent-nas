@@ -79,6 +79,9 @@ pub struct SyncBehaviorConfig {
     pub sync_interval: u64,
     /// 每次同步的最大文件数
     pub max_files_per_sync: usize,
+    /// 同步并发文件数
+    #[serde(default = "SyncBehaviorConfig::default_max_concurrency")]
+    pub max_concurrency: usize,
     /// 失败重试次数
     pub max_retries: u32,
     /// 拉取连接超时（秒）
@@ -125,6 +128,7 @@ impl Default for SyncBehaviorConfig {
             auto_sync: true,
             sync_interval: 60,
             max_files_per_sync: 100,
+            max_concurrency: Self::default_max_concurrency(),
             max_retries: 3,
             http_connect_timeout: Self::default_http_connect_timeout(),
             http_request_timeout: Self::default_http_request_timeout(),
@@ -143,6 +147,7 @@ impl Default for SyncBehaviorConfig {
 }
 
 impl SyncBehaviorConfig {
+    fn default_max_concurrency() -> usize { 8 }
     fn default_http_connect_timeout() -> u64 {
         5
     }
@@ -230,6 +235,7 @@ impl Default for Config {
                 auto_sync: true,
                 sync_interval: 60,
                 max_files_per_sync: 100,
+                max_concurrency: SyncBehaviorConfig::default_max_concurrency(),
                 max_retries: 3,
                 http_connect_timeout: SyncBehaviorConfig::default_http_connect_timeout(),
                 http_request_timeout: SyncBehaviorConfig::default_http_request_timeout(),
@@ -328,6 +334,11 @@ impl Config {
             && let Ok(v) = mfps.parse::<usize>()
         {
             self.sync.max_files_per_sync = v;
+        }
+        if let Ok(mc) = std::env::var("SYNC_MAX_CONCURRENCY")
+            && let Ok(v) = mc.parse::<usize>()
+        {
+            self.sync.max_concurrency = v;
         }
         if let Ok(retry) = std::env::var("SYNC_MAX_RETRIES")
             && let Ok(v) = retry.parse::<u32>()

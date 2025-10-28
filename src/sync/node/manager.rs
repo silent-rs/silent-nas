@@ -293,6 +293,8 @@ pub struct SyncConfig {
     pub sync_interval: u64,
     /// 每次同步的最大文件数
     pub max_files_per_sync: usize,
+    /// 同步并发文件数
+    pub max_concurrency: usize,
     /// 同步重试次数
     pub max_retries: u32,
     /// 失败补偿队列容量上限
@@ -317,6 +319,7 @@ impl Default for SyncConfig {
             auto_sync: true,
             sync_interval: 60,
             max_files_per_sync: 100,
+            max_concurrency: 8,
             max_retries: 3,
             fail_queue_max: 1000,
             fail_task_ttl_secs: 24 * 3600,
@@ -674,17 +677,34 @@ impl NodeSyncCoordinator {
             self.node_manager.config.node_id, node_address
         );
 
-        let mut synced = 0;
-        let mut retry_count = 0;
+        use futures_util::stream::{FuturesUnordered, StreamExt};
+        use tokio::sync::Semaphore;
+
+        let mut synced = 0usize;
+        let sem = Arc::new(Semaphore::new(cfg_now.max_concurrency.max(1)));
+        let client = Arc::new(client);
+        let mut futs = FuturesUnordered::new();
 
         for file_id in file_ids.iter().take(cfg_now.max_files_per_sync) {
-            // 获取文件的同步状态
-            if let Some(file_sync) = self.sync_manager.get_sync_state(file_id).await {
-                // 先同步状态（VectorClock/LWW），以便对端处理冲突
-                let proto_meta = file_sync.metadata.value.clone().map(|m| ProtoFileMetadata {
-                    id: m.id,
-                    name: m.name,
-                    path: m.path,
+            // 克隆必要的上下文
+            let sem = sem.clone();
+            let client = client.clone();
+            let storage = self.storage.clone();
+            let sync_manager = self.sync_manager.clone();
+            let node_address = node_address.clone();
+            let node_id = node_id.to_string();
+            let cfg_now = cfg_now.clone();
+            let file_id = file_id.clone();
+
+            futs.push(tokio::spawn(async move {
+                let _permit = sem.acquire_owned().await.unwrap();
+                // 获取文件的同步状态
+                if let Some(file_sync) = sync_manager.get_sync_state(&file_id).await {
+                    // 先同步状态（VectorClock/LWW），以便对端处理冲突
+                    let proto_meta = file_sync.metadata.value.clone().map(|m| ProtoFileMetadata {
+                        id: m.id,
+                        name: m.name,
+                        path: m.path,
                     size: m.size,
                     hash: m.hash,
                     created_at: m.created_at.to_string(),
@@ -711,12 +731,12 @@ impl NodeSyncCoordinator {
                 let _enter_s = span_state.enter();
                 // 忽略返回的冲突列表，由服务端记录日志与审计
                 let _ = client
-                    .sync_file_states(self.sync_manager.node_id(), vec![state])
+                    .sync_file_states(&node_id, vec![state])
                     .await;
 
                 // 读取文件内容：优先按路径（WebDAV/S3场景），否则按ID
                 let content_res = if let Some(meta) = file_sync.metadata.value.as_ref() {
-                    let full_path = self.storage.get_full_path(&meta.path);
+                    let full_path = storage.get_full_path(&meta.path);
                     debug!(
                         "读取文件内容(按路径): file_id={}, path={}, addr={}",
                         file_id, meta.path, node_address
@@ -729,7 +749,7 @@ impl NodeSyncCoordinator {
                         "读取文件内容(按ID): file_id={}, addr={}",
                         file_id, node_address
                     );
-                    self.storage.read_file(file_id).await
+                    storage.read_file(&file_id).await
                 };
 
                 match content_res {
@@ -756,7 +776,7 @@ impl NodeSyncCoordinator {
                             Err(NasError::Other("fault_injected_transfer".into()))
                         } else {
                             client
-                                .stream_file_content(file_id, content, CHUNK_SIZE)
+                                .stream_file_content(&file_id, content, CHUNK_SIZE)
                                 .await
                                 .map(|_| true)
                         };
@@ -780,7 +800,7 @@ impl NodeSyncCoordinator {
                                 if let Some(meta) = file_sync.metadata.value.as_ref()
                                     && !meta.hash.is_empty()
                                 {
-                                    match client.verify_remote_hash(file_id, &meta.hash).await {
+                                    match client.verify_remote_hash(&file_id, &meta.hash).await {
                                         Ok(ok) => {
                                             verified = ok;
                                             if !ok {
@@ -826,8 +846,7 @@ impl NodeSyncCoordinator {
                                 }
 
                                 if verified {
-                                    synced += 1;
-                                    retry_count = 0; // 重置重试计数
+                                    // 成功
                                     info!(
                                         "文件同步成功: {}, 大小: {} 字节 -> {}",
                                         file_id, file_size, node_address
@@ -842,23 +861,12 @@ impl NodeSyncCoordinator {
                                         "success",
                                         t_verify.elapsed().as_secs_f64(),
                                     );
+                                    return Ok::<(String, bool, Option<String>), ()>((file_id, true, None));
                                 } else {
                                     // 校验不通过，入队补偿重试
-                                    self
-                                        .enqueue_compensation(
-                                            node_id,
-                                            file_id,
-                                            1,
-                                            Some("verify_failed".to_string()),
-                                        )
-                                        .await;
-                                    // 维持原有短暂等待与重试退出逻辑，避免阻塞批量
-                                    retry_count += 1;
+                                    // 无法直接访问 self，这里仅上报重试，由调用方负责补偿入队
                                     crate::metrics::record_sync_retry("verify");
-                                    if retry_count >= cfg_now.max_retries {
-                                        warn!("达到最大重试次数（含校验失败），停止同步");
-                                        break;
-                                    }
+                                    // 维持原有短暂等待与重试退出逻辑，避免阻塞批量
                                     tokio::time::sleep(Duration::from_secs(2)).await;
                                 }
                             }
@@ -867,22 +875,7 @@ impl NodeSyncCoordinator {
                                     "文件同步失败: {} -> {}, 错误: {}",
                                     file_id, node_address, e
                                 );
-                                // 传输失败，入队补偿重试
-                                self
-                                    .enqueue_compensation(
-                                        node_id,
-                                        file_id,
-                                        1,
-                                        Some(e.to_string()),
-                                    )
-                                    .await;
-                                retry_count += 1;
                                 crate::metrics::record_sync_retry("transfer");
-
-                                if retry_count >= cfg_now.max_retries {
-                                    warn!("达到最大重试次数，停止同步");
-                                    break;
-                                }
 
                                 // 等待后重试
                                 tokio::time::sleep(Duration::from_secs(2)).await;
@@ -892,13 +885,30 @@ impl NodeSyncCoordinator {
                                     "error",
                                     t_transfer.elapsed().as_secs_f64(),
                                 );
+                                return Ok::<(String, bool, Option<String>), ()>((file_id, false, Some(e.to_string())));
                             }
                         }
                     }
                     Err(e) => {
                         warn!("读取文件失败: {}, 错误: {}", file_id, e);
+                        return Ok::<(String, bool, Option<String>), ()>((file_id, false, Some(e.to_string())));
                     }
                 }
+                // 失败或未校验通过（校验失败）
+                Ok::<(String, bool, Option<String>), ()>((file_id, false, Some("verify_failed".into())))
+            } else {
+                Ok::<(String, bool, Option<String>), ()>((file_id, false, Some("no_state".into())))
+            }
+            }));
+        }
+
+        // 收集结果并处理补偿入队
+        while let Some(res) = futs.next().await {
+            if let Ok(Ok((_fid, true, _))) = res {
+                synced += 1;
+            } else if let Ok(Ok((fid, false, err))) = res {
+                // 失败则入队补偿
+                self.enqueue_compensation(node_id, &fid, 1, err).await;
             }
         }
 

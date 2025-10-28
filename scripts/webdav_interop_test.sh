@@ -208,21 +208,9 @@ SYNC_DIFF='<?xml version="1.0" encoding="utf-8"?>
 </D:sync-collection>'
 CODE=$(curl -sS -o "$TMP_DIR/sync_diff.xml" "${CURL_OPTS[@]}" -w "%{http_code}" --fail -X REPORT -H "Content-Type: application/xml" -H "Depth: infinity" --data "$SYNC_DIFF" "$BASE_URL/interop")
 if [[ "$CODE" != "207" ]]; then echo "sync-collection(差异) 预期207 实得$CODE" >&2; exit 1; fi
-if grep -q "<D:status>HTTP/1.1 301 Moved Permanently</D:status>" "$TMP_DIR/sync_diff.xml"; then
-  echo "检测到 MOVE 差异项(301)"
-else
-  echo "WARN: 未发现 301 Moved Permanently 差异项（兼容降级，不中断）"
-fi
-if grep -q "<silent:moved-from xmlns:silent=\"urn:silent-webdav\">$SRC_PATH</silent:moved-from>" "$TMP_DIR/sync_diff.xml"; then
-  echo "检测到 moved-from=$SRC_PATH"
-else
-  echo "WARN: 未发现 moved-from=$SRC_PATH (兼容降级, 不中断)"
-fi
-if grep -q "<D:href>$DST_PATH</D:href>" "$TMP_DIR/sync_diff.xml"; then
-  echo "检测到 href=$DST_PATH"
-else
-  echo "WARN: 未发现 href=$DST_PATH (兼容降级, 不中断)"
-fi
+grep -q "<D:status>HTTP/1.1 301 Moved Permanently</D:status>" "$TMP_DIR/sync_diff.xml" || { echo "未发现 301 Moved Permanently 差异项" >&2; exit 1; }
+grep -q "<silent:moved-from xmlns:silent=\"urn:silent-webdav\">$SRC_PATH</silent:moved-from>" "$TMP_DIR/sync_diff.xml" || { echo "未发现 moved-from=$SRC_PATH" >&2; exit 1; }
+grep -q "<D:href>$DST_PATH</D:href>" "$TMP_DIR/sync_diff.xml" || { echo "未发现 href=$DST_PATH" >&2; exit 1; }
 
 echo "[18/18] COPY 复制到新路径 (校验后删除)"
 COPY_PATH="/interop/a_${RUN_ID}_copy.txt"

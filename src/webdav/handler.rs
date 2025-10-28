@@ -201,6 +201,35 @@ impl WebDavHandler {
         out
     }
 
+    pub(super) fn list_deleted_since_index(
+        &self,
+        prefix: &str,
+        since_index: usize,
+        limit: usize,
+    ) -> Vec<String> {
+        let list: Vec<ChangeEntry> = std::fs::read(self.changelog_file())
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .unwrap_or_default();
+        let mut out = Vec::new();
+        for (idx, e) in list.iter().enumerate() {
+            if idx < since_index {
+                continue;
+            }
+            if e.action != "deleted" {
+                continue;
+            }
+            if !prefix.is_empty() && prefix != "/" && !e.path.starts_with(prefix) {
+                continue;
+            }
+            out.push(e.path.clone());
+            if out.len() >= limit {
+                break;
+            }
+        }
+        out
+    }
+
     pub(super) fn list_moved_since(
         &self,
         prefix: &str,
@@ -234,6 +263,53 @@ impl WebDavHandler {
             }
         }
         out
+    }
+
+    pub(super) fn list_moved_since_index(
+        &self,
+        prefix: &str,
+        since_index: usize,
+        limit: usize,
+    ) -> Vec<(String, String)> {
+        let list: Vec<ChangeEntry> = std::fs::read(self.changelog_file())
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .unwrap_or_default();
+        let mut out = Vec::new();
+        for (idx, e) in list.iter().enumerate() {
+            if idx < since_index {
+                continue;
+            }
+            if e.action != "moved" {
+                continue;
+            }
+            if !prefix.is_empty() && prefix != "/" {
+                let from_match = e
+                    .from
+                    .as_deref()
+                    .map(|f| f.starts_with(prefix))
+                    .unwrap_or(false);
+                let to_match = e.path.starts_with(prefix);
+                if !from_match && !to_match {
+                    continue;
+                }
+            }
+            if let Some(from) = &e.from {
+                out.push((from.clone(), e.path.clone()));
+                if out.len() >= limit {
+                    break;
+                }
+            }
+        }
+        out
+    }
+
+    pub(super) fn changes_len(&self) -> usize {
+        std::fs::read(self.changelog_file())
+            .ok()
+            .and_then(|b| serde_json::from_slice::<Vec<ChangeEntry>>(&b).ok())
+            .map(|v| v.len())
+            .unwrap_or(0)
     }
 
     /// 解析 <D:prop> 选择集，并收集 xmlns 前缀到URI映射，便于回显客端偏好的前缀

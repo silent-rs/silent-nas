@@ -50,7 +50,8 @@ impl WebDavHandler {
             // WebDAV Sync (RFC 6578) 简化实现：返回全量条目 + 新的 sync-token
             // 支持 Depth: 1 与 infinity
             // 解析 limit 与 sync-token（若存在）
-            let (limit, since_token_time) = Self::parse_sync_collection_request(&xml_bytes);
+            let (limit, since_token_time, since_rev) =
+                Self::parse_sync_collection_request(&xml_bytes);
             let depth = req
                 .headers()
                 .get("Depth")
@@ -62,17 +63,22 @@ impl WebDavHandler {
             xml.push_str("<D:multistatus xmlns:D=\"DAV:\">");
             let (props_filter, ns_echo_map) =
                 WebDavHandler::parse_prop_filter_and_nsmap(&xml_bytes);
-            // 生成新的 sync-token（使用 scru128，符合ID规则；同时包含当前时间）
-            let token = format!(
-                "urn:sync:{}:{}",
-                scru128::new_string(),
-                chrono::Local::now().naive_local()
-            );
+            // 生成新的 sync-token（使用 scru128 + 当前时间 + 变更序号）
+            let token = {
+                let rev = self.changes_len();
+                format!(
+                    "urn:sync:{}:{}#{}",
+                    scru128::new_string(),
+                    chrono::Local::now().naive_local(),
+                    rev
+                )
+            };
             xml.push_str(&format!("<D:sync-token>{}</D:sync-token>", token));
 
             let meta = fs::metadata(&storage_path)
                 .await
                 .map_err(|_| SilentError::business_error(StatusCode::NOT_FOUND, "路径不存在"))?;
+            #[allow(unused_variables)]
             let mut count_used = 0usize;
             if meta.is_dir() {
                 // 列出自身（仅在全量请求时包含根目录）
@@ -94,7 +100,10 @@ impl WebDavHandler {
                         Some(&ns_echo_map),
                     )
                     .await?;
-                    count_used = limit.unwrap_or(usize::MAX) - count_left;
+                    #[allow(unused_assignments)]
+                    {
+                        count_used = limit.unwrap_or(usize::MAX) - count_left;
+                    }
                 } else {
                     // 单层（仅包含变化项）
                     let mut entries = fs::read_dir(&storage_path).await.map_err(|e| {
@@ -148,7 +157,10 @@ impl WebDavHandler {
                             count += 1;
                         }
                     }
-                    count_used = count;
+                    #[allow(unused_assignments)]
+                    {
+                        count_used = count;
+                    }
                 }
             } else {
                 // 单文件：若自 token 以来有变化则返回
@@ -177,7 +189,10 @@ impl WebDavHandler {
                         )
                         .await;
                     }
-                    count_used = 1;
+                    #[allow(unused_assignments)]
+                    {
+                        count_used = 1;
+                    }
                 }
             }
 
@@ -185,7 +200,11 @@ impl WebDavHandler {
             if let Some(since) = since_token_time {
                 let mut left = limit.unwrap_or(usize::MAX);
                 if left > 0 {
-                    let moved = self.list_moved_since(&path, since, left);
+                    let moved = if let Some(rev) = since_rev {
+                        self.list_moved_since_index(&path, rev, left)
+                    } else {
+                        self.list_moved_since(&path, since, left)
+                    };
                     for (from, to) in moved {
                         let href_to = self.build_full_href(&to);
                         xml.push_str("<D:response>");
@@ -203,7 +222,11 @@ impl WebDavHandler {
                     }
                 }
                 if left > 0 {
-                    let deleted = self.list_deleted_since(&path, since, left);
+                    let deleted = if let Some(rev) = since_rev {
+                        self.list_deleted_since_index(&path, rev, left)
+                    } else {
+                        self.list_deleted_since(&path, since, left)
+                    };
                     for p in deleted {
                         let href = self.build_full_href(&p);
                         xml.push_str("<D:response>");
@@ -408,7 +431,9 @@ impl WebDavHandler {
         Ok(resp)
     }
 
-    fn parse_sync_collection_request(xml: &[u8]) -> (Option<usize>, Option<chrono::NaiveDateTime>) {
+    fn parse_sync_collection_request(
+        xml: &[u8],
+    ) -> (Option<usize>, Option<chrono::NaiveDateTime>, Option<usize>) {
         let mut reader = Reader::from_reader(xml);
         reader.config_mut().trim_text(true);
         let mut buf = Vec::new();
@@ -416,6 +441,7 @@ impl WebDavHandler {
         let mut in_nresults = false;
         let mut since: Option<chrono::NaiveDateTime> = None;
         let mut in_sync_token = false;
+        let mut since_rev: Option<usize> = None;
         loop {
             match reader.read_event_into(&mut buf) {
                 Ok(Event::Start(e)) => {
@@ -441,8 +467,21 @@ impl WebDavHandler {
                     if in_nresults && let Ok(n) = s.trim().parse::<usize>() {
                         limit = Some(n);
                     }
-                    if in_sync_token && let Some(ts) = Self::parse_sync_token_time(s.trim()) {
-                        since = Some(ts);
+                    if in_sync_token {
+                        let st = s.trim();
+                        let (t_part, r_part) = if let Some(pos) = st.rfind('#') {
+                            (&st[..pos], Some(&st[pos + 1..]))
+                        } else {
+                            (st, None)
+                        };
+                        if let Some(ts) = Self::parse_sync_token_time(t_part) {
+                            since = Some(ts);
+                        }
+                        if let Some(rv) = r_part
+                            && let Ok(n) = rv.parse::<usize>()
+                        {
+                            since_rev = Some(n);
+                        }
                     }
                 }
                 Ok(Event::Eof) => break,
@@ -451,20 +490,19 @@ impl WebDavHandler {
             }
             buf.clear();
         }
-        (limit, since)
+        (limit, since, since_rev)
     }
 
     fn parse_sync_token_time(token: &str) -> Option<chrono::NaiveDateTime> {
-        if let Some(pos) = token.rfind(':') {
-            let ts = &token[pos + 1..];
-            if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(ts, "%Y-%m-%d %H:%M:%S%.f") {
-                return Some(dt);
-            }
-            if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(ts, "%Y-%m-%d %H:%M:%S") {
-                return Some(dt);
-            }
+        // 令牌格式：urn:sync:<id>:<time>[#<rev>]
+        let pre = token.split('#').next().unwrap_or(token);
+        let prefix = "urn:sync:";
+        let rest = pre.strip_prefix(prefix)?;
+        let (_id, t_part) = rest.split_once(':')?; // time 形如 2025-10-28 11:41:50[.xxxxxx]
+        if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(t_part, "%Y-%m-%d %H:%M:%S%.f") {
+            return Some(dt);
         }
-        None
+        chrono::NaiveDateTime::parse_from_str(t_part, "%Y-%m-%d %H:%M:%S").ok()
     }
 
     #[allow(clippy::type_complexity)]

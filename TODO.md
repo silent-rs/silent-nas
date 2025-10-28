@@ -39,13 +39,12 @@
 2) WebDAV 协议完善
 - 进度更新：
   - [已完成] 锁与并发：共享锁语义与冲突矩阵、LOCK Body 解析（owner/depth/timeout）
+  - [已完成] 条件请求：If 头完整表达式（资源标记、多令牌、列表AND/OR、Not、ETag 条件）
   - [已完成] 互通用例：补充 Cyberduck/Nextcloud 要点与验证记录（docs/webdav-interop.md）
   - [已完成/基础] 属性模型：PROPPATCH 解析 xmlns，新增结构化键 ns:{URI}#{local}
   - [已完成/基础] 报告扩展：REPORT sync-collection 支持 <D:limit><D:nresults> 限制，保留 Depth 处理与 sync-token
-  - [进行中] 条件请求：If 头解析（已支持资源标记与多令牌）；剩余布尔表达式/ETag 条件组合待补充
 
 - 待完成：
-  - 条件请求：If 头布尔表达式完整语义（Not/且或组合）与 ETag 条件
   - 报告扩展：更多 REPORT 类型与过滤场景（差异集、增量同步基于 sync-token）
   - 属性模型：复杂属性的校验策略与命名空间冲突处理
 

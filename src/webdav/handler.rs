@@ -144,12 +144,82 @@ impl WebDavHandler {
         tokens
     }
 
+    /// 提取与指定路径相关的 If 令牌（支持资源标记与未标记列表）
+    pub(super) fn extract_if_tokens_for_path(&self, path: &str, req: &Request) -> Vec<String> {
+        let Some(header) = req.headers().get("If").and_then(|h| h.to_str().ok()) else {
+            return Vec::new();
+        };
+        let mut tokens_by_tag: std::collections::HashMap<Option<String>, Vec<String>> = std::collections::HashMap::new();
+        let mut current_tag: Option<String> = None;
+        let mut i = 0usize;
+        let bytes = header.as_bytes();
+        while i < bytes.len() {
+            match bytes[i] {
+                b'<' => {
+                    // 资源标签
+                    let start = i + 1;
+                    let mut j = start;
+                    while j < bytes.len() && bytes[j] != b'>' { j += 1; }
+                    if j < bytes.len() {
+                        if let Ok(s) = std::str::from_utf8(&bytes[start..j]) {
+                            current_tag = Some(s.to_string());
+                        }
+                        i = j + 1;
+                        continue;
+                    } else { break; }
+                }
+                b'(' => {
+                    // 括号内列表：收集令牌
+                    let mut j = i + 1;
+                    let mut content_start = j;
+                    let mut depth = 1;
+                    while j < bytes.len() {
+                        if bytes[j] == b'(' { depth += 1; }
+                        if bytes[j] == b')' { depth -= 1; if depth == 0 { break; } }
+                        j += 1;
+                    }
+                    let end = j;
+                    if end <= bytes.len() {
+                        let segment = &header[content_start..end];
+                        let mut toks = Vec::new();
+                        // 从段中提取 token
+                        let needle = "opaquelocktoken:";
+                        let mut k = 0usize;
+                        while let Some(pos) = segment[k..].find(needle) {
+                            let abs = k + pos;
+                            let after = &segment[abs..];
+                            if let Some(close) = after.find('>') {
+                                toks.push(after[..close].to_string());
+                                k = abs + close;
+                            } else { break; }
+                        }
+                        tokens_by_tag.entry(current_tag.clone()).or_default().extend(toks);
+                    }
+                    i = end.saturating_add(1);
+                    continue;
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        // 选择与路径匹配的资源标签，或未标记的
+        let target = self.build_full_href(path);
+        let mut out = Vec::new();
+        if let Some(v) = tokens_by_tag.get(&None) { out.extend(v.clone()); }
+        for (tag, toks) in &tokens_by_tag {
+            if let Some(t) = tag {
+                if t == &target || t.ends_with(&target) { out.extend(toks.clone()); }
+            }
+        }
+        out
+    }
+
     pub(super) async fn ensure_lock_ok(&self, path: &str, req: &Request) -> silent::Result<()> {
         let locks = self.locks.read().await;
         if let Some(list) = locks.get(path) {
             let active: Vec<&crate::webdav::types::DavLock> = list.iter().filter(|l| !l.is_expired()).collect();
             if !active.is_empty() {
-                let provided = Self::extract_if_lock_tokens(req);
+                let provided = self.extract_if_tokens_for_path(path, req);
                 if !provided.is_empty() {
                     // 任一提供 token 匹配即可
                     if active.iter().any(|l| provided.iter().any(|t| t == &l.token)) {

@@ -229,7 +229,7 @@ impl WebDavHandler {
                 b'(' => {
                     // 括号内列表：收集令牌
                     let mut j = i + 1;
-                    let mut content_start = j;
+                    let content_start = j;
                     let mut depth = 1;
                     while j < bytes.len() {
                         if bytes[j] == b'(' { depth += 1; }

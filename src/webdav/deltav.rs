@@ -88,10 +88,6 @@ impl WebDavHandler {
             xml.push_str(XML_HEADER);
             xml.push_str("<D:multistatus xmlns:D=\"DAV:\">");
             let props_filter = Self::parse_prop_filter(&xml_bytes);
-            let props_filter = Self::parse_prop_filter(&xml_bytes);
-            let props_filter = Self::parse_prop_filter(&xml_bytes);
-            let props_filter = Self::parse_prop_filter(&xml_bytes);
-            let props_filter = Self::parse_prop_filter(&xml_bytes);
             // 生成新的 sync-token（使用 scru128，符合ID规则；同时包含当前时间）
             let token = format!(
                 "urn:sync:{}:{}",
@@ -198,7 +194,7 @@ impl WebDavHandler {
 
         // 自定义过滤（silent:filter）：按 mime/时间范围/limit 过滤（Depth: 1）
         if body_str_lower.contains("silent:filter") || body_str_lower.contains("silent-filter") {
-            let (mime_prefix, after, before, limit) = Self::parse_filter_request(&xml_bytes);
+            let (mime_prefix, after, before, limit, tags) = Self::parse_filter_request(&xml_bytes);
             let storage_path = self.storage.get_full_path(&path);
             let meta = fs::metadata(&storage_path)
                 .await
@@ -253,6 +249,24 @@ impl WebDavHandler {
                 };
                 let href = self.build_full_href(&relative_path);
                 let is_dir = m.is_dir();
+                // 标签过滤（结构化键）
+                if !tags.is_empty() {
+                    let mut pass = true;
+                    let key_for_props = if is_dir { href.trim_end_matches('/').to_string() } else { href.clone() };
+                    let props_map = self.props.read().await;
+                    let entry_props = props_map.get(&key_for_props);
+                    for (tk, tv) in &tags {
+                        if let Some(em) = entry_props {
+                            if let Some(val) = em.get(tk) {
+                                if let Some(expect) = tv {
+                                    if val != expect { pass = false; break; }
+                                }
+                            } else { pass = false; break; }
+                        } else { pass = false; break; }
+                    }
+                    drop(props_map);
+                    if !pass { continue; }
+                }
                 if let Some(filt) = Self::parse_prop_filter(&xml_bytes) {
                     self.add_prop_response_with_filter(&mut xml, &href, &entry_path, is_dir, Some(&filt)).await;
                 } else {
@@ -369,6 +383,7 @@ impl WebDavHandler {
         Option<chrono::NaiveDateTime>,
         Option<chrono::NaiveDateTime>,
         Option<usize>,
+        Vec<(String, Option<String>)>,
     ) {
         let mut reader = Reader::from_reader(xml);
         reader.config_mut().trim_text(true);
@@ -377,10 +392,12 @@ impl WebDavHandler {
         let mut in_after = false;
         let mut in_before = false;
         let mut in_limit = false;
+        let mut in_tag = false;
         let mut mime: Option<String> = None;
         let mut after: Option<chrono::NaiveDateTime> = None;
         let mut before: Option<chrono::NaiveDateTime> = None;
         let mut limit: Option<usize> = None;
+        let mut tags: Vec<(String, Option<String>)> = Vec::new();
         loop {
             match reader.read_event_into(&mut buf) {
                 Ok(Event::Start(e)) => {
@@ -389,9 +406,10 @@ impl WebDavHandler {
                     in_after = name.ends_with("modified-after");
                     in_before = name.ends_with("modified-before");
                     in_limit = name.ends_with("limit");
+                    in_tag = name.ends_with("tag");
                 }
                 Ok(Event::End(_)) => {
-                    in_mime = false; in_after = false; in_before = false; in_limit = false;
+                    in_mime = false; in_after = false; in_before = false; in_limit = false; in_tag = false;
                 }
                 Ok(Event::Text(t)) => {
                     let s = String::from_utf8_lossy(&t.into_inner()).trim().to_string();
@@ -403,6 +421,14 @@ impl WebDavHandler {
                     if in_before && !s.is_empty() {
                         if let Some(dt) = Self::parse_datetime(&s) { before = Some(dt); }
                     }
+                    if in_tag && !s.is_empty() {
+                        // 支持格式："ns:{URI}#{local}=value" 或 "ns:{URI}#{local}"
+                        if let Some((k, v)) = s.split_once('=') {
+                            tags.push((k.trim().to_string(), Some(v.trim().to_string())));
+                        } else {
+                            tags.push((s.clone(), None));
+                        }
+                    }
                 }
                 Ok(Event::Eof) => break,
                 Err(_) => break,
@@ -410,7 +436,7 @@ impl WebDavHandler {
             }
             buf.clear();
         }
-        (mime, after, before, limit)
+        (mime, after, before, limit, tags)
     }
 
     fn parse_datetime(s: &str) -> Option<chrono::NaiveDateTime> {

@@ -36,11 +36,18 @@
     <D:href>/docs/old.txt</D:href>
     <D:status>HTTP/1.1 404 Not Found</D:status>
   </D:response>
+  <!-- 移动差异以 301 + silent:moved-from 表示 -->
+  <D:response>
+    <D:href>/docs/new-name.txt</D:href>
+    <D:status>HTTP/1.1 301 Moved Permanently</D:status>
+    <silent:moved-from xmlns:silent="urn:silent-webdav">/docs/old-name.txt</silent:moved-from>
+  </D:response>
 </D:multistatus>
 ```
 
 说明：
 - 仅返回自 `<D:sync-token>` 之后的变化；删除以 404 项返回。
+- 移动以 301 + `<silent:moved-from>` 扩展字段回显来源路径（命名空间 `urn:silent-webdav`）。
 - 通过 `<D:prop>` 过滤返回的属性集合（含扩展属性）。
 
 ## 2. version-tree（版本列表）
@@ -90,4 +97,3 @@
 注意：
 - 标签过滤使用结构化属性键 `ns:{URI}#{local}`；若带 `=value` 则匹配等值。
 - 时间支持 RFC3339、RFC2822 或 `YYYY-MM-DD HH:MM:SS`。
-

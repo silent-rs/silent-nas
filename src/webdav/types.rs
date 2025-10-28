@@ -11,7 +11,13 @@ pub struct DavLock {
 }
 
 impl DavLock {
-    pub fn new(token: String, exclusive: bool, timeout_secs: i64, owner: Option<String>, depth_infinity: bool) -> Self {
+    pub fn new(
+        token: String,
+        exclusive: bool,
+        timeout_secs: i64,
+        owner: Option<String>,
+        depth_infinity: bool,
+    ) -> Self {
         Self {
             token,
             exclusive,

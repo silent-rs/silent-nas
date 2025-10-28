@@ -49,18 +49,16 @@ impl WebDavHandler {
                         let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
                         // 处理 xmlns 声明
                         let mut ns_map = ns_stack.last().cloned().unwrap_or_default();
-                        for a in e.attributes().with_checks(false) {
-                            if let Ok(attr) = a {
-                                let key = String::from_utf8_lossy(attr.key.as_ref()).to_string();
-                                if key == "xmlns" {
-                                    if let Ok(val) = String::from_utf8(attr.value.into_owned()) {
-                                        ns_map.insert(String::new(), val);
-                                    }
-                                } else if let Some(suffix) = key.strip_prefix("xmlns:") {
-                                    if let Ok(val) = String::from_utf8(attr.value.into_owned()) {
-                                        ns_map.insert(suffix.to_string(), val);
-                                    }
-                                }
+                        for attr in e.attributes().with_checks(false).flatten() {
+                            let key = String::from_utf8_lossy(attr.key.as_ref()).to_string();
+                            if key == "xmlns"
+                                && let Ok(val) = String::from_utf8(attr.value.clone().into_owned())
+                            {
+                                ns_map.insert(String::new(), val);
+                            } else if let Some(suffix) = key.strip_prefix("xmlns:")
+                                && let Ok(val) = String::from_utf8(attr.value.into_owned())
+                            {
+                                ns_map.insert(suffix.to_string(), val);
                             }
                         }
                         ns_stack.push(ns_map);
@@ -87,21 +85,31 @@ impl WebDavHandler {
                                         updates.push((key.clone(), current_text.clone()));
                                         // 生成命名空间完全限定键 ns:{uri}#{local}
                                         if let Some(ns_ctx) = ns_stack.last() {
-                                            let (pref, local) = key.split_once(':').unwrap_or(("", key.as_str()));
+                                            let (pref, local) =
+                                                key.split_once(':').unwrap_or(("", key.as_str()));
                                             if let Some(uri) = ns_ctx.get(pref) {
-                                                fq_updates.push((format!("ns:{}#{}", uri, local), current_text.take()));
+                                                fq_updates.push((
+                                                    format!("ns:{}#{}", uri, local),
+                                                    current_text.take(),
+                                                ));
                                             } else if let Some(uri) = ns_ctx.get("") {
-                                                fq_updates.push((format!("ns:{}#{}", uri, local), current_text.take()));
+                                                fq_updates.push((
+                                                    format!("ns:{}#{}", uri, local),
+                                                    current_text.take(),
+                                                ));
                                             }
                                         }
                                     } else if in_remove {
                                         updates.push((key.clone(), None));
                                         if let Some(ns_ctx) = ns_stack.last() {
-                                            let (pref, local) = key.split_once(':').unwrap_or(("", key.as_str()));
+                                            let (pref, local) =
+                                                key.split_once(':').unwrap_or(("", key.as_str()));
                                             if let Some(uri) = ns_ctx.get(pref) {
-                                                fq_updates.push((format!("ns:{}#{}", uri, local), None));
+                                                fq_updates
+                                                    .push((format!("ns:{}#{}", uri, local), None));
                                             } else if let Some(uri) = ns_ctx.get("") {
-                                                fq_updates.push((format!("ns:{}#{}", uri, local), None));
+                                                fq_updates
+                                                    .push((format!("ns:{}#{}", uri, local), None));
                                             }
                                         }
                                     }
@@ -132,12 +140,13 @@ impl WebDavHandler {
                 let mut reject_dav = false;
                 let mut conflict = false;
                 // 命名空间冲突检测：针对结构化键 ns:{URI}#{local}
-                let mut seen_local: std::collections::HashMap<String, (String, Option<String>)> = std::collections::HashMap::new();
+                let mut seen_local: std::collections::HashMap<String, (String, Option<String>)> =
+                    std::collections::HashMap::new();
                 let parse_ns_key = |k: &str| -> Option<(String, String)> {
-                    if let Some(rest) = k.strip_prefix("ns:") {
-                        if let Some((uri, local)) = rest.split_once('#') {
-                            return Some((uri.to_string(), local.to_string()));
-                        }
+                    if let Some(rest) = k.strip_prefix("ns:")
+                        && let Some((uri, local)) = rest.split_once('#')
+                    {
+                        return Some((uri.to_string(), local.to_string()));
                     }
                     None
                 };
@@ -150,13 +159,12 @@ impl WebDavHandler {
                 // 再扫描本次结构化更新，若同 local 不同 uri 且值不同，标记冲突
                 for (k, v) in fq_updates.iter() {
                     if let Some((u, l)) = parse_ns_key(k) {
-                        if let Some((eu, ev)) = seen_local.get(&l) {
-                            if eu != &u {
-                                if ev.as_deref() != v.as_deref() {
-                                    conflict = true;
-                                    break;
-                                }
-                            }
+                        if let Some((eu, ev)) = seen_local.get(&l)
+                            && eu != &u
+                            && ev.as_deref() != v.as_deref()
+                        {
+                            conflict = true;
+                            break;
                         }
                         seen_local.insert(l, (u, v.clone()));
                     }
@@ -176,7 +184,11 @@ impl WebDavHandler {
                     if let Some(val) = v {
                         Self::validate_prop_value(&key, &val)?;
                         // 限制属性值大小，防止滥用
-                        let vshort = if val.len() > 4096 { val[..4096].to_string() } else { val };
+                        let vshort = if val.len() > 4096 {
+                            val[..4096].to_string()
+                        } else {
+                            val
+                        };
                         entry.insert(key, vshort);
                     } else {
                         entry.remove(&key);
@@ -190,7 +202,11 @@ impl WebDavHandler {
                     }
                     if let Some(val) = v {
                         Self::validate_prop_value(&key, &val)?;
-                        let vshort = if val.len() > 4096 { val[..4096].to_string() } else { val };
+                        let vshort = if val.len() > 4096 {
+                            val[..4096].to_string()
+                        } else {
+                            val
+                        };
                         entry.insert(key, vshort);
                     } else {
                         entry.remove(&key);
@@ -243,13 +259,11 @@ impl WebDavHandler {
                 ));
             }
         }
-        if local.ends_with(".int") {
-            if val.trim().parse::<i64>().is_err() {
-                return Err(SilentError::business_error(
-                    StatusCode::BAD_REQUEST,
-                    format!("属性 {} 期望整数", key),
-                ));
-            }
+        if local.ends_with(".int") && val.trim().parse::<i64>().is_err() {
+            return Err(SilentError::business_error(
+                StatusCode::BAD_REQUEST,
+                format!("属性 {} 期望整数", key),
+            ));
         }
         Ok(())
     }

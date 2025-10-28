@@ -9,14 +9,22 @@ use std::sync::Arc;
 use super::{constants::*, types::DavLock};
 use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum IfTermKind { LockToken(String), ETag(String) }
+enum IfTermKind {
+    LockToken(String),
+    ETag(String),
+}
 #[derive(Debug, Clone)]
-struct IfTerm { negate: bool, kind: IfTermKind }
+struct IfTerm {
+    negate: bool,
+    kind: IfTermKind,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct ChangeEntry {
     pub path: String,
-    pub action: String, // created/modified/deleted
+    pub action: String, // created/modified/deleted/moved/prop:patch
+    #[serde(default)]
+    pub from: Option<String>, // 当 action=moved 时，记录来源路径
     pub ts: chrono::NaiveDateTime,
 }
 
@@ -129,6 +137,31 @@ impl WebDavHandler {
         list.push(ChangeEntry {
             path: path.to_string(),
             action: action.to_string(),
+            from: None,
+            ts: chrono::Local::now().naive_local(),
+        });
+        // 简单裁剪：最多 10000 条，超出丢弃最旧
+        const MAX_LEN: usize = 10000;
+        if list.len() > MAX_LEN {
+            let drain = list.len() - MAX_LEN;
+            let _ = list.drain(0..drain);
+        }
+        if let Ok(bytes) = serde_json::to_vec(&list) {
+            let _ = std::fs::write(self.changelog_file(), bytes);
+        }
+    }
+
+    /// 追加移动记录（from -> to）
+    pub(super) fn append_move(&self, from: &str, to: &str) {
+        let _ = std::fs::create_dir_all(self.meta_dir());
+        let mut list: Vec<ChangeEntry> = std::fs::read(self.changelog_file())
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .unwrap_or_default();
+        list.push(ChangeEntry {
+            path: to.to_string(),
+            action: "moved".to_string(),
+            from: Some(from.to_string()),
             ts: chrono::Local::now().naive_local(),
         });
         // 简单裁剪：最多 10000 条，超出丢弃最旧
@@ -153,14 +186,115 @@ impl WebDavHandler {
             .and_then(|b| serde_json::from_slice(&b).ok())
             .unwrap_or_default();
         let mut out = Vec::new();
-        for e in list.iter().filter(|e| e.action == "deleted" && e.ts > since) {
-            if !prefix.is_empty() && prefix != "/" {
-                if !e.path.starts_with(prefix) { continue; }
+        for e in list
+            .iter()
+            .filter(|e| e.action == "deleted" && e.ts > since)
+        {
+            if !prefix.is_empty() && prefix != "/" && !e.path.starts_with(prefix) {
+                continue;
             }
             out.push(e.path.clone());
-            if out.len() >= limit { break; }
+            if out.len() >= limit {
+                break;
+            }
         }
         out
+    }
+
+    pub(super) fn list_moved_since(
+        &self,
+        prefix: &str,
+        since: chrono::NaiveDateTime,
+        limit: usize,
+    ) -> Vec<(String, String)> {
+        // (from, to)
+        let list: Vec<ChangeEntry> = std::fs::read(self.changelog_file())
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .unwrap_or_default();
+        let mut out = Vec::new();
+        for e in list.iter().filter(|e| e.action == "moved" && e.ts > since) {
+            if !prefix.is_empty() && prefix != "/" {
+                // moved 的筛选：只要来源或目标在 prefix 下即可
+                let from_match = e
+                    .from
+                    .as_deref()
+                    .map(|f| f.starts_with(prefix))
+                    .unwrap_or(false);
+                let to_match = e.path.starts_with(prefix);
+                if !from_match && !to_match {
+                    continue;
+                }
+            }
+            if let Some(from) = &e.from {
+                out.push((from.clone(), e.path.clone()));
+                if out.len() >= limit {
+                    break;
+                }
+            }
+        }
+        out
+    }
+
+    /// 解析 <D:prop> 选择集，并收集 xmlns 前缀到URI映射，便于回显客端偏好的前缀
+    pub(super) fn parse_prop_filter_and_nsmap(
+        xml: &[u8],
+    ) -> (
+        Option<std::collections::HashSet<String>>,
+        std::collections::HashMap<String, String>, // uri -> prefix
+    ) {
+        use quick_xml::{Reader, events::Event};
+        let mut reader = Reader::from_reader(xml);
+        reader.config_mut().trim_text(true);
+        let mut buf = Vec::new();
+        let mut in_prop = false;
+        let mut set = std::collections::HashSet::new();
+        let mut ns_map: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        loop {
+            match reader.read_event_into(&mut buf) {
+                Ok(Event::Start(e)) => {
+                    let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                    let lname = name
+                        .split(':')
+                        .next_back()
+                        .unwrap_or(name.as_str())
+                        .to_lowercase();
+                    if lname == "prop" {
+                        in_prop = true;
+                    } else if in_prop {
+                        set.insert(lname);
+                    }
+                    // 收集 xmlns 声明
+                    for attr in e.attributes().with_checks(false).flatten() {
+                        let key = String::from_utf8_lossy(attr.key.as_ref()).to_string();
+                        if let Some(pref) = key.strip_prefix("xmlns:")
+                            && let Ok(val) = String::from_utf8(attr.value.into_owned())
+                        {
+                            // 客户端声明的 prefix->uri，记录为 uri->prefix
+                            ns_map.insert(val, pref.to_string());
+                        }
+                    }
+                }
+                Ok(Event::End(e)) => {
+                    let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                    let lname = name
+                        .split(':')
+                        .next_back()
+                        .unwrap_or(name.as_str())
+                        .to_lowercase();
+                    if lname == "prop" {
+                        in_prop = false;
+                    }
+                }
+                Ok(Event::Eof) => break,
+                Err(_) => break,
+                _ => {}
+            }
+            buf.clear();
+        }
+        let filter = if set.is_empty() { None } else { Some(set) };
+        (filter, ns_map)
     }
 
     pub(super) fn parse_timeout(req: &Request) -> i64 {
@@ -175,6 +309,7 @@ impl WebDavHandler {
         60
     }
 
+    #[allow(dead_code)]
     pub(super) fn extract_if_lock_tokens(req: &Request) -> Vec<String> {
         let mut tokens = Vec::new();
         if let Some(val) = req.headers().get("If").and_then(|h| h.to_str().ok()) {
@@ -186,12 +321,14 @@ impl WebDavHandler {
                     let start = i;
                     // 向后找到 > 作为结束
                     let mut j = i;
-                    while j < s.len() && s[j] != b'>' as u8 { j += 1; }
+                    while j < s.len() && s[j] != b'>' {
+                        j += 1;
+                    }
                     let end = j.min(s.len());
-                    if end > start {
-                        if let Ok(tok) = std::str::from_utf8(&s[start..end]) {
-                            tokens.push(tok.to_string());
-                        }
+                    if end > start
+                        && let Ok(tok) = std::str::from_utf8(&s[start..end])
+                    {
+                        tokens.push(tok.to_string());
                     }
                     i = end;
                 } else {
@@ -203,11 +340,13 @@ impl WebDavHandler {
     }
 
     /// 提取与指定路径相关的 If 令牌（支持资源标记与未标记列表）
+    #[allow(dead_code)]
     pub(super) fn extract_if_tokens_for_path(&self, path: &str, req: &Request) -> Vec<String> {
         let Some(header) = req.headers().get("If").and_then(|h| h.to_str().ok()) else {
             return Vec::new();
         };
-        let mut tokens_by_tag: std::collections::HashMap<Option<String>, Vec<String>> = std::collections::HashMap::new();
+        let mut tokens_by_tag: std::collections::HashMap<Option<String>, Vec<String>> =
+            std::collections::HashMap::new();
         let mut current_tag: Option<String> = None;
         let mut i = 0usize;
         let bytes = header.as_bytes();
@@ -217,14 +356,18 @@ impl WebDavHandler {
                     // 资源标签
                     let start = i + 1;
                     let mut j = start;
-                    while j < bytes.len() && bytes[j] != b'>' { j += 1; }
+                    while j < bytes.len() && bytes[j] != b'>' {
+                        j += 1;
+                    }
                     if j < bytes.len() {
                         if let Ok(s) = std::str::from_utf8(&bytes[start..j]) {
                             current_tag = Some(s.to_string());
                         }
                         i = j + 1;
                         continue;
-                    } else { break; }
+                    } else {
+                        break;
+                    }
                 }
                 b'(' => {
                     // 括号内列表：收集令牌
@@ -232,8 +375,15 @@ impl WebDavHandler {
                     let content_start = j;
                     let mut depth = 1;
                     while j < bytes.len() {
-                        if bytes[j] == b'(' { depth += 1; }
-                        if bytes[j] == b')' { depth -= 1; if depth == 0 { break; } }
+                        if bytes[j] == b'(' {
+                            depth += 1;
+                        }
+                        if bytes[j] == b')' {
+                            depth -= 1;
+                            if depth == 0 {
+                                break;
+                            }
+                        }
                         j += 1;
                     }
                     let end = j;
@@ -249,9 +399,14 @@ impl WebDavHandler {
                             if let Some(close) = after.find('>') {
                                 toks.push(after[..close].to_string());
                                 k = abs + close;
-                            } else { break; }
+                            } else {
+                                break;
+                            }
                         }
-                        tokens_by_tag.entry(current_tag.clone()).or_default().extend(toks);
+                        tokens_by_tag
+                            .entry(current_tag.clone())
+                            .or_default()
+                            .extend(toks);
                     }
                     i = end.saturating_add(1);
                     continue;
@@ -263,10 +418,14 @@ impl WebDavHandler {
         // 选择与路径匹配的资源标签，或未标记的
         let target = self.build_full_href(path);
         let mut out = Vec::new();
-        if let Some(v) = tokens_by_tag.get(&None) { out.extend(v.clone()); }
+        if let Some(v) = tokens_by_tag.get(&None) {
+            out.extend(v.clone());
+        }
         for (tag, toks) in &tokens_by_tag {
-            if let Some(t) = tag {
-                if t == &target || t.ends_with(&target) { out.extend(toks.clone()); }
+            if let Some(t) = tag
+                && (t == &target || t.ends_with(&target))
+            {
+                out.extend(toks.clone());
             }
         }
         out
@@ -279,43 +438,66 @@ impl WebDavHandler {
         if let Ok(meta) = std::fs::metadata(full) {
             let len = meta.len();
             let ts = meta
-                .modified().ok()?
-                .duration_since(std::time::UNIX_EPOCH).ok()?
+                .modified()
+                .ok()?
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()?
                 .as_secs();
             Some(format!("\"{}-{}\"", len, ts))
-        } else { None }
+        } else {
+            None
+        }
     }
 
-    fn parse_if_header_full(&self, header: &str) -> std::collections::HashMap<Option<String>, Vec<Vec<IfTerm>>> {
+    fn parse_if_header_full(
+        &self,
+        header: &str,
+    ) -> std::collections::HashMap<Option<String>, Vec<Vec<IfTerm>>> {
         use std::collections::HashMap;
         let mut map: HashMap<Option<String>, Vec<Vec<IfTerm>>> = HashMap::new();
         let bytes = header.as_bytes();
         let mut i = 0usize;
         let mut current_tag: Option<String> = None;
-        fn is_ws(b: u8) -> bool { matches!(b, b' ' | b'\t' | b'\r' | b'\n') }
+        fn is_ws(b: u8) -> bool {
+            matches!(b, b' ' | b'\t' | b'\r' | b'\n')
+        }
         while i < bytes.len() {
-            if is_ws(bytes[i]) { i += 1; continue; }
+            if is_ws(bytes[i]) {
+                i += 1;
+                continue;
+            }
             match bytes[i] {
                 b'<' => {
                     // 资源标签 <...>
                     let start = i + 1;
                     let mut j = start;
-                    while j < bytes.len() && bytes[j] != b'>' { j += 1; }
+                    while j < bytes.len() && bytes[j] != b'>' {
+                        j += 1;
+                    }
                     if j < bytes.len() {
                         if let Ok(s) = std::str::from_utf8(&bytes[start..j]) {
                             current_tag = Some(s.to_string());
                         }
                         i = j + 1;
-                    } else { break; }
+                    } else {
+                        break;
+                    }
                 }
                 b'(' => {
                     // 解析一个列表，直到配对 ')'
                     i += 1;
                     let mut terms: Vec<IfTerm> = Vec::new();
                     loop {
-                        while i < bytes.len() && is_ws(bytes[i]) { i += 1; }
-                        if i >= bytes.len() { break; }
-                        if bytes[i] == b')' { i += 1; break; }
+                        while i < bytes.len() && is_ws(bytes[i]) {
+                            i += 1;
+                        }
+                        if i >= bytes.len() {
+                            break;
+                        }
+                        if bytes[i] == b')' {
+                            i += 1;
+                            break;
+                        }
                         // 可选 Not
                         let mut negate = false;
                         if bytes[i..].len() >= 3 {
@@ -325,40 +507,60 @@ impl WebDavHandler {
                                 // 下一个必须是空白或 '<' '"' '('
                                 negate = true;
                                 i += 3;
-                                while i < bytes.len() && is_ws(bytes[i]) { i += 1; }
+                                while i < bytes.len() && is_ws(bytes[i]) {
+                                    i += 1;
+                                }
                             }
                         }
-                        if i >= bytes.len() { break; }
+                        if i >= bytes.len() {
+                            break;
+                        }
                         match bytes[i] {
                             b'<' => {
                                 // 锁令牌
                                 let start = i + 1;
                                 let mut j = start;
-                                while j < bytes.len() && bytes[j] != b'>' { j += 1; }
+                                while j < bytes.len() && bytes[j] != b'>' {
+                                    j += 1;
+                                }
                                 if j < bytes.len() {
                                     if let Ok(tok) = std::str::from_utf8(&bytes[start..j]) {
-                                        terms.push(IfTerm { negate, kind: IfTermKind::LockToken(tok.to_string()) });
+                                        terms.push(IfTerm {
+                                            negate,
+                                            kind: IfTermKind::LockToken(tok.to_string()),
+                                        });
                                     }
                                     i = j + 1;
-                                } else { break; }
+                                } else {
+                                    break;
+                                }
                             }
                             b'"' => {
                                 // ETag（含双引号）
                                 let start = i;
                                 i += 1;
                                 let mut j = i;
-                                while j < bytes.len() && bytes[j] != b'"' { j += 1; }
+                                while j < bytes.len() && bytes[j] != b'"' {
+                                    j += 1;
+                                }
                                 if j < bytes.len() {
                                     // 包含引号
                                     if let Ok(et) = std::str::from_utf8(&bytes[start..=j]) {
-                                        terms.push(IfTerm { negate, kind: IfTermKind::ETag(et.to_string()) });
+                                        terms.push(IfTerm {
+                                            negate,
+                                            kind: IfTermKind::ETag(et.to_string()),
+                                        });
                                     }
                                     i = j + 1;
-                                } else { break; }
+                                } else {
+                                    break;
+                                }
                             }
                             _ => {
                                 // 未知 token，跳过到下一个空白或 ')'
-                                while i < bytes.len() && !is_ws(bytes[i]) && bytes[i] != b')' { i += 1; }
+                                while i < bytes.len() && !is_ws(bytes[i]) && bytes[i] != b')' {
+                                    i += 1;
+                                }
                             }
                         }
                     }
@@ -366,34 +568,52 @@ impl WebDavHandler {
                         map.entry(current_tag.clone()).or_default().push(terms);
                     }
                 }
-                _ => { i += 1; }
+                _ => {
+                    i += 1;
+                }
             }
         }
         map
     }
 
     async fn eval_if_header_for_path(&self, path: &str, req: &Request) -> bool {
-        let header = match req.headers().get("If").and_then(|h| h.to_str().ok()) { Some(s) => s, None => return false };
+        let header = match req.headers().get("If").and_then(|h| h.to_str().ok()) {
+            Some(s) => s,
+            None => return false,
+        };
         let conds = self.parse_if_header_full(header);
         // 收集相关条件：未标记和与 path 匹配的标记
         let target = self.build_full_href(path);
         let mut lists: Vec<Vec<IfTerm>> = Vec::new();
-        if let Some(v) = conds.get(&None) { lists.extend_from_slice(v); }
+        if let Some(v) = conds.get(&None) {
+            lists.extend_from_slice(v);
+        }
         for (tag, v) in &conds {
-            if let Some(t) = tag {
-                if t == &target || t.ends_with(&target) { lists.extend_from_slice(v); }
+            if let Some(t) = tag
+                && (t == &target || t.ends_with(&target))
+            {
+                lists.extend_from_slice(v);
             }
         }
-        if lists.is_empty() { return false; }
+        if lists.is_empty() {
+            return false;
+        }
         // 收集当前锁令牌集（精确路径 + 祖先 depth=infinity）
         let mut tokens: Vec<String> = Vec::new();
         let locks = self.locks.read().await;
-        if let Some(list) = locks.get(path) { for l in list.iter().filter(|l| !l.is_expired()) { tokens.push(l.token.clone()); } }
+        if let Some(list) = locks.get(path) {
+            for l in list.iter().filter(|l| !l.is_expired()) {
+                tokens.push(l.token.clone());
+            }
+        }
         // 祖先
         let mut prefix = String::new();
         for seg in path.split('/').filter(|s| !s.is_empty()) {
-            prefix.push('/'); prefix.push_str(seg);
-            if &prefix == path { break; }
+            prefix.push('/');
+            prefix.push_str(seg);
+            if prefix == path {
+                break;
+            }
             if let Some(list) = locks.get(&prefix) {
                 for l in list.iter().filter(|l| !l.is_expired() && l.depth_infinity) {
                     tokens.push(l.token.clone());
@@ -411,7 +631,9 @@ impl WebDavHandler {
                     IfTermKind::ETag(ref val) => etag_now.as_deref() == Some(val.as_str()),
                 };
                 let final_ok = if t.negate { !ok } else { ok };
-                if !final_ok { continue 'outer; }
+                if !final_ok {
+                    continue 'outer;
+                }
             }
             // 每个列表全部通过
             return true;
@@ -429,19 +651,27 @@ impl WebDavHandler {
         // 祖先
         let mut prefix = String::new();
         for seg in path.split('/').filter(|s| !s.is_empty()) {
-            prefix.push('/'); prefix.push_str(seg);
-            if &prefix == path { break; }
-            if let Some(list) = locks.get(&prefix) {
-                if list.iter().any(|l| !l.is_expired() && l.depth_infinity) {
-                    has_lock = true;
-                    break;
-                }
+            prefix.push('/');
+            prefix.push_str(seg);
+            if prefix == path {
+                break;
+            }
+            if let Some(list) = locks.get(&prefix)
+                && list.iter().any(|l| !l.is_expired() && l.depth_infinity)
+            {
+                has_lock = true;
+                break;
             }
         }
         drop(locks);
         if has_lock {
-            if self.eval_if_header_for_path(path, req).await { return Ok(()); }
-            return Err(SilentError::business_error(StatusCode::LOCKED, "资源被锁定或条件不满足"));
+            if self.eval_if_header_for_path(path, req).await {
+                return Ok(());
+            }
+            return Err(SilentError::business_error(
+                StatusCode::LOCKED,
+                "资源被锁定或条件不满足",
+            ));
         }
         Ok(())
     }
@@ -477,7 +707,7 @@ impl Handler for WebDavHandler {
         tracing::debug!("WebDAV {} {}", method, relative_path);
         match method.as_str() {
             "OPTIONS" => self.handle_options().await,
-            "PROPFIND" => self.handle_propfind(&relative_path, &req).await,
+            "PROPFIND" => self.handle_propfind(&relative_path, &mut req).await,
             "PROPPATCH" => self.handle_proppatch(&relative_path, &mut req).await,
             "HEAD" => self.handle_head(&relative_path, &req).await,
             "GET" => self.handle_get(&relative_path, &req).await,

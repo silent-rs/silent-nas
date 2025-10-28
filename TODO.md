@@ -41,11 +41,11 @@
 - 已完成：
   - 锁与并发：共享/独占锁、owner/depth/timeout；If 条件（Lock‑Token/ETag，AND/OR/Not）
   - 属性模型：xmlns 解析、结构化键 ns:{URI}#{local}；DAV: 只读；值长度限制；命名空间冲突检测；类型校验（.bool/.int）
-  - 报告：sync-collection（limit/sync-token/删除差异404）、version-tree、silent:filter（mime/时间/limit/标签）、属性选择（<D:prop>）
+  - 报告：sync-collection（limit/sync-token/删除差异404/移动差异301+silent:moved-from）、version-tree、silent:filter（mime/时间/limit/标签）、属性选择（<D:prop>）
 - 保留优化项：
-  - 差异记录增强：MOVE 以 from→to 标记表达（当前按删除+创建）
-  - PROPFIND 支持 <D:prop> 选择（目前在 REPORT 中已支持）
-  - 扩展属性前缀回显映射（根据客户端偏好回退原前缀）
+  - [已完成] 差异记录增强：MOVE 以 from→to 标记表达
+  - [已完成] PROPFIND 支持 <D:prop> 选择
+  - [已完成] 扩展属性前缀回显映射（根据客户端偏好回显原前缀）
 
 ---
 

@@ -17,6 +17,7 @@ struct LockInfo {
 #[derive(Debug, Deserialize)]
 struct LockScope {
     #[serde(rename = "exclusive")]
+    #[allow(dead_code)]
     exclusive: Option<String>,
     #[serde(rename = "shared")]
     shared: Option<String>,
@@ -30,7 +31,11 @@ struct LockOwner {
 
 impl WebDavHandler {
     /// LOCK - 锁定资源（简化，支持独占锁）
-    pub(super) async fn handle_lock(&self, path: &str, req: &mut Request) -> silent::Result<Response> {
+    pub(super) async fn handle_lock(
+        &self,
+        path: &str,
+        req: &mut Request,
+    ) -> silent::Result<Response> {
         let path = Self::decode_path(path)?;
         // 解析 Depth 与 body
         let depth_infinity = req
@@ -44,7 +49,12 @@ impl WebDavHandler {
             ReqBody::Incoming(b) => b
                 .collect()
                 .await
-                .map_err(|e| SilentError::business_error(StatusCode::BAD_REQUEST, format!("读取请求体失败: {}", e)))?
+                .map_err(|e| {
+                    SilentError::business_error(
+                        StatusCode::BAD_REQUEST,
+                        format!("读取请求体失败: {}", e),
+                    )
+                })?
                 .to_bytes()
                 .to_vec(),
             ReqBody::Once(bytes) => bytes.to_vec(),
@@ -65,10 +75,10 @@ impl WebDavHandler {
                 if xml_str.contains("<shared") || xml_str.contains(":shared") {
                     exclusive = false;
                 }
-                if let Some(pos) = xml_str.find("<href>") {
-                    if let Some(end) = xml_str[pos..].find("</href>") {
-                        owner = Some(xml_str[pos + 6..pos + end].to_string());
-                    }
+                if let Some(pos) = xml_str.find("<href>")
+                    && let Some(end) = xml_str[pos..].find("</href>")
+                {
+                    owner = Some(xml_str[pos + 6..pos + end].to_string());
                 }
             }
         }
@@ -88,12 +98,16 @@ impl WebDavHandler {
         let has_any = !active_list.is_empty();
         if exclusive {
             if has_any {
-                return Err(SilentError::business_error(StatusCode::LOCKED, "资源已被锁定"));
+                return Err(SilentError::business_error(
+                    StatusCode::LOCKED,
+                    "资源已被锁定",
+                ));
             }
-        } else {
-            if has_excl {
-                return Err(SilentError::business_error(StatusCode::LOCKED, "资源已被独占锁定"));
-            }
+        } else if has_excl {
+            return Err(SilentError::business_error(
+                StatusCode::LOCKED,
+                "资源已被独占锁定",
+            ));
         }
         let token = Self::lock_token();
         let timeout = Self::parse_timeout(req);
@@ -103,7 +117,11 @@ impl WebDavHandler {
         drop(locks);
         self.persist_locks().await;
 
-        let scope_xml = if exclusive { "<D:exclusive/>" } else { "<D:shared/>" };
+        let scope_xml = if exclusive {
+            "<D:exclusive/>"
+        } else {
+            "<D:shared/>"
+        };
         let xml = format!(
             "{}<D:prop xmlns:D=\"DAV:\"><D:lockdiscovery><D:activelock><D:locktype><D:write/></D:locktype><D:lockscope>{}</D:lockscope><D:locktoken><D:href>{}</D:href></D:locktoken></D:activelock></D:lockdiscovery></D:prop>",
             XML_HEADER, scope_xml, token
@@ -150,7 +168,10 @@ impl WebDavHandler {
             let before = list.len();
             list.retain(|l| l.token != token);
             if list.len() == before {
-                return Err(SilentError::business_error(StatusCode::CONFLICT, "锁令牌不匹配"));
+                return Err(SilentError::business_error(
+                    StatusCode::CONFLICT,
+                    "锁令牌不匹配",
+                ));
             }
             // 若清空则移除条目
             if list.is_empty() {
@@ -228,7 +249,6 @@ mod tests {
         let handler = build_handler().await;
 
         // 先上锁
-        let req = Request::empty();
         let mut req = Request::empty();
         let _ = handler.handle_lock("/a.txt", &mut req).await.unwrap();
 
@@ -248,10 +268,7 @@ mod tests {
 
         // 上锁，拿到 token
         let mut r = Request::empty();
-        let resp = handler
-            .handle_lock("/b.txt", &mut r)
-            .await
-            .unwrap();
+        let resp = handler.handle_lock("/b.txt", &mut r).await.unwrap();
         let lock_header = resp
             .headers()
             .get("Lock-Token")

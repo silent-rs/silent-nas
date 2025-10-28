@@ -147,7 +147,9 @@ impl Default for SyncBehaviorConfig {
 }
 
 impl SyncBehaviorConfig {
-    fn default_max_concurrency() -> usize { 8 }
+    fn default_max_concurrency() -> usize {
+        8
+    }
     fn default_http_connect_timeout() -> u64 {
         5
     }

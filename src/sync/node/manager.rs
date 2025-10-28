@@ -548,14 +548,13 @@ impl NodeSyncCoordinator {
                     let next_attempt = task.attempt.saturating_add(1);
                     let max_retry = { self.config.read().await.max_retries };
                     if next_attempt <= (max_retry * 3).max(3) {
-                        self
-                            .enqueue_compensation(
-                                &task.target_node_id,
-                                &task.file_id,
-                                next_attempt,
-                                Some("no_files_synced".to_string()),
-                            )
-                            .await;
+                        self.enqueue_compensation(
+                            &task.target_node_id,
+                            &task.file_id,
+                            next_attempt,
+                            Some("no_files_synced".to_string()),
+                        )
+                        .await;
                         crate::metrics::record_sync_retry("transfer");
                     } else {
                         error!(
@@ -571,14 +570,13 @@ impl NodeSyncCoordinator {
                     let next_attempt = task.attempt.saturating_add(1);
                     let max_retry = { self.config.read().await.max_retries };
                     if next_attempt <= (max_retry * 3).max(3) {
-                        self
-                            .enqueue_compensation(
-                                &task.target_node_id,
-                                &task.file_id,
-                                next_attempt,
-                                Some(e.to_string()),
-                            )
-                            .await;
+                        self.enqueue_compensation(
+                            &task.target_node_id,
+                            &task.file_id,
+                            next_attempt,
+                            Some(e.to_string()),
+                        )
+                        .await;
                         crate::metrics::record_sync_retry("transfer");
                     } else {
                         error!(
@@ -705,108 +703,124 @@ impl NodeSyncCoordinator {
                         id: m.id,
                         name: m.name,
                         path: m.path,
-                    size: m.size,
-                    hash: m.hash,
-                    created_at: m.created_at.to_string(),
-                    modified_at: m.modified_at.to_string(),
-                });
+                        size: m.size,
+                        hash: m.hash,
+                        created_at: m.created_at.to_string(),
+                        modified_at: m.modified_at.to_string(),
+                    });
 
-                let vc_json = serde_json::to_string(&file_sync.vector_clock)
-                    .unwrap_or_else(|_| "{}".to_string());
+                    let vc_json = serde_json::to_string(&file_sync.vector_clock)
+                        .unwrap_or_else(|_| "{}".to_string());
 
-                let state = ProtoFileSyncState {
-                    file_id: file_id.clone(),
-                    metadata: proto_meta,
-                    deleted: file_sync.deleted.value.unwrap_or(false),
-                    vector_clock: vc_json,
-                    timestamp: chrono::Local::now().timestamp_millis(),
-                };
+                    let state = ProtoFileSyncState {
+                        file_id: file_id.clone(),
+                        metadata: proto_meta,
+                        deleted: file_sync.deleted.value.unwrap_or(false),
+                        vector_clock: vc_json,
+                        timestamp: chrono::Local::now().timestamp_millis(),
+                    };
 
-                // 状态同步阶段埋点
-                let span_state = tracing::info_span!(
-                    "state_sync",
-                    file_id = %file_id,
-                    target = %node_address
-                );
-                let _enter_s = span_state.enter();
-                // 忽略返回的冲突列表，由服务端记录日志与审计
-                let _ = client
-                    .sync_file_states(&node_id, vec![state])
-                    .await;
-
-                // 读取文件内容：优先按路径（WebDAV/S3场景），否则按ID
-                let content_res = if let Some(meta) = file_sync.metadata.value.as_ref() {
-                    let full_path = storage.get_full_path(&meta.path);
-                    debug!(
-                        "读取文件内容(按路径): file_id={}, path={}, addr={}",
-                        file_id, meta.path, node_address
+                    // 状态同步阶段埋点
+                    let span_state = tracing::info_span!(
+                        "state_sync",
+                        file_id = %file_id,
+                        target = %node_address
                     );
-                    fs::read(full_path)
-                        .await
-                        .map_err(|e| NasError::Other(e.to_string()))
-                } else {
-                    debug!(
-                        "读取文件内容(按ID): file_id={}, addr={}",
-                        file_id, node_address
-                    );
-                    storage.read_file(&file_id).await
-                };
+                    let _enter_s = span_state.enter();
+                    // 忽略返回的冲突列表，由服务端记录日志与审计
+                    let _ = client.sync_file_states(&node_id, vec![state]).await;
 
-                match content_res {
-                    Ok(content) => {
-                        let file_size = content.len();
-
-                        // 统一采用流式传输，避免与服务端 TransferFile（拉取语义）不一致
-                        const CHUNK_SIZE: usize = 1024 * 1024; // 1MB
-                        let span = tracing::info_span!(
-                            "sync_transfer",
-                            file_id = %file_id,
-                            target = %node_address
+                    // 读取文件内容：优先按路径（WebDAV/S3场景），否则按ID
+                    let content_res = if let Some(meta) = file_sync.metadata.value.as_ref() {
+                        let full_path = storage.get_full_path(&meta.path);
+                        debug!(
+                            "读取文件内容(按路径): file_id={}, path={}, addr={}",
+                            file_id, meta.path, node_address
                         );
-                        let _enter = span.enter();
-                        // 故障注入：可选的延迟
-                        if cfg_now.fault_delay_ms > 0 {
-                            tokio::time::sleep(Duration::from_millis(cfg_now.fault_delay_ms)).await;
-                        }
-                        let t_transfer = std::time::Instant::now();
-                        // 故障注入：按概率制造传输失败
-                        let inject_transfer =
-                            rand::random::<f64>() < cfg_now.fault_transfer_error_rate;
-                        let transfer_result = if inject_transfer {
-                            Err(NasError::Other("fault_injected_transfer".into()))
-                        } else {
-                            client
-                                .stream_file_content(&file_id, content, CHUNK_SIZE)
-                                .await
-                                .map(|_| true)
-                        };
+                        fs::read(full_path)
+                            .await
+                            .map_err(|e| NasError::Other(e.to_string()))
+                    } else {
+                        debug!(
+                            "读取文件内容(按ID): file_id={}, addr={}",
+                            file_id, node_address
+                        );
+                        storage.read_file(&file_id).await
+                    };
 
-                        match transfer_result {
-                            Ok(_) => {
-                                crate::metrics::record_sync_stage(
-                                    "transfer",
-                                    "success",
-                                    t_transfer.elapsed().as_secs_f64(),
-                                );
-                                // 端到端一致性校验（SHA-256）
-                                let span_v = tracing::info_span!(
-                                    "sync_verify",
-                                    file_id = %file_id,
-                                    target = %node_address
-                                );
-                                let _enter_v = span_v.enter();
-                                let t_verify = std::time::Instant::now();
-                                let mut verified = true;
-                                if let Some(meta) = file_sync.metadata.value.as_ref()
-                                    && !meta.hash.is_empty()
-                                {
-                                    match client.verify_remote_hash(&file_id, &meta.hash).await {
-                                        Ok(ok) => {
-                                            verified = ok;
-                                            if !ok {
+                    match content_res {
+                        Ok(content) => {
+                            let file_size = content.len();
+
+                            // 统一采用流式传输，避免与服务端 TransferFile（拉取语义）不一致
+                            const CHUNK_SIZE: usize = 1024 * 1024; // 1MB
+                            let span = tracing::info_span!(
+                                "sync_transfer",
+                                file_id = %file_id,
+                                target = %node_address
+                            );
+                            let _enter = span.enter();
+                            // 故障注入：可选的延迟
+                            if cfg_now.fault_delay_ms > 0 {
+                                tokio::time::sleep(Duration::from_millis(cfg_now.fault_delay_ms))
+                                    .await;
+                            }
+                            let t_transfer = std::time::Instant::now();
+                            // 故障注入：按概率制造传输失败
+                            let inject_transfer =
+                                rand::random::<f64>() < cfg_now.fault_transfer_error_rate;
+                            let transfer_result = if inject_transfer {
+                                Err(NasError::Other("fault_injected_transfer".into()))
+                            } else {
+                                client
+                                    .stream_file_content(&file_id, content, CHUNK_SIZE)
+                                    .await
+                                    .map(|_| true)
+                            };
+
+                            match transfer_result {
+                                Ok(_) => {
+                                    crate::metrics::record_sync_stage(
+                                        "transfer",
+                                        "success",
+                                        t_transfer.elapsed().as_secs_f64(),
+                                    );
+                                    // 端到端一致性校验（SHA-256）
+                                    let span_v = tracing::info_span!(
+                                        "sync_verify",
+                                        file_id = %file_id,
+                                        target = %node_address
+                                    );
+                                    let _enter_v = span_v.enter();
+                                    let t_verify = std::time::Instant::now();
+                                    let mut verified = true;
+                                    if let Some(meta) = file_sync.metadata.value.as_ref()
+                                        && !meta.hash.is_empty()
+                                    {
+                                        match client.verify_remote_hash(&file_id, &meta.hash).await
+                                        {
+                                            Ok(ok) => {
+                                                verified = ok;
+                                                if !ok {
+                                                    error!(
+                                                        "端到端校验失败: {} -> {}，期望哈希不一致",
+                                                        file_id, node_address
+                                                    );
+                                                    crate::metrics::record_sync_operation(
+                                                        "full", "error", 0,
+                                                    );
+                                                    crate::metrics::record_sync_stage(
+                                                        "verify",
+                                                        "error",
+                                                        t_verify.elapsed().as_secs_f64(),
+                                                    );
+                                                }
+                                            }
+                                            Err(e) => {
+                                                verified = false;
                                                 error!(
-                                                    "端到端校验失败: {} -> {}，期望哈希不一致",
-                                                    file_id, node_address
+                                                    "端到端校验错误: {} -> {}, 错误: {}",
+                                                    file_id, node_address, e
                                                 );
                                                 crate::metrics::record_sync_operation(
                                                     "full", "error", 0,
@@ -816,89 +830,91 @@ impl NodeSyncCoordinator {
                                                     "error",
                                                     t_verify.elapsed().as_secs_f64(),
                                                 );
+                                                crate::metrics::record_sync_retry("verify");
                                             }
                                         }
-                                        Err(e) => {
-                                            verified = false;
-                                            error!(
-                                                "端到端校验错误: {} -> {}, 错误: {}",
-                                                file_id, node_address, e
-                                            );
-                                            crate::metrics::record_sync_operation(
-                                                "full", "error", 0,
-                                            );
-                                            crate::metrics::record_sync_stage(
-                                                "verify",
-                                                "error",
-                                                t_verify.elapsed().as_secs_f64(),
-                                            );
-                                            crate::metrics::record_sync_retry("verify");
-                                        }
+                                    }
+                                    // 故障注入：按概率制造校验失败
+                                    if verified
+                                        && (rand::random::<f64>() < cfg_now.fault_verify_error_rate)
+                                    {
+                                        verified = false;
+                                        warn!("故障注入：校验失败 file_id={}", file_id);
+                                        crate::metrics::record_sync_retry("verify");
+                                    }
+
+                                    if verified {
+                                        // 成功
+                                        info!(
+                                            "文件同步成功: {}, 大小: {} 字节 -> {}",
+                                            file_id, file_size, node_address
+                                        );
+                                        crate::metrics::record_sync_operation(
+                                            "full",
+                                            "success",
+                                            file_size as u64,
+                                        );
+                                        crate::metrics::record_sync_stage(
+                                            "verify",
+                                            "success",
+                                            t_verify.elapsed().as_secs_f64(),
+                                        );
+                                        return Ok::<(String, bool, Option<String>), ()>((
+                                            file_id, true, None,
+                                        ));
+                                    } else {
+                                        // 校验不通过，入队补偿重试
+                                        // 无法直接访问 self，这里仅上报重试，由调用方负责补偿入队
+                                        crate::metrics::record_sync_retry("verify");
+                                        // 维持原有短暂等待与重试退出逻辑，避免阻塞批量
+                                        tokio::time::sleep(Duration::from_secs(2)).await;
                                     }
                                 }
-                                // 故障注入：按概率制造校验失败
-                                if verified
-                                    && (rand::random::<f64>() < cfg_now.fault_verify_error_rate)
-                                {
-                                    verified = false;
-                                    warn!("故障注入：校验失败 file_id={}", file_id);
-                                    crate::metrics::record_sync_retry("verify");
-                                }
+                                Err(e) => {
+                                    error!(
+                                        "文件同步失败: {} -> {}, 错误: {}",
+                                        file_id, node_address, e
+                                    );
+                                    crate::metrics::record_sync_retry("transfer");
 
-                                if verified {
-                                    // 成功
-                                    info!(
-                                        "文件同步成功: {}, 大小: {} 字节 -> {}",
-                                        file_id, file_size, node_address
-                                    );
-                                    crate::metrics::record_sync_operation(
-                                        "full",
-                                        "success",
-                                        file_size as u64,
-                                    );
-                                    crate::metrics::record_sync_stage(
-                                        "verify",
-                                        "success",
-                                        t_verify.elapsed().as_secs_f64(),
-                                    );
-                                    return Ok::<(String, bool, Option<String>), ()>((file_id, true, None));
-                                } else {
-                                    // 校验不通过，入队补偿重试
-                                    // 无法直接访问 self，这里仅上报重试，由调用方负责补偿入队
-                                    crate::metrics::record_sync_retry("verify");
-                                    // 维持原有短暂等待与重试退出逻辑，避免阻塞批量
+                                    // 等待后重试
                                     tokio::time::sleep(Duration::from_secs(2)).await;
+                                    crate::metrics::record_sync_operation("full", "error", 0);
+                                    crate::metrics::record_sync_stage(
+                                        "transfer",
+                                        "error",
+                                        t_transfer.elapsed().as_secs_f64(),
+                                    );
+                                    return Ok::<(String, bool, Option<String>), ()>((
+                                        file_id,
+                                        false,
+                                        Some(e.to_string()),
+                                    ));
                                 }
-                            }
-                            Err(e) => {
-                                error!(
-                                    "文件同步失败: {} -> {}, 错误: {}",
-                                    file_id, node_address, e
-                                );
-                                crate::metrics::record_sync_retry("transfer");
-
-                                // 等待后重试
-                                tokio::time::sleep(Duration::from_secs(2)).await;
-                                crate::metrics::record_sync_operation("full", "error", 0);
-                                crate::metrics::record_sync_stage(
-                                    "transfer",
-                                    "error",
-                                    t_transfer.elapsed().as_secs_f64(),
-                                );
-                                return Ok::<(String, bool, Option<String>), ()>((file_id, false, Some(e.to_string())));
                             }
                         }
+                        Err(e) => {
+                            warn!("读取文件失败: {}, 错误: {}", file_id, e);
+                            return Ok::<(String, bool, Option<String>), ()>((
+                                file_id,
+                                false,
+                                Some(e.to_string()),
+                            ));
+                        }
                     }
-                    Err(e) => {
-                        warn!("读取文件失败: {}, 错误: {}", file_id, e);
-                        return Ok::<(String, bool, Option<String>), ()>((file_id, false, Some(e.to_string())));
-                    }
+                    // 失败或未校验通过（校验失败）
+                    Ok::<(String, bool, Option<String>), ()>((
+                        file_id,
+                        false,
+                        Some("verify_failed".into()),
+                    ))
+                } else {
+                    Ok::<(String, bool, Option<String>), ()>((
+                        file_id,
+                        false,
+                        Some("no_state".into()),
+                    ))
                 }
-                // 失败或未校验通过（校验失败）
-                Ok::<(String, bool, Option<String>), ()>((file_id, false, Some("verify_failed".into())))
-            } else {
-                Ok::<(String, bool, Option<String>), ()>((file_id, false, Some("no_state".into())))
-            }
             }));
         }
 
@@ -1145,6 +1161,7 @@ mod tests {
             auto_sync: false,
             sync_interval: 120,
             max_files_per_sync: 50,
+            max_concurrency: 8,
             max_retries: 5,
             fail_queue_max: 1000,
             fail_task_ttl_secs: 24 * 3600,

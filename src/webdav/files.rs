@@ -32,21 +32,43 @@ impl WebDavHandler {
     pub(super) async fn handle_propfind(
         &self,
         path: &str,
-        req: &Request,
+        req: &mut Request,
     ) -> silent::Result<Response> {
         let path = Self::decode_path(path)?;
-        let depth = req
+        let depth_owned = req
             .headers()
             .get("Depth")
             .and_then(|v| v.to_str().ok())
-            .unwrap_or("0");
+            .unwrap_or("0")
+            .to_string();
 
         tracing::debug!(
             "PROPFIND path='{}' depth='{}' user-agent={:?}",
             path,
-            depth,
+            depth_owned.as_str(),
             req.headers().get("User-Agent")
         );
+
+        // 解析请求体中的 <D:prop> 选择与 xmlns 前缀映射
+        let (props_filter, ns_echo_map) = {
+            let body = req.take_body();
+            let xml_bytes = match body {
+                ReqBody::Incoming(b) => b
+                    .collect()
+                    .await
+                    .map_err(|e| {
+                        SilentError::business_error(
+                            StatusCode::BAD_REQUEST,
+                            format!("读取请求体失败: {}", e),
+                        )
+                    })?
+                    .to_bytes()
+                    .to_vec(),
+                ReqBody::Once(bytes) => bytes.to_vec(),
+                ReqBody::Empty => Vec::new(),
+            };
+            WebDavHandler::parse_prop_filter_and_nsmap(&xml_bytes)
+        };
 
         let storage_path = self.storage.get_full_path(&path);
         let metadata = fs::metadata(&storage_path).await.map_err(|e| {
@@ -86,9 +108,17 @@ impl WebDavHandler {
         xml.push_str(XML_NS_DAV);
         if metadata.is_dir() {
             let full_href = self.build_full_href(&path);
-            self.add_prop_response(&mut xml, &full_href, &storage_path, true).await;
-            if depth != "0" {
-                if depth.eq_ignore_ascii_case("infinity") {
+            self.add_prop_response_with_filter(
+                &mut xml,
+                &full_href,
+                &storage_path,
+                true,
+                props_filter.as_ref(),
+                Some(&ns_echo_map),
+            )
+            .await;
+            if depth_owned.as_str() != "0" {
+                if depth_owned.as_str().eq_ignore_ascii_case("infinity") {
                     self.walk_propfind_recursive(&storage_path, &path, &mut xml)
                         .await?;
                 } else {
@@ -112,18 +142,39 @@ impl WebDavHandler {
                         };
                         let full_href = self.build_full_href(&relative_path);
                         let is_dir = entry_path.is_dir();
-                        self.add_prop_response(&mut xml, &full_href, &entry_path, is_dir).await;
+                        self.add_prop_response_with_filter(
+                            &mut xml,
+                            &full_href,
+                            &entry_path,
+                            is_dir,
+                            props_filter.as_ref(),
+                            Some(&ns_echo_map),
+                        )
+                        .await;
                     }
                 }
             }
         } else {
             let full_href = self.build_full_href(&path);
-            self.add_prop_response(&mut xml, &full_href, &storage_path, false).await;
+            self.add_prop_response_with_filter(
+                &mut xml,
+                &full_href,
+                &storage_path,
+                false,
+                props_filter.as_ref(),
+                Some(&ns_echo_map),
+            )
+            .await;
         }
         xml.push_str(XML_MULTISTATUS_END);
 
         // 添加调试日志，查看实际返回的 XML 内容
-        tracing::debug!("PROPFIND {} Depth:{} XML: {}", path, depth, xml);
+        tracing::debug!(
+            "PROPFIND {} Depth:{} XML: {}",
+            path,
+            depth_owned.as_str(),
+            xml
+        );
 
         let mut resp = Response::text(&xml);
         resp.set_status(StatusCode::MULTI_STATUS);
@@ -143,8 +194,15 @@ impl WebDavHandler {
         Ok(resp)
     }
 
-    pub(super) async fn add_prop_response(&self, xml: &mut String, href: &str, path: &Path, is_dir: bool) {
-        self.add_prop_response_with_filter(xml, href, path, is_dir, None).await;
+    pub(super) async fn add_prop_response(
+        &self,
+        xml: &mut String,
+        href: &str,
+        path: &Path,
+        is_dir: bool,
+    ) {
+        self.add_prop_response_with_filter(xml, href, path, is_dir, None, None)
+            .await;
     }
 
     pub(super) async fn add_prop_response_with_filter(
@@ -154,6 +212,7 @@ impl WebDavHandler {
         path: &Path,
         is_dir: bool,
         props_filter: Option<&std::collections::HashSet<String>>,
+        ns_echo: Option<&std::collections::HashMap<String, String>>, // uri -> preferred prefix
     ) {
         let metadata = match fs::metadata(path).await {
             Ok(m) => m,
@@ -188,10 +247,10 @@ impl WebDavHandler {
             }
             // 兼容 Finder：目录不返回 getcontentlength
             // 为目录生成动态 ETag，基于目录内容
-            if props_filter.is_none() || props_filter.unwrap().contains("getetag") {
-                if let Some(etag) = Self::calc_dir_etag(path).await {
-                    xml.push_str(&format!("<D:getetag>{}</D:getetag>", etag));
-                }
+            if (props_filter.is_none() || props_filter.unwrap().contains("getetag"))
+                && let Some(etag) = Self::calc_dir_etag(path).await
+            {
+                xml.push_str(&format!("<D:getetag>{}</D:getetag>", etag));
             }
         } else {
             if props_filter.is_none() || props_filter.unwrap().contains("resourcetype") {
@@ -203,16 +262,16 @@ impl WebDavHandler {
                     metadata.len()
                 ));
             }
-            if props_filter.is_none() || props_filter.unwrap().contains("getcontenttype") {
-                if let Some(ext) = path.extension() {
-                    let mime = mime_guess::from_ext(&ext.to_string_lossy()).first_or_octet_stream();
-                    xml.push_str(&format!("<D:getcontenttype>{}</D:getcontenttype>", mime));
-                }
+            if (props_filter.is_none() || props_filter.unwrap().contains("getcontenttype"))
+                && let Some(ext) = path.extension()
+            {
+                let mime = mime_guess::from_ext(&ext.to_string_lossy()).first_or_octet_stream();
+                xml.push_str(&format!("<D:getcontenttype>{}</D:getcontenttype>", mime));
             }
-            if props_filter.is_none() || props_filter.unwrap().contains("getetag") {
-                if let Some(etag) = Self::calc_etag_from_meta(&metadata) {
-                    xml.push_str(&format!("<D:getetag>{}</D:getetag>", etag));
-                }
+            if (props_filter.is_none() || props_filter.unwrap().contains("getetag"))
+                && let Some(etag) = Self::calc_etag_from_meta(&metadata)
+            {
+                xml.push_str(&format!("<D:getetag>{}</D:getetag>", etag));
             }
         }
         // creationdate（尽量取文件创建时间，否则回退到修改时间）
@@ -229,46 +288,59 @@ impl WebDavHandler {
         } else {
             None
         };
-        if props_filter.is_none() || props_filter.unwrap().contains("creationdate") {
-            if let Some(dt) = creation_dt {
-                xml.push_str(&format!(
-                    "<D:creationdate>{}</D:creationdate>",
-                    dt.format("%Y-%m-%dT%H:%M:%SZ")
-                ));
-            }
+        if (props_filter.is_none() || props_filter.unwrap().contains("creationdate"))
+            && let Some(dt) = creation_dt
+        {
+            xml.push_str(&format!(
+                "<D:creationdate>{}</D:creationdate>",
+                dt.format("%Y-%m-%dT%H:%M:%SZ")
+            ));
         }
 
         // getlastmodified - 使用文件系统的实际修改时间
-        if props_filter.is_none() || props_filter.unwrap().contains("getlastmodified") {
-            if let Ok(modified) = metadata.modified()
-                && let Ok(datetime) = modified.duration_since(std::time::UNIX_EPOCH)
-            {
-                let timestamp = chrono::DateTime::from_timestamp(datetime.as_secs() as i64, 0);
-                if let Some(dt) = timestamp {
-                    xml.push_str(&format!(
-                        "<D:getlastmodified>{}</D:getlastmodified>",
-                        dt.format("%a, %d %b %Y %H:%M:%S GMT")
-                    ));
-                }
+        if (props_filter.is_none() || props_filter.unwrap().contains("getlastmodified"))
+            && let Ok(modified) = metadata.modified()
+            && let Ok(datetime) = modified.duration_since(std::time::UNIX_EPOCH)
+        {
+            let timestamp = chrono::DateTime::from_timestamp(datetime.as_secs() as i64, 0);
+            if let Some(dt) = timestamp {
+                xml.push_str(&format!(
+                    "<D:getlastmodified>{}</D:getlastmodified>",
+                    dt.format("%a, %d %b %Y %H:%M:%S GMT")
+                ));
             }
         }
         // 扩展属性（自定义属性）：仅输出结构化键 ns:{URI}#{local}
-        let key_for_props = if is_dir { href.trim_end_matches('/').to_string() } else { href.to_string() };
-        if props_filter.is_none() || props_filter.unwrap().contains("prop") {
-        if let Some(map) = self.props.read().await.get(&key_for_props) {
+        let key_for_props = if is_dir {
+            href.trim_end_matches('/').to_string()
+        } else {
+            href.to_string()
+        };
+        if (props_filter.is_none() || props_filter.unwrap().contains("prop"))
+            && let Some(map) = self.props.read().await.get(&key_for_props)
+        {
             for (k, v) in map {
-                if let Some(rest) = k.strip_prefix("ns:") {
-                    if let Some((uri, local)) = rest.split_once('#') {
-                        let val = v.as_str();
-                        let esc = WebDavHandler::xml_escape(val);
-                        xml.push_str(&format!(
-                            "<x:{} xmlns:x=\"{}\">{}</x:{}>",
-                            local, uri, esc, local
-                        ));
+                if let Some(rest) = k.strip_prefix("ns:")
+                    && let Some((uri, local)) = rest.split_once('#')
+                {
+                    let val = v.as_str();
+                    let esc = WebDavHandler::xml_escape(val);
+                    // 选择回显前缀：客户端声明的优先；避免使用 D/d
+                    let mut pfx = ns_echo
+                        .and_then(|m| m.get(uri).cloned())
+                        .unwrap_or_else(|| "x".to_string());
+                    if pfx.eq_ignore_ascii_case("d") || pfx.is_empty() {
+                        pfx = "x".to_string();
                     }
+                    xml.push_str(&format!(
+                        "<{p}:{local} xmlns:{p}=\"{uri}\">{esc}</{p}:{local}>",
+                        p = pfx,
+                        local = local,
+                        uri = uri,
+                        esc = esc
+                    ));
                 }
             }
-        }
         }
         xml.push_str("</D:prop>");
         xml.push_str("<D:status>HTTP/1.1 200 OK</D:status>");
@@ -364,7 +436,8 @@ impl WebDavHandler {
                 };
                 let full_href = self.build_full_href(&relative_path);
                 let is_dir = entry_path.is_dir();
-                self.add_prop_response(xml, &full_href, &entry_path, is_dir).await;
+                self.add_prop_response(xml, &full_href, &entry_path, is_dir)
+                    .await;
                 if is_dir {
                     stack.push((entry_path, relative_path));
                 }
@@ -761,9 +834,8 @@ impl WebDavHandler {
                     format!("移动失败: {}", e),
                 )
             })?;
-        // 记录为删除+创建，便于增量同步
-        self.append_change("deleted", &path);
-        self.append_change("created", &dest_path);
+        // 记录为移动 from->to，供 REPORT 增量同步输出
+        self.append_move(&path, &dest_path);
         // 发布事件
         let file_id = scru128::new_string();
         let mut event = FileEvent::new(EventType::Modified, file_id, None);
@@ -940,7 +1012,7 @@ mod tests {
         let mut req = Request::empty();
         req.headers_mut()
             .insert("Depth", http::HeaderValue::from_static("infinity"));
-        let resp = handler.handle_propfind("/dir", &req).await.unwrap();
+        let resp = handler.handle_propfind("/dir", &mut req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::MULTI_STATUS);
         // 仅校验头部存在，XML 体内容不做解析（已覆盖生成路径）
         assert_eq!(
@@ -1032,14 +1104,14 @@ mod tests {
         let mut d0 = Request::empty();
         d0.headers_mut()
             .insert("Depth", http::HeaderValue::from_static("0"));
-        let r0 = handler.handle_propfind("/p0/a.txt", &d0).await.unwrap();
+        let r0 = handler.handle_propfind("/p0/a.txt", &mut d0).await.unwrap();
         assert_eq!(r0.status(), StatusCode::MULTI_STATUS);
 
         // Depth: 1 针对目录
         let mut d1 = Request::empty();
         d1.headers_mut()
             .insert("Depth", http::HeaderValue::from_static("1"));
-        let r1 = handler.handle_propfind("/p0", &d1).await.unwrap();
+        let r1 = handler.handle_propfind("/p0", &mut d1).await.unwrap();
         assert_eq!(r1.status(), StatusCode::MULTI_STATUS);
 
         // PUT 空请求体 -> 400

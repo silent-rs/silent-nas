@@ -19,7 +19,8 @@
   - version-tree：返回资源的版本列表
   - silent:filter（扩展）：支持 mime 前缀、modified-after/before、limit、标签过滤（ns:{URI}#{local}[=value]）
 - 属性选择：
-  - 在 REPORT 请求体内用 <D:prop> 限定返回属性（标准/扩展均可）
+  - 在 REPORT/PROPFIND 请求体内用 <D:prop> 限定返回属性（标准/扩展均可）
+  - 扩展属性将尽量回显客户端在 <D:prop> 中声明的 xmlns 前缀（未声明时使用 x 前缀）
 
 ## 典型用法
 
@@ -106,4 +107,3 @@ If: ( "\"etag-value\"" )
 ## 兼容性提示
 - Finder 对响应头 `Server/DAV/Allow` 较敏感，已在实现中补足
 - href 返回相对路径（/path 形式），若需绝对 URL 可在反向代理层做改写
-

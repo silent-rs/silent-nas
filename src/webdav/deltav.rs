@@ -1,38 +1,11 @@
 use super::{WebDavHandler, constants::*};
 use http_body_util::BodyExt;
-use quick_xml::events::Event;
 use quick_xml::Reader;
+use quick_xml::events::Event;
 use silent::prelude::*;
 use tokio::fs;
 
 impl WebDavHandler {
-    fn parse_prop_filter(xml: &[u8]) -> Option<std::collections::HashSet<String>> {
-        let mut reader = Reader::from_reader(xml);
-        reader.config_mut().trim_text(true);
-        let mut buf = Vec::new();
-        let mut in_prop = false;
-        let mut set = std::collections::HashSet::new();
-        loop {
-            match reader.read_event_into(&mut buf) {
-                Ok(Event::Start(e)) => {
-                    let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
-                    let lname = name.split(':').last().unwrap_or(&name).to_lowercase();
-                    if lname == "prop" { in_prop = true; }
-                    else if in_prop { set.insert(lname); }
-                }
-                Ok(Event::End(e)) => {
-                    let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
-                    let lname = name.split(':').last().unwrap_or(&name).to_lowercase();
-                    if lname == "prop" { in_prop = false; }
-                }
-                Ok(Event::Eof) => break,
-                Err(_) => break,
-                _ => {}
-            }
-            buf.clear();
-        }
-        if set.is_empty() { None } else { Some(set) }
-    }
     /// VERSION-CONTROL - 启用版本控制（简化为标记属性）
     pub(super) async fn handle_version_control(&self, path: &str) -> silent::Result<Response> {
         let path = Self::decode_path(path)?;
@@ -87,7 +60,8 @@ impl WebDavHandler {
             let mut xml = String::new();
             xml.push_str(XML_HEADER);
             xml.push_str("<D:multistatus xmlns:D=\"DAV:\">");
-            let props_filter = Self::parse_prop_filter(&xml_bytes);
+            let (props_filter, ns_echo_map) =
+                WebDavHandler::parse_prop_filter_and_nsmap(&xml_bytes);
             // 生成新的 sync-token（使用 scru128，符合ID规则；同时包含当前时间）
             let token = format!(
                 "urn:sync:{}:{}",
@@ -104,7 +78,8 @@ impl WebDavHandler {
                 // 列出自身（仅在全量请求时包含根目录）
                 let href = self.build_full_href(&path);
                 if since_token_time.is_none() {
-                    self.add_prop_response(&mut xml, &href, &storage_path, true).await;
+                    self.add_prop_response(&mut xml, &href, &storage_path, true)
+                        .await;
                 }
                 if depth.eq_ignore_ascii_case("infinity") {
                     // 递归列出（仅包含变化项）
@@ -116,6 +91,7 @@ impl WebDavHandler {
                         since_token_time,
                         &mut count_left,
                         props_filter.as_ref(),
+                        Some(&ns_echo_map),
                     )
                     .await?;
                     count_used = limit.unwrap_or(usize::MAX) - count_left;
@@ -134,7 +110,11 @@ impl WebDavHandler {
                             format!("读取目录项失败: {}", e),
                         )
                     })? {
-                        if let Some(maxn) = limit { if count >= maxn { break; } }
+                        if let Some(maxn) = limit
+                            && count >= maxn
+                        {
+                            break;
+                        }
                         let entry_path = entry.path();
                         if Self::modified_after(&entry_path, since_token_time) {
                             let relative_path = if path.is_empty() || path == "/" {
@@ -145,9 +125,25 @@ impl WebDavHandler {
                             let href = self.build_full_href(&relative_path);
                             let is_dir = entry_path.is_dir();
                             if let Some(ref filt) = props_filter {
-                                self.add_prop_response_with_filter(&mut xml, &href, &entry_path, is_dir, Some(filt)).await;
+                                self.add_prop_response_with_filter(
+                                    &mut xml,
+                                    &href,
+                                    &entry_path,
+                                    is_dir,
+                                    Some(filt),
+                                    Some(&ns_echo_map),
+                                )
+                                .await;
                             } else {
-                                self.add_prop_response(&mut xml, &href, &entry_path, is_dir).await;
+                                self.add_prop_response_with_filter(
+                                    &mut xml,
+                                    &href,
+                                    &entry_path,
+                                    is_dir,
+                                    None,
+                                    Some(&ns_echo_map),
+                                )
+                                .await;
                             }
                             count += 1;
                         }
@@ -156,22 +152,61 @@ impl WebDavHandler {
                 }
             } else {
                 // 单文件：若自 token 以来有变化则返回
-                if Self::modified_after(&storage_path, since_token_time) || since_token_time.is_none() {
+                if Self::modified_after(&storage_path, since_token_time)
+                    || since_token_time.is_none()
+                {
                     let href = self.build_full_href(&path);
                     if let Some(ref filt) = props_filter {
-                        self.add_prop_response_with_filter(&mut xml, &href, &storage_path, false, Some(filt)).await;
+                        self.add_prop_response_with_filter(
+                            &mut xml,
+                            &href,
+                            &storage_path,
+                            false,
+                            Some(filt),
+                            Some(&ns_echo_map),
+                        )
+                        .await;
                     } else {
-                        self.add_prop_response(&mut xml, &href, &storage_path, false).await;
+                        self.add_prop_response_with_filter(
+                            &mut xml,
+                            &href,
+                            &storage_path,
+                            false,
+                            None,
+                            Some(&ns_echo_map),
+                        )
+                        .await;
                     }
                     count_used = 1;
                 }
             }
 
-            // 追加删除差异（404）
+            // 追加移动(from->to)与删除(404)差异
             if let Some(since) = since_token_time {
-                let remain = limit.map(|l| l.saturating_sub(count_used)).unwrap_or(usize::MAX);
-                if remain > 0 {
-                    let deleted = self.list_deleted_since(&path, since, remain);
+                let remain = limit
+                    .map(|l| l.saturating_sub(count_used))
+                    .unwrap_or(usize::MAX);
+                let mut left = remain;
+                if left > 0 {
+                    let moved = self.list_moved_since(&path, since, left);
+                    for (from, to) in moved {
+                        let href_to = self.build_full_href(&to);
+                        xml.push_str("<D:response>");
+                        xml.push_str(&format!("<D:href>{}</D:href>", href_to));
+                        xml.push_str("<D:status>HTTP/1.1 301 Moved Permanently</D:status>");
+                        xml.push_str(&format!(
+                            "<silent:moved-from xmlns:silent=\"urn:silent-webdav\">{}</silent:moved-from>",
+                            from
+                        ));
+                        xml.push_str("</D:response>");
+                        left = left.saturating_sub(1);
+                        if left == 0 {
+                            break;
+                        }
+                    }
+                }
+                if left > 0 {
+                    let deleted = self.list_deleted_since(&path, since, left);
                     for p in deleted {
                         let href = self.build_full_href(&p);
                         xml.push_str("<D:response>");
@@ -200,7 +235,10 @@ impl WebDavHandler {
                 .await
                 .map_err(|_| SilentError::business_error(StatusCode::NOT_FOUND, "路径不存在"))?;
             if !meta.is_dir() {
-                return Err(SilentError::business_error(StatusCode::BAD_REQUEST, "仅支持目录"));
+                return Err(SilentError::business_error(
+                    StatusCode::BAD_REQUEST,
+                    "仅支持目录",
+                ));
             }
             let mut xml = String::new();
             xml.push_str(XML_HEADER);
@@ -218,7 +256,11 @@ impl WebDavHandler {
                     format!("读取目录项失败: {}", e),
                 )
             })? {
-                if let Some(maxn) = limit { if count >= maxn { break; } }
+                if let Some(maxn) = limit
+                    && count >= maxn
+                {
+                    break;
+                }
                 let entry_path = entry.path();
                 let m = fs::metadata(&entry_path).await.map_err(|e| {
                     SilentError::business_error(
@@ -227,19 +269,24 @@ impl WebDavHandler {
                     )
                 })?;
                 // 时间过滤
-                if let Some(a) = after {
-                    if !Self::modified_after(&entry_path, Some(a)) { continue; }
+                if let Some(a) = after
+                    && !Self::modified_after(&entry_path, Some(a))
+                {
+                    continue;
                 }
-                if let Some(b) = before {
-                    if Self::modified_after(&entry_path, Some(b)) { continue; }
+                if let Some(b) = before
+                    && Self::modified_after(&entry_path, Some(b))
+                {
+                    continue;
                 }
                 // mime 过滤（仅文件）
-                if m.is_file() {
-                    if let Some(pref) = &mime_prefix {
-                        if let Some(ext) = entry_path.extension() {
-                            let mime = mime_guess::from_ext(&ext.to_string_lossy()).first_or_octet_stream();
-                            if !mime.essence_str().starts_with(pref) { continue; }
-                        }
+                if m.is_file()
+                    && let Some(pref) = &mime_prefix
+                    && let Some(ext) = entry_path.extension()
+                {
+                    let mime = mime_guess::from_ext(&ext.to_string_lossy()).first_or_octet_stream();
+                    if !mime.essence_str().starts_with(pref) {
+                        continue;
                     }
                 }
                 let relative_path = if path.is_empty() || path == "/" {
@@ -252,25 +299,58 @@ impl WebDavHandler {
                 // 标签过滤（结构化键）
                 if !tags.is_empty() {
                     let mut pass = true;
-                    let key_for_props = if is_dir { href.trim_end_matches('/').to_string() } else { href.clone() };
+                    let key_for_props = if is_dir {
+                        href.trim_end_matches('/').to_string()
+                    } else {
+                        href.clone()
+                    };
                     let props_map = self.props.read().await;
                     let entry_props = props_map.get(&key_for_props);
                     for (tk, tv) in &tags {
                         if let Some(em) = entry_props {
                             if let Some(val) = em.get(tk) {
-                                if let Some(expect) = tv {
-                                    if val != expect { pass = false; break; }
+                                if let Some(expect) = tv
+                                    && val != expect
+                                {
+                                    pass = false;
+                                    break;
                                 }
-                            } else { pass = false; break; }
-                        } else { pass = false; break; }
+                            } else {
+                                pass = false;
+                                break;
+                            }
+                        } else {
+                            pass = false;
+                            break;
+                        }
                     }
                     drop(props_map);
-                    if !pass { continue; }
+                    if !pass {
+                        continue;
+                    }
                 }
-                if let Some(filt) = Self::parse_prop_filter(&xml_bytes) {
-                    self.add_prop_response_with_filter(&mut xml, &href, &entry_path, is_dir, Some(&filt)).await;
+                let (maybe_filt, ns_echo_map) =
+                    WebDavHandler::parse_prop_filter_and_nsmap(&xml_bytes);
+                if let Some(filt) = maybe_filt {
+                    self.add_prop_response_with_filter(
+                        &mut xml,
+                        &href,
+                        &entry_path,
+                        is_dir,
+                        Some(&filt),
+                        Some(&ns_echo_map),
+                    )
+                    .await;
                 } else {
-                    self.add_prop_response(&mut xml, &href, &entry_path, is_dir).await;
+                    self.add_prop_response_with_filter(
+                        &mut xml,
+                        &href,
+                        &entry_path,
+                        is_dir,
+                        None,
+                        Some(&ns_echo_map),
+                    )
+                    .await;
                 }
                 count += 1;
             }
@@ -343,21 +423,29 @@ impl WebDavHandler {
             match reader.read_event_into(&mut buf) {
                 Ok(Event::Start(e)) => {
                     let name = String::from_utf8_lossy(e.name().as_ref()).to_ascii_lowercase();
-                    if name.ends_with("nresults") { in_nresults = true; }
-                    if name.ends_with("sync-token") { in_sync_token = true; }
+                    if name.ends_with("nresults") {
+                        in_nresults = true;
+                    }
+                    if name.ends_with("sync-token") {
+                        in_sync_token = true;
+                    }
                 }
                 Ok(Event::End(e)) => {
                     let name = String::from_utf8_lossy(e.name().as_ref()).to_ascii_lowercase();
-                    if name.ends_with("nresults") { in_nresults = false; }
-                    if name.ends_with("sync-token") { in_sync_token = false; }
+                    if name.ends_with("nresults") {
+                        in_nresults = false;
+                    }
+                    if name.ends_with("sync-token") {
+                        in_sync_token = false;
+                    }
                 }
                 Ok(Event::Text(t)) => {
                     let s = String::from_utf8_lossy(&t.into_inner()).to_string();
-                    if in_nresults {
-                        if let Ok(n) = s.trim().parse::<usize>() { limit = Some(n); }
+                    if in_nresults && let Ok(n) = s.trim().parse::<usize>() {
+                        limit = Some(n);
                     }
-                    if in_sync_token {
-                        if let Some(ts) = Self::parse_sync_token_time(&s) { since = Some(ts); }
+                    if in_sync_token && let Some(ts) = Self::parse_sync_token_time(&s) {
+                        since = Some(ts);
                     }
                 }
                 Ok(Event::Eof) => break,
@@ -372,13 +460,20 @@ impl WebDavHandler {
     fn parse_sync_token_time(token: &str) -> Option<chrono::NaiveDateTime> {
         if let Some(pos) = token.rfind(':') {
             let ts = &token[pos + 1..];
-            if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(ts, "%Y-%m-%d %H:%M:%S%.f") { return Some(dt); }
-            if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(ts, "%Y-%m-%d %H:%M:%S") { return Some(dt); }
+            if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(ts, "%Y-%m-%d %H:%M:%S%.f") {
+                return Some(dt);
+            }
+            if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(ts, "%Y-%m-%d %H:%M:%S") {
+                return Some(dt);
+            }
         }
         None
     }
 
-    fn parse_filter_request(xml: &[u8]) -> (
+    #[allow(clippy::type_complexity)]
+    fn parse_filter_request(
+        xml: &[u8],
+    ) -> (
         Option<String>,
         Option<chrono::NaiveDateTime>,
         Option<chrono::NaiveDateTime>,
@@ -409,17 +504,34 @@ impl WebDavHandler {
                     in_tag = name.ends_with("tag");
                 }
                 Ok(Event::End(_)) => {
-                    in_mime = false; in_after = false; in_before = false; in_limit = false; in_tag = false;
+                    in_mime = false;
+                    in_after = false;
+                    in_before = false;
+                    in_limit = false;
+                    in_tag = false;
                 }
                 Ok(Event::Text(t)) => {
                     let s = String::from_utf8_lossy(&t.into_inner()).trim().to_string();
-                    if in_mime && !s.is_empty() { mime = Some(s.clone()); }
-                    if in_limit && !s.is_empty() { if let Ok(n) = s.parse() { limit = Some(n); } }
-                    if in_after && !s.is_empty() {
-                        if let Some(dt) = Self::parse_datetime(&s) { after = Some(dt); }
+                    if in_mime && !s.is_empty() {
+                        mime = Some(s.clone());
                     }
-                    if in_before && !s.is_empty() {
-                        if let Some(dt) = Self::parse_datetime(&s) { before = Some(dt); }
+                    if in_limit
+                        && !s.is_empty()
+                        && let Ok(n) = s.parse()
+                    {
+                        limit = Some(n);
+                    }
+                    if in_after
+                        && !s.is_empty()
+                        && let Some(dt) = Self::parse_datetime(&s)
+                    {
+                        after = Some(dt);
+                    }
+                    if in_before
+                        && !s.is_empty()
+                        && let Some(dt) = Self::parse_datetime(&s)
+                    {
+                        before = Some(dt);
                     }
                     if in_tag && !s.is_empty() {
                         // 支持格式："ns:{URI}#{local}=value" 或 "ns:{URI}#{local}"
@@ -440,25 +552,28 @@ impl WebDavHandler {
     }
 
     fn parse_datetime(s: &str) -> Option<chrono::NaiveDateTime> {
-        if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) { return Some(dt.naive_local()); }
-        if let Ok(dt) = chrono::DateTime::parse_from_rfc2822(s) { return Some(dt.naive_local()); }
+        if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
+            return Some(dt.naive_local());
+        }
+        if let Ok(dt) = chrono::DateTime::parse_from_rfc2822(s) {
+            return Some(dt.naive_local());
+        }
         chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S").ok()
     }
 
     fn modified_after(path: &std::path::Path, since: Option<chrono::NaiveDateTime>) -> bool {
         let Some(since) = since else { return true };
-        if let Ok(meta) = std::fs::metadata(path) {
-            if let Ok(m) = meta.modified() {
-                if let Ok(dur) = m.duration_since(std::time::UNIX_EPOCH) {
-                    if let Some(dt) = chrono::DateTime::from_timestamp(dur.as_secs() as i64, 0) {
-                        return dt.naive_local() > since;
-                    }
-                }
-            }
+        if let Ok(meta) = std::fs::metadata(path)
+            && let Ok(m) = meta.modified()
+            && let Ok(dur) = m.duration_since(std::time::UNIX_EPOCH)
+            && let Some(dt) = chrono::DateTime::from_timestamp(dur.as_secs() as i64, 0)
+        {
+            return dt.naive_local() > since;
         }
         false
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn walk_propfind_recursive_filtered(
         &self,
         dir_path: &std::path::Path,
@@ -467,11 +582,17 @@ impl WebDavHandler {
         since: Option<chrono::NaiveDateTime>,
         count_left: &mut usize,
         props_filter: Option<&std::collections::HashSet<String>>,
+        ns_echo: Option<&std::collections::HashMap<String, String>>,
     ) -> silent::Result<()> {
-        if *count_left == 0 { return Ok(()); }
-        let mut stack: Vec<(std::path::PathBuf, String)> = vec![(dir_path.to_path_buf(), relative.to_string())];
+        if *count_left == 0 {
+            return Ok(());
+        }
+        let mut stack: Vec<(std::path::PathBuf, String)> =
+            vec![(dir_path.to_path_buf(), relative.to_string())];
         while let Some((cur_dir, cur_rel)) = stack.pop() {
-            if *count_left == 0 { break; }
+            if *count_left == 0 {
+                break;
+            }
             let mut rd = fs::read_dir(&cur_dir).await.map_err(|e| {
                 SilentError::business_error(
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -496,13 +617,24 @@ impl WebDavHandler {
                 items.push((p, rel, is_dir));
             }
             for (p, rel, is_dir) in items.into_iter() {
-                if *count_left == 0 { break; }
+                if *count_left == 0 {
+                    break;
+                }
                 if Self::modified_after(&p, since) {
                     let href = self.build_full_href(&rel);
                     if let Some(filt) = props_filter {
-                        self.add_prop_response_with_filter(xml, &href, &p, is_dir, Some(filt)).await;
+                        self.add_prop_response_with_filter(
+                            xml,
+                            &href,
+                            &p,
+                            is_dir,
+                            Some(filt),
+                            ns_echo,
+                        )
+                        .await;
                     } else {
-                        self.add_prop_response(xml, &href, &p, is_dir).await;
+                        self.add_prop_response_with_filter(xml, &href, &p, is_dir, None, ns_echo)
+                            .await;
                     }
                     *count_left = count_left.saturating_sub(1);
                 }

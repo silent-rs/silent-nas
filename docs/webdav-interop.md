@@ -26,9 +26,10 @@
   - 解析 `xmlns` 声明，属性除原始前缀键外，额外存储 `ns:{URI}#{local}` 结构化键，便于后续检索与校验。
 
 - REPORT
-  - 支持 `sync-collection` 基础能力，解析 `<D:limit><D:nresults>` 作为数量过滤。
+  - `sync-collection`：支持 `<D:limit><D:nresults>` 与 `<D:sync-token>`，返回增量与删除差异（404）。
+  - `version-tree`：返回给定资源的版本列表（DeltaV 简化）。
+  - `silent:filter`（扩展）：按 `mime` 前缀、`modified-after/before`、`limit` 过滤（Depth:1）。
 
 - 兼容性建议
   - 若客户端要求绝对 href，可通过反向代理改写（当前实现返回相对路径以匹配 Finder 行为）。
   - 若需要差异同步（基于 sync-token），建议结合版本索引与事件监听扩展当前实现。
-

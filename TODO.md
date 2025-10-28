@@ -42,10 +42,10 @@
   - [已完成] 条件请求：If 头完整表达式（资源标记、多令牌、列表AND/OR、Not、ETag 条件）
   - [已完成] 互通用例：补充 Cyberduck/Nextcloud 要点与验证记录（docs/webdav-interop.md）
   - [已完成] 属性模型：PROPPATCH 解析 xmlns，新增结构化键 ns:{URI}#{local}；只读 DAV:、值长度限制、命名空间冲突检测
-  - [已完成] 报告扩展：REPORT sync-collection 支持 <D:limit><D:nresults> 限制，并基于 <sync-token> 返回增量与删除差异（404）
+  - [已完成] 报告扩展：REPORT sync-collection（limit/sync-token/删除差异）、version-tree、silent:filter（mime/时间/limit）
 
 - 待完成：
-  - 报告扩展：更多 REPORT 类型（如版本历史/标签）与更细过滤
+  - 报告扩展：更多 REPORT 类型（如标签、扩展属性选择）与更细过滤（多条件组合）
 
 ---
 

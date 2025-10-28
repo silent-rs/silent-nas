@@ -18,7 +18,7 @@ pub struct WebDavHandler {
     pub source_http_addr: String,
     #[allow(dead_code)]
     pub version_manager: Arc<crate::version::VersionManager>,
-    pub(super) locks: Arc<tokio::sync::RwLock<std::collections::HashMap<String, DavLock>>>,
+    pub(super) locks: Arc<tokio::sync::RwLock<std::collections::HashMap<String, Vec<DavLock>>>>,
     pub(super) props: Arc<
         tokio::sync::RwLock<
             std::collections::HashMap<String, std::collections::HashMap<String, String>>,
@@ -68,7 +68,7 @@ impl WebDavHandler {
         let _ = std::fs::create_dir_all(self.meta_dir());
         if let Ok(bytes) = std::fs::read(self.locks_file())
             && let Ok(map) =
-                serde_json::from_slice::<std::collections::HashMap<String, DavLock>>(&bytes)
+                serde_json::from_slice::<std::collections::HashMap<String, Vec<DavLock>>>(&bytes)
         {
             let rt = tokio::runtime::Handle::current();
             let locks = self.locks.clone();
@@ -117,33 +117,50 @@ impl WebDavHandler {
         60
     }
 
-    pub(super) fn extract_if_lock_token(req: &Request) -> Option<String> {
-        req.headers()
-            .get("If")
-            .and_then(|h| h.to_str().ok())
-            .and_then(|s| {
-                let s = s.to_string();
-                let start = s.find("opaquelocktoken:")?;
-                let end = s[start..].find('>').map(|i| start + i).unwrap_or(s.len());
-                Some(s[start..end].to_string())
-            })
+    pub(super) fn extract_if_lock_tokens(req: &Request) -> Vec<String> {
+        let mut tokens = Vec::new();
+        if let Some(val) = req.headers().get("If").and_then(|h| h.to_str().ok()) {
+            let s = val.as_bytes();
+            let needle = b"opaquelocktoken:";
+            let mut i = 0;
+            while i + needle.len() <= s.len() {
+                if &s[i..i + needle.len()] == needle {
+                    let start = i;
+                    // 向后找到 > 作为结束
+                    let mut j = i;
+                    while j < s.len() && s[j] != b'>' as u8 { j += 1; }
+                    let end = j.min(s.len());
+                    if end > start {
+                        if let Ok(tok) = std::str::from_utf8(&s[start..end]) {
+                            tokens.push(tok.to_string());
+                        }
+                    }
+                    i = end;
+                } else {
+                    i += 1;
+                }
+            }
+        }
+        tokens
     }
 
     pub(super) async fn ensure_lock_ok(&self, path: &str, req: &Request) -> silent::Result<()> {
         let locks = self.locks.read().await;
-        if let Some(l) = locks.get(path)
-            && !l.is_expired()
-        {
-            let provided = Self::extract_if_lock_token(req);
-            if let Some(tok) = provided
-                && tok == l.token
-            {
-                return Ok(());
+        if let Some(list) = locks.get(path) {
+            let active: Vec<&crate::webdav::types::DavLock> = list.iter().filter(|l| !l.is_expired()).collect();
+            if !active.is_empty() {
+                let provided = Self::extract_if_lock_tokens(req);
+                if !provided.is_empty() {
+                    // 任一提供 token 匹配即可
+                    if active.iter().any(|l| provided.iter().any(|t| t == &l.token)) {
+                        return Ok(());
+                    }
+                }
+                return Err(SilentError::business_error(
+                    StatusCode::LOCKED,
+                    "资源被锁定或令牌缺失",
+                ));
             }
-            return Err(SilentError::business_error(
-                StatusCode::LOCKED,
-                "资源被锁定或令牌缺失",
-            ));
         }
         Ok(())
     }
@@ -188,7 +205,7 @@ impl Handler for WebDavHandler {
             "MKCOL" => self.handle_mkcol(&relative_path).await,
             "MOVE" => self.handle_move(&relative_path, &req).await,
             "COPY" => self.handle_copy(&relative_path, &req).await,
-            "LOCK" => self.handle_lock(&relative_path, &req).await,
+            "LOCK" => self.handle_lock(&relative_path, &mut req).await,
             "UNLOCK" => self.handle_unlock(&relative_path, &req).await,
             "VERSION-CONTROL" => self.handle_version_control(&relative_path).await,
             "REPORT" => self.handle_report(&relative_path, &mut req).await,

@@ -5,14 +5,18 @@ use serde::{Deserialize, Serialize};
 pub struct DavLock {
     pub token: String,
     pub exclusive: bool,
+    pub owner: Option<String>,
+    pub depth_infinity: bool,
     pub expires_at: chrono::NaiveDateTime,
 }
 
 impl DavLock {
-    pub fn new_exclusive(token: String, timeout_secs: i64) -> Self {
+    pub fn new(token: String, exclusive: bool, timeout_secs: i64, owner: Option<String>, depth_infinity: bool) -> Self {
         Self {
             token,
-            exclusive: true,
+            exclusive,
+            owner,
+            depth_infinity,
             expires_at: chrono::Local::now().naive_local()
                 + chrono::Duration::seconds(timeout_secs),
         }

@@ -42,6 +42,18 @@ impl WebDavHandler {
         if body_str.contains("sync-collection") {
             // WebDAV Sync (RFC 6578) 简化实现：返回全量条目 + 新的 sync-token
             // 支持 Depth: 1 与 infinity
+            // 解析 limit 与 sync-token（若存在）
+            let mut limit: Option<usize> = None;
+            if let Some(p) = body_str.find("<d:limit") {
+                if let Some(npos) = body_str[p..].find("<d:nresults>") {
+                    let start = p + npos + "<d:nresults>".len();
+                    if let Some(end) = body_str[start..].find("</d:nresults>") {
+                        if let Ok(n) = body_str[start..start + end].trim().parse::<usize>() {
+                            limit = Some(n);
+                        }
+                    }
+                }
+            }
             let depth = req
                 .headers()
                 .get("Depth")
@@ -68,8 +80,7 @@ impl WebDavHandler {
                 Self::add_prop_response(&mut xml, &href, &storage_path, true).await;
                 if depth.eq_ignore_ascii_case("infinity") {
                     // 递归列出
-                    self.walk_propfind_recursive(&storage_path, &path, &mut xml)
-                        .await?;
+                    self.walk_propfind_recursive(&storage_path, &path, &mut xml).await?;
                 } else {
                     // 单层
                     let mut entries = fs::read_dir(&storage_path).await.map_err(|e| {
@@ -78,12 +89,14 @@ impl WebDavHandler {
                             format!("读取目录失败: {}", e),
                         )
                     })?;
+                    let mut count = 0usize;
                     while let Some(entry) = entries.next_entry().await.map_err(|e| {
                         SilentError::business_error(
                             StatusCode::INTERNAL_SERVER_ERROR,
                             format!("读取目录项失败: {}", e),
                         )
                     })? {
+                        if let Some(maxn) = limit { if count >= maxn { break; } }
                         let entry_path = entry.path();
                         let relative_path = if path.is_empty() || path == "/" {
                             format!("/{}", entry.file_name().to_string_lossy())
@@ -93,6 +106,7 @@ impl WebDavHandler {
                         let href = self.build_full_href(&relative_path);
                         let is_dir = entry_path.is_dir();
                         Self::add_prop_response(&mut xml, &href, &entry_path, is_dir).await;
+                        count += 1;
                     }
                 }
             } else {

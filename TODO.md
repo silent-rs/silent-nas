@@ -37,15 +37,15 @@
     - 已全部完成，相关能力已落地并文档化（详见 docs/metrics-enhancements.md 与 docs/troubleshooting-sync.md）
 
 2) WebDAV 协议完善
-- 进度更新：
-  - [已完成] 锁与并发：共享锁语义与冲突矩阵、LOCK Body 解析（owner/depth/timeout）
-  - [已完成] 条件请求：If 头完整表达式（资源标记、多令牌、列表AND/OR、Not、ETag 条件）
-  - [已完成] 互通用例：补充 Cyberduck/Nextcloud 要点与验证记录（docs/webdav-interop.md）
-  - [已完成] 属性模型：PROPPATCH 解析 xmlns，新增结构化键 ns:{URI}#{local}；只读 DAV:、值长度限制、命名空间冲突检测
-  - [已完成] 报告扩展：REPORT sync-collection（limit/sync-token/删除差异）、version-tree、silent:filter（mime/时间/limit）
-
-- 待完成：
-  - 报告扩展：更多 REPORT 类型（如标签、扩展属性选择）与更细过滤（多条件组合）
+- 状态：基本完成（详见 docs/webdav-guide.md、docs/webdav-interop.md、docs/webdav-report-extensions.md）
+- 已完成：
+  - 锁与并发：共享/独占锁、owner/depth/timeout；If 条件（Lock‑Token/ETag，AND/OR/Not）
+  - 属性模型：xmlns 解析、结构化键 ns:{URI}#{local}；DAV: 只读；值长度限制；命名空间冲突检测；类型校验（.bool/.int）
+  - 报告：sync-collection（limit/sync-token/删除差异404）、version-tree、silent:filter（mime/时间/limit/标签）、属性选择（<D:prop>）
+- 保留优化项：
+  - 差异记录增强：MOVE 以 from→to 标记表达（当前按删除+创建）
+  - PROPFIND 支持 <D:prop> 选择（目前在 REPORT 中已支持）
+  - 扩展属性前缀回显映射（根据客户端偏好回退原前缀）
 
 ---
 

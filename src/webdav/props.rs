@@ -130,6 +130,43 @@ impl WebDavHandler {
                 let entry = props.entry(path.clone()).or_default();
                 // 只允许非 DAV: 命名空间的可写属性
                 let mut reject_dav = false;
+                let mut conflict = false;
+                // 命名空间冲突检测：针对结构化键 ns:{URI}#{local}
+                let mut seen_local: std::collections::HashMap<String, (String, Option<String>)> = std::collections::HashMap::new();
+                let parse_ns_key = |k: &str| -> Option<(String, String)> {
+                    if let Some(rest) = k.strip_prefix("ns:") {
+                        if let Some((uri, local)) = rest.split_once('#') {
+                            return Some((uri.to_string(), local.to_string()));
+                        }
+                    }
+                    None
+                };
+                // 先扫描现有条目，记录已存在的 (local -> uri,value)
+                for (ek, ev) in entry.iter() {
+                    if let Some((u, l)) = parse_ns_key(ek) {
+                        seen_local.entry(l).or_insert((u, Some(ev.clone())));
+                    }
+                }
+                // 再扫描本次结构化更新，若同 local 不同 uri 且值不同，标记冲突
+                for (k, v) in fq_updates.iter() {
+                    if let Some((u, l)) = parse_ns_key(k) {
+                        if let Some((eu, ev)) = seen_local.get(&l) {
+                            if eu != &u {
+                                if ev.as_deref() != v.as_deref() {
+                                    conflict = true;
+                                    break;
+                                }
+                            }
+                        }
+                        seen_local.insert(l, (u, v.clone()));
+                    }
+                }
+                if conflict {
+                    return Err(SilentError::business_error(
+                        StatusCode::CONFLICT,
+                        "命名空间冲突：同名属性存在不同URI且值不一致",
+                    ));
+                }
                 for (k, v) in updates {
                     let key = k.trim().to_string();
                     if key.starts_with("D:") || key.starts_with("d:") {

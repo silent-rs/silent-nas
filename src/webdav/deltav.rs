@@ -450,8 +450,8 @@ impl WebDavHandler {
         if let Ok(meta) = std::fs::metadata(path) {
             if let Ok(m) = meta.modified() {
                 if let Ok(dur) = m.duration_since(std::time::UNIX_EPOCH) {
-                    if let Some(dt) = chrono::NaiveDateTime::from_timestamp_opt(dur.as_secs() as i64, 0) {
-                        return dt > since;
+                    if let Some(dt) = chrono::DateTime::from_timestamp(dur.as_secs() as i64, 0) {
+                        return dt.naive_local() > since;
                     }
                 }
             }

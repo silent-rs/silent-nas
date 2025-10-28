@@ -58,8 +58,9 @@
   - 调整 `fail_task_ttl_secs`/`fail_queue_max`
   - 手工清理 `<root>/.sync/fail_queue.json` 中陈旧条目（停机维护）
 
-## 验收回归建议
+## 验收回归建议（调整后）
 
 - 使用 `scripts/sync_3nodes_benchmark_docker.sh` 进行三节点端到端压测
-- 验收目标：P95 < 8s，成功率 > 99.9%
+- 推荐 5 分钟窗口：N_FILES=200，CONCURRENCY=20
+- 验收目标：P95 < 5s，成功率 > 99.9%
 - 建议在 CI 中周期性运行，捕获回归

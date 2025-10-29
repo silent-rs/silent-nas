@@ -4,11 +4,34 @@ set -euo pipefail
 # 简单多节点冒烟测试：启动2个节点，经由WebDAV写入文件，验证另一节点在短时间内收敛
 
 ROOT_DIR=$(cd "$(dirname "$0")/.." && pwd)
-# 通过 cargo 输出解析可执行文件路径（兼容非默认 target 目录）
-TARGET_BIN=$(cargo build --message-format json-render-diagnostics \
-  | sed -n 's/.*"executable":"\([^\"]*\)".*/\1/p' \
-  | tail -n 1)
+# 获取可执行文件路径
+TARGET_DIR=$(cargo metadata --format-version 1 2>/dev/null | python3 -c "import sys, json; print(json.load(sys.stdin)['target_directory'])" 2>/dev/null || echo "$ROOT_DIR/target")
+TARGET_BIN="$TARGET_DIR/debug/silent-nas"
 WORK_DIR="$ROOT_DIR/scripts/.smoke"
+
+# 确保本地有可用的 NATS（若未运行则临时启动一个Docker容器，测试结束自动清理）
+ensure_nats() {
+  if nc -z 127.0.0.1 4222 >/dev/null 2>&1; then
+    echo "[smoke] 检测到本地 NATS 已运行 (127.0.0.1:4222)"
+    return 0
+  fi
+  if ! command -v docker >/dev/null 2>&1; then
+    echo "[smoke] 未检测到本地 NATS 且无 docker 可用，可能导致冒烟失败"
+    return 0
+  fi
+  echo "[smoke] 启动临时 NATS 容器..."
+  docker rm -f smoke-nats >/dev/null 2>&1 || true
+  docker run -d --rm --name smoke-nats -p 4222:4222 nats:latest >/dev/null 2>&1 || true
+  export _SMOKE_STARTED_NATS=1
+  # 简单等待片刻
+  sleep 1
+}
+
+stop_temp_nats() {
+  if [[ "${_SMOKE_STARTED_NATS:-}" == "1" ]]; then
+    docker rm -f smoke-nats >/dev/null 2>&1 || true
+  fi
+}
 
 get_free_tcp_port() {
   python3 - <<'PY'
@@ -61,11 +84,22 @@ cleanup() {
   rm -f /tmp/silent-nas-node1.log /tmp/silent-nas-node2.log 2>/dev/null || true
   rm -rf "$WORK_DIR" 2>/dev/null || true
   sleep 0.2 || true
+  # 停掉临时 NATS
+  stop_temp_nats
 }
 trap cleanup EXIT
 
 echo "[smoke] 构建二进制..."
 cargo build -q
+
+if [[ ! -x "$TARGET_BIN" ]]; then
+  echo "[smoke] 可执行文件不存在: $TARGET_BIN"
+  exit 1
+fi
+echo "[smoke] 使用可执行文件: $TARGET_BIN"
+
+# 确保NATS可用
+ensure_nats
 
 rm -rf "$WORK_DIR" && mkdir -p "$WORK_DIR/node1" "$WORK_DIR/node2"
 
@@ -156,6 +190,7 @@ EOF
 echo "[smoke] 启动节点1..."
 (cd "$WORK_DIR/node1" && RUST_LOG=info ADVERTISE_HOST=127.0.0.1 exec "$TARGET_BIN") >/tmp/silent-nas-node1.log 2>&1 &
 PID1=$!
+disown
 
 echo "[smoke] 等待节点1 HTTP就绪..."
 for i in {1..100}; do
@@ -173,6 +208,7 @@ done
 echo "[smoke] 启动节点2..."
 (cd "$WORK_DIR/node2" && RUST_LOG=info ADVERTISE_HOST=127.0.0.1 exec "$TARGET_BIN") >/tmp/silent-nas-node2.log 2>&1 &
 PID2=$!
+disown
 
 echo "[smoke] 等待节点2 HTTP就绪..."
 for i in {1..100}; do

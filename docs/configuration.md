@@ -205,14 +205,28 @@ heartbeat_interval = 10
 node_timeout = 30
 ```
 
-### [sync] - 跨节点同步行为
+### [sync] - 跨节点同步行为（单节点可省略）
 
 | 配置项 | 类型 | 默认值 | 说明 |
 |--------|------|--------|------|
-| `auto_sync` | boolean | true | 启用自动同步 |
+| `auto_sync` | boolean | true | 启用自动同步（需要多节点/NATS）|
 | `sync_interval` | integer | 60 | 同步间隔（秒） |
 | `max_files_per_sync` | integer | 100 | 每次最大同步文件数 |
 | `max_retries` | integer | 3 | 失败重试次数 |
+| `http_connect_timeout` | integer | 5 | 拉取连接超时（秒） |
+| `http_request_timeout` | integer | 15 | 拉取请求超时（秒） |
+| `fetch_max_retries` | integer | 3 | 拉取最大重试次数 |
+| `fetch_base_backoff` | integer | 1 | 拉取退避基数（秒） |
+| `fetch_max_backoff` | integer | 8 | 拉取退避上限（秒） |
+| `fail_queue_max` | integer | 1000 | 失败补偿队列容量上限 |
+| `fail_task_ttl_secs` | integer | 86400 | 失败任务TTL（秒），超过即丢弃 |
+| `grpc_connect_timeout` | integer | 10 | gRPC 连接超时（秒） |
+| `grpc_request_timeout` | integer | 30 | gRPC 请求超时（秒） |
+| `fault_transfer_error_rate` | float | 0.0 | 故障注入：传输失败概率（0-1） |
+| `fault_verify_error_rate` | float | 0.0 | 故障注入：校验失败概率（0-1） |
+| `fault_delay_ms` | integer | 0 | 故障注入：附加延迟（毫秒） |
+
+提示：当 `[node].enable = false` 且未连接 NATS（单节点部署）时，`[sync]` 段落可省略，相关配置不会被使用。
 
 **集群配置**:
 ```toml
@@ -221,6 +235,11 @@ auto_sync = true
 sync_interval = 30  # 30秒同步一次
 max_files_per_sync = 200
 max_retries = 3
+http_connect_timeout = 5
+http_request_timeout = 15
+fetch_max_retries = 3
+fetch_base_backoff = 1
+fetch_max_backoff = 8
 ```
 
 ### [versioning] - 版本控制配置
@@ -317,6 +336,11 @@ export SYNC_AUTO=true                          # 自动同步
 export SYNC_INTERVAL=60                        # 同步间隔
 export SYNC_MAX_FILES=200                      # 每次最大同步文件数
 export SYNC_MAX_RETRIES=3                      # 重试次数
+export SYNC_HTTP_CONNECT_TIMEOUT=5             # 拉取连接超时（秒）
+export SYNC_HTTP_REQUEST_TIMEOUT=15            # 拉取请求超时（秒）
+export SYNC_FETCH_MAX_RETRIES=3                # 拉取最大重试次数
+export SYNC_FETCH_BASE_BACKOFF=1               # 拉取退避基数（秒）
+export SYNC_FETCH_MAX_BACKOFF=8                # 拉取退避上限（秒）
 
 export ENABLE_AUTH=false                       # 其它覆盖示例
 ```

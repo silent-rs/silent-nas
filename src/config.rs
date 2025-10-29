@@ -10,8 +10,10 @@ pub struct Config {
     pub s3: S3Config,
     pub auth: AuthConfig,
     /// 节点发现/心跳配置
+    #[serde(default)]
     pub node: NodeConfig,
     /// 跨节点同步行为配置
+    #[serde(default)]
     pub sync: SyncBehaviorConfig,
 }
 
@@ -57,6 +59,17 @@ pub struct NodeConfig {
     pub node_timeout: i64,
 }
 
+impl Default for NodeConfig {
+    fn default() -> Self {
+        Self {
+            enable: true,
+            seed_nodes: Vec::new(),
+            heartbeat_interval: 10,
+            node_timeout: 30,
+        }
+    }
+}
+
 /// 跨节点同步行为配置（对应 SyncConfig）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncBehaviorConfig {
@@ -66,8 +79,113 @@ pub struct SyncBehaviorConfig {
     pub sync_interval: u64,
     /// 每次同步的最大文件数
     pub max_files_per_sync: usize,
+    /// 同步并发文件数
+    #[serde(default = "SyncBehaviorConfig::default_max_concurrency")]
+    pub max_concurrency: usize,
     /// 失败重试次数
     pub max_retries: u32,
+    /// 拉取连接超时（秒）
+    #[serde(default = "SyncBehaviorConfig::default_http_connect_timeout")]
+    pub http_connect_timeout: u64,
+    /// 拉取请求超时（秒）
+    #[serde(default = "SyncBehaviorConfig::default_http_request_timeout")]
+    pub http_request_timeout: u64,
+    /// 拉取最大重试次数
+    #[serde(default = "SyncBehaviorConfig::default_fetch_max_retries")]
+    pub fetch_max_retries: u32,
+    /// 拉取退避基数（秒）
+    #[serde(default = "SyncBehaviorConfig::default_fetch_base_backoff")]
+    pub fetch_base_backoff: u64,
+    /// 拉取退避上限（秒）
+    #[serde(default = "SyncBehaviorConfig::default_fetch_max_backoff")]
+    pub fetch_max_backoff: u64,
+    /// 失败补偿队列容量上限
+    #[serde(default = "SyncBehaviorConfig::default_fail_queue_max")]
+    pub fail_queue_max: usize,
+    /// 失败任务TTL（秒），超过即丢弃
+    #[serde(default = "SyncBehaviorConfig::default_fail_task_ttl_secs")]
+    pub fail_task_ttl_secs: u64,
+    /// gRPC 连接超时（秒）
+    #[serde(default = "SyncBehaviorConfig::default_grpc_connect_timeout")]
+    pub grpc_connect_timeout: u64,
+    /// gRPC 请求超时（秒）
+    #[serde(default = "SyncBehaviorConfig::default_grpc_request_timeout")]
+    pub grpc_request_timeout: u64,
+    /// 故障注入：传输失败概率（0.0-1.0）
+    #[serde(default = "SyncBehaviorConfig::default_fault_transfer_rate")]
+    pub fault_transfer_error_rate: f64,
+    /// 故障注入：校验失败概率（0.0-1.0）
+    #[serde(default = "SyncBehaviorConfig::default_fault_verify_rate")]
+    pub fault_verify_error_rate: f64,
+    /// 故障注入：额外延迟（毫秒）
+    #[serde(default = "SyncBehaviorConfig::default_fault_delay_ms")]
+    pub fault_delay_ms: u64,
+}
+
+impl Default for SyncBehaviorConfig {
+    fn default() -> Self {
+        Self {
+            auto_sync: true,
+            sync_interval: 60,
+            max_files_per_sync: 100,
+            max_concurrency: Self::default_max_concurrency(),
+            max_retries: 3,
+            http_connect_timeout: Self::default_http_connect_timeout(),
+            http_request_timeout: Self::default_http_request_timeout(),
+            fetch_max_retries: Self::default_fetch_max_retries(),
+            fetch_base_backoff: Self::default_fetch_base_backoff(),
+            fetch_max_backoff: Self::default_fetch_max_backoff(),
+            fail_queue_max: Self::default_fail_queue_max(),
+            fail_task_ttl_secs: Self::default_fail_task_ttl_secs(),
+            grpc_connect_timeout: Self::default_grpc_connect_timeout(),
+            grpc_request_timeout: Self::default_grpc_request_timeout(),
+            fault_transfer_error_rate: Self::default_fault_transfer_rate(),
+            fault_verify_error_rate: Self::default_fault_verify_rate(),
+            fault_delay_ms: Self::default_fault_delay_ms(),
+        }
+    }
+}
+
+impl SyncBehaviorConfig {
+    fn default_max_concurrency() -> usize {
+        8
+    }
+    fn default_http_connect_timeout() -> u64 {
+        5
+    }
+    fn default_http_request_timeout() -> u64 {
+        15
+    }
+    fn default_fetch_max_retries() -> u32 {
+        3
+    }
+    fn default_fetch_base_backoff() -> u64 {
+        1
+    }
+    fn default_fetch_max_backoff() -> u64 {
+        8
+    }
+    fn default_fail_queue_max() -> usize {
+        1000
+    }
+    fn default_fail_task_ttl_secs() -> u64 {
+        24 * 3600
+    }
+    fn default_grpc_connect_timeout() -> u64 {
+        10
+    }
+    fn default_grpc_request_timeout() -> u64 {
+        30
+    }
+    fn default_fault_transfer_rate() -> f64 {
+        0.0
+    }
+    fn default_fault_verify_rate() -> f64 {
+        0.0
+    }
+    fn default_fault_delay_ms() -> u64 {
+        0
+    }
 }
 
 /// 认证配置
@@ -119,7 +237,20 @@ impl Default for Config {
                 auto_sync: true,
                 sync_interval: 60,
                 max_files_per_sync: 100,
+                max_concurrency: SyncBehaviorConfig::default_max_concurrency(),
                 max_retries: 3,
+                http_connect_timeout: SyncBehaviorConfig::default_http_connect_timeout(),
+                http_request_timeout: SyncBehaviorConfig::default_http_request_timeout(),
+                fetch_max_retries: SyncBehaviorConfig::default_fetch_max_retries(),
+                fetch_base_backoff: SyncBehaviorConfig::default_fetch_base_backoff(),
+                fetch_max_backoff: SyncBehaviorConfig::default_fetch_max_backoff(),
+                fail_queue_max: SyncBehaviorConfig::default_fail_queue_max(),
+                fail_task_ttl_secs: SyncBehaviorConfig::default_fail_task_ttl_secs(),
+                grpc_connect_timeout: SyncBehaviorConfig::default_grpc_connect_timeout(),
+                grpc_request_timeout: SyncBehaviorConfig::default_grpc_request_timeout(),
+                fault_transfer_error_rate: SyncBehaviorConfig::default_fault_transfer_rate(),
+                fault_verify_error_rate: SyncBehaviorConfig::default_fault_verify_rate(),
+                fault_delay_ms: SyncBehaviorConfig::default_fault_delay_ms(),
             },
             auth: AuthConfig {
                 enable: false,
@@ -206,10 +337,77 @@ impl Config {
         {
             self.sync.max_files_per_sync = v;
         }
+        if let Ok(mc) = std::env::var("SYNC_MAX_CONCURRENCY")
+            && let Ok(v) = mc.parse::<usize>()
+        {
+            self.sync.max_concurrency = v;
+        }
         if let Ok(retry) = std::env::var("SYNC_MAX_RETRIES")
             && let Ok(v) = retry.parse::<u32>()
         {
             self.sync.max_retries = v;
+        }
+        // 可选：覆盖拉取超时与退避配置（仍优先以配置文件驱动）
+        if let Ok(v) = std::env::var("SYNC_HTTP_CONNECT_TIMEOUT")
+            && let Ok(n) = v.parse::<u64>()
+        {
+            self.sync.http_connect_timeout = n;
+        }
+        if let Ok(v) = std::env::var("SYNC_HTTP_REQUEST_TIMEOUT")
+            && let Ok(n) = v.parse::<u64>()
+        {
+            self.sync.http_request_timeout = n;
+        }
+        if let Ok(v) = std::env::var("SYNC_FETCH_MAX_RETRIES")
+            && let Ok(n) = v.parse::<u32>()
+        {
+            self.sync.fetch_max_retries = n;
+        }
+        if let Ok(v) = std::env::var("SYNC_FETCH_BASE_BACKOFF")
+            && let Ok(n) = v.parse::<u64>()
+        {
+            self.sync.fetch_base_backoff = n;
+        }
+        if let Ok(v) = std::env::var("SYNC_FETCH_MAX_BACKOFF")
+            && let Ok(n) = v.parse::<u64>()
+        {
+            self.sync.fetch_max_backoff = n;
+        }
+
+        if let Ok(v) = std::env::var("SYNC_FAIL_QUEUE_MAX")
+            && let Ok(n) = v.parse::<usize>()
+        {
+            self.sync.fail_queue_max = n;
+        }
+        if let Ok(v) = std::env::var("SYNC_FAIL_TASK_TTL")
+            && let Ok(n) = v.parse::<u64>()
+        {
+            self.sync.fail_task_ttl_secs = n;
+        }
+        if let Ok(v) = std::env::var("SYNC_GRPC_CONNECT_TIMEOUT")
+            && let Ok(n) = v.parse::<u64>()
+        {
+            self.sync.grpc_connect_timeout = n;
+        }
+        if let Ok(v) = std::env::var("SYNC_GRPC_REQUEST_TIMEOUT")
+            && let Ok(n) = v.parse::<u64>()
+        {
+            self.sync.grpc_request_timeout = n;
+        }
+        if let Ok(v) = std::env::var("SYNC_FAULT_TRANSFER_RATE")
+            && let Ok(n) = v.parse::<f64>()
+        {
+            self.sync.fault_transfer_error_rate = n.clamp(0.0, 1.0);
+        }
+        if let Ok(v) = std::env::var("SYNC_FAULT_VERIFY_RATE")
+            && let Ok(n) = v.parse::<f64>()
+        {
+            self.sync.fault_verify_error_rate = n.clamp(0.0, 1.0);
+        }
+        if let Ok(v) = std::env::var("SYNC_FAULT_DELAY_MS")
+            && let Ok(n) = v.parse::<u64>()
+        {
+            self.sync.fault_delay_ms = n;
         }
     }
 }

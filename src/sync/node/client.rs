@@ -24,6 +24,10 @@ pub struct ClientConfig {
     pub max_retries: u32,
     /// 重试间隔（秒）
     pub retry_interval: u64,
+    /// 最大退避（秒）
+    pub max_backoff_secs: u64,
+    /// 重试总预算时间（秒）
+    pub retry_budget_secs: u64,
 }
 
 impl Default for ClientConfig {
@@ -33,6 +37,8 @@ impl Default for ClientConfig {
             request_timeout: 30,
             max_retries: 3,
             retry_interval: 5,
+            max_backoff_secs: 60,
+            retry_budget_secs: 120,
         }
     }
 }
@@ -48,6 +54,21 @@ pub struct NodeSyncClient {
 }
 
 impl NodeSyncClient {
+    fn classify_status(status: &Status) -> &'static str {
+        match status.code() {
+            Code::Unavailable => "unavailable",
+            Code::DeadlineExceeded => "deadline_exceeded",
+            Code::ResourceExhausted => "resource_exhausted",
+            Code::Aborted => "aborted",
+            Code::Unknown => "unknown",
+            Code::Internal => "internal",
+            Code::InvalidArgument => "invalid_argument",
+            Code::PermissionDenied => "permission_denied",
+            Code::Unauthenticated => "unauthenticated",
+            Code::NotFound => "not_found",
+            _ => "other",
+        }
+    }
     /// 创建新的客户端
     pub fn new(address: String, config: ClientConfig) -> Self {
         Self {
@@ -69,15 +90,56 @@ impl NodeSyncClient {
         )
     }
 
+    /// 在目标节点校验文件哈希（端到端一致性）
+    pub async fn verify_remote_hash(&self, file_id: &str, expected_hash: &str) -> Result<bool> {
+        use crate::rpc::file_service::file_service_client::FileServiceClient;
+
+        let endpoint = format!("http://{}", self.address);
+        let ep = Endpoint::from_shared(endpoint)
+            .map_err(|e| NasError::Other(format!("无效的地址: {}", e)))?
+            .connect_timeout(StdDuration::from_secs(self.config.connect_timeout))
+            .timeout(StdDuration::from_secs(self.config.request_timeout))
+            .tcp_nodelay(true);
+
+        let channel = ep
+            .connect()
+            .await
+            .map_err(|e| NasError::Other(format!("连接失败: {}", e)))?;
+
+        let mut client = FileServiceClient::new(channel);
+        let req = tonic::Request::new(GetMetadataRequest {
+            file_id: file_id.to_string(),
+        });
+
+        match client.get_metadata(req).await {
+            Ok(resp) => {
+                let meta = resp.into_inner().metadata;
+                if let Some(m) = meta {
+                    Ok(m.hash == expected_hash)
+                } else {
+                    Ok(false)
+                }
+            }
+            Err(e) => Err(NasError::Other(format!(
+                "获取目标元数据失败以校验哈希: {}",
+                e
+            ))),
+        }
+    }
+
     fn backoff_delay(&self, attempt: u32) -> tokio::time::Duration {
         let base = self.config.retry_interval;
         let factor = 1u64 << attempt.min(5); // 上限 2^5 = 32
-        let secs = (base.saturating_mul(factor)).min(60);
-        tokio::time::Duration::from_secs(secs)
+        let capped = (base.saturating_mul(factor)).min(self.config.max_backoff_secs);
+        let jitter = 0.8 + (rand::random::<f64>() * 0.4); // 0.8~1.2
+        let secs = ((capped as f64) * jitter).round() as u64;
+        tokio::time::Duration::from_secs(secs.max(1))
     }
 
     /// 连接到远程节点
     pub async fn connect(&self) -> Result<()> {
+        let span = tracing::info_span!("grpc_connect", target = %self.address);
+        let _e = span.enter();
         info!("连接到节点: {}", self.address);
 
         let endpoint = format!("http://{}", self.address);
@@ -125,6 +187,7 @@ impl NodeSyncClient {
         debug!("向 {} 注册节点: {}", self.address, node.node_id);
 
         let mut client = self.ensure_connected().await?;
+        let _started = std::time::Instant::now();
 
         let proto_node = crate::rpc::file_service::NodeInfo {
             node_id: node.node_id.clone(),
@@ -139,6 +202,7 @@ impl NodeSyncClient {
         };
         // 重试调用
         let mut last_err = None;
+        let _started = std::time::Instant::now();
         for attempt in 0..=self.config.max_retries {
             let request = tonic::Request::new(payload.clone());
             match client.register_node(request).await {
@@ -160,7 +224,15 @@ impl NodeSyncClient {
                         {
                             break;
                         }
-                        tokio::time::sleep(self.backoff_delay(attempt)).await;
+                        if let Some(ref st) = last_err {
+                            debug!(
+                                "list_nodes 重试: attempt={} reason={}",
+                                attempt + 1,
+                                Self::classify_status(st)
+                            );
+                        }
+                        let d = self.backoff_delay(attempt);
+                        tokio::time::sleep(d).await;
                         continue;
                     }
                 }
@@ -177,8 +249,10 @@ impl NodeSyncClient {
         debug!("向 {} 发送心跳", self.address);
 
         let mut client = self.ensure_connected().await?;
+        let _started = std::time::Instant::now();
 
         let mut last_err = None;
+        let _started = std::time::Instant::now();
         for attempt in 0..=self.config.max_retries {
             let request = tonic::Request::new(HeartbeatRequest {
                 node_id: node_id.to_string(),
@@ -197,7 +271,15 @@ impl NodeSyncClient {
                         {
                             break;
                         }
-                        tokio::time::sleep(self.backoff_delay(attempt)).await;
+                        if let Some(ref st) = last_err {
+                            debug!(
+                                "sync_file_state 重试: attempt={} reason={}",
+                                attempt + 1,
+                                Self::classify_status(st)
+                            );
+                        }
+                        let d = self.backoff_delay(attempt);
+                        tokio::time::sleep(d).await;
                         continue;
                     }
                 }
@@ -211,6 +293,7 @@ impl NodeSyncClient {
         debug!("从 {} 获取节点列表", self.address);
 
         let mut client = self.ensure_connected().await?;
+        let _started = std::time::Instant::now();
 
         let mut last_err = None;
         for attempt in 0..=self.config.max_retries {
@@ -233,7 +316,15 @@ impl NodeSyncClient {
                         {
                             break;
                         }
-                        tokio::time::sleep(self.backoff_delay(attempt)).await;
+                        if let Some(ref st) = last_err {
+                            debug!(
+                                "request_file_sync 重试: attempt={} reason={}",
+                                attempt + 1,
+                                Self::classify_status(st)
+                            );
+                        }
+                        let d = self.backoff_delay(attempt);
+                        tokio::time::sleep(d).await;
                         continue;
                     }
                 }
@@ -260,6 +351,7 @@ impl NodeSyncClient {
             states,
         };
         let mut last_err = None;
+        let _started = std::time::Instant::now();
         for attempt in 0..=self.config.max_retries {
             let request = tonic::Request::new(payload.clone());
             match client.sync_file_state(request).await {
@@ -275,7 +367,8 @@ impl NodeSyncClient {
                         {
                             break;
                         }
-                        tokio::time::sleep(self.backoff_delay(attempt)).await;
+                        let d = self.backoff_delay(attempt);
+                        tokio::time::sleep(d).await;
                         continue;
                     }
                 }
@@ -299,6 +392,7 @@ impl NodeSyncClient {
         };
 
         let mut last_err = None;
+        let _started = std::time::Instant::now();
         for attempt in 0..=self.config.max_retries {
             let request = tonic::Request::new(payload.clone());
             match client.request_file_sync(request).await {
@@ -314,7 +408,8 @@ impl NodeSyncClient {
                         {
                             break;
                         }
-                        tokio::time::sleep(self.backoff_delay(attempt)).await;
+                        let d = self.backoff_delay(attempt);
+                        tokio::time::sleep(d).await;
                         continue;
                     }
                 }
@@ -417,7 +512,8 @@ impl NodeSyncClient {
                         {
                             break;
                         }
-                        tokio::time::sleep(self.backoff_delay(attempt)).await;
+                        let d = self.backoff_delay(attempt);
+                        tokio::time::sleep(d).await;
                         continue;
                     }
                 }
@@ -548,6 +644,34 @@ mod tests {
         let client = NodeSyncClient::new("127.0.0.1:9000".to_string(), config);
 
         assert_eq!(client.address, "127.0.0.1:9000");
+    }
+
+    #[test]
+    fn test_should_retry_and_backoff() {
+        let client = NodeSyncClient::new(
+            "127.0.0.1:50051".into(),
+            ClientConfig {
+                connect_timeout: 1,
+                request_timeout: 1,
+                max_retries: 3,
+                retry_interval: 5,
+                max_backoff_secs: 60,
+                retry_budget_secs: 120,
+            },
+        );
+        // 可重试状态
+        assert!(client.should_retry(&Status::unavailable("")));
+        assert!(client.should_retry(&Status::deadline_exceeded("")));
+        // 不可重试
+        assert!(!client.should_retry(&Status::invalid_argument("")));
+
+        // 退避：5, 10, 20, 40, 60(封顶)
+        assert_eq!(client.backoff_delay(0).as_secs(), 5);
+        assert_eq!(client.backoff_delay(1).as_secs(), 10);
+        assert_eq!(client.backoff_delay(2).as_secs(), 20);
+        assert_eq!(client.backoff_delay(3).as_secs(), 40);
+        assert_eq!(client.backoff_delay(5).as_secs(), 60);
+        assert_eq!(client.backoff_delay(6).as_secs(), 60);
     }
 
     #[test]

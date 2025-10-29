@@ -311,7 +311,9 @@ pub async fn start_http_server(
 
     let route = Route::new_root()
         .hook(state_injector(app_state))
-        .append(api_route);
+        .append(api_route)
+        // 暴露根路径 /metrics（便于 Prometheus 默认抓取路径），与 /api/metrics 并存
+        .append(Route::new("metrics").get(metrics_api::get_metrics));
 
     info!("HTTP 服务器启动: {}", addr);
     info!("  - REST API: http://{}/api", addr);

@@ -17,6 +17,8 @@
   - `D:getlastmodified`（HTTP-date, GMT）
   - `D:supportedlock`：可选；为兼容 Finder 初始握手可暂不返回
 - 支持 `Depth: 0/1/infinity`。
+ - 支持请求体内 `<D:prop>` 属性选择（标准/扩展属性）。
+ - 扩展属性（自定义命名空间）在响应中尽量回显客户端在 `<D:prop>` 中声明的 xmlns 前缀；未声明时使用 `x` 前缀。
 
 ### 命名空间与 href 规则（Finder 关键要求）
 - DAV 命名空间使用带前缀格式：在根元素声明 `xmlns:D="DAV:"`，所有 DAV 元素使用 `D:` 前缀（如 `D:multistatus/D:response/D:resourcetype/D:collection`）。
@@ -32,6 +34,9 @@
 ## 其他兼容性
 - `HEAD`/`GET`：文件返回 `Content-Length`、`ETag`、`Last-Modified`，并声明 `Accept-Ranges: bytes`。
 - 目录 `GET`：返回简单 HTML（提示使用 PROPFIND）。
+ - REPORT 增量同步（sync-collection）：
+   - 删除以 `404` 形式返回；
+   - 移动以 `301 Moved Permanently` + `<silent:moved-from>`（命名空间 `urn:silent-webdav`）返回来源路径。
 
 ## 测试脚本期望
 - `scripts/finder_webdav_test.sh`：

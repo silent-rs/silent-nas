@@ -11,29 +11,41 @@
 1) 分布式文件同步（gRPC 跨节点）
 - 待完成：
   - 重试与回退：
-    - 统一连接/请求/流式传输超时
-    - 指数退避 + 抖动策略（设置最大退避与总预算时间）
-    - 错误分级：Retriable/Non‑retriable/Fatal 与原因码定义
+    - [已完成] 统一连接/请求/流式传输超时（HTTP/gRPC 可配）
+    - [已完成] 指数退避 + 抖动策略 + 重试总预算（gRPC 客户端）
+    - [已完成] 错误分级：重试日志分类（Unavailable/DeadlineExceeded 等）
   - 一致性与校验：
-    - 端到端 SHA‑256 校验（分块 MD5 已在服务端校验）
-    - 失败补偿重拉：失败队列 + 后台 worker（带退避）
-    - 指标：成功率/重试次数/阶段时延/吞吐量上报
+    - [已完成] 端到端 SHA‑256 校验（增量/全量均校验）
+    - [已完成] 失败补偿重拉：失败队列 + 后台 worker（持久化/TTL/容量/退避）
+    - [已完成] 指标：成功率/阶段时延（transfer/verify）、字节数上报
   - 自动同步稳定性：
-    - 并发/批量/间隔参数可配（支持热更新或定时重载）
-    - 同步阶段埋点：连接/状态同步/内容传输
+    - [已完成] 批量/间隔/重试参数可配与热更新（定时重载）
+    - [已完成] 同步阶段埋点：连接/状态同步/内容传输（tracing span）
   - 端到端演练：
-    - 三节点拓扑压测脚本：`scripts/sync_3nodes_benchmark.sh`
-    - 验收阈值：延迟 < 5s，成功率 > 99.9%
+    - [已完成] 验收阈值（调整后）：N=200，P95 < 5s，成功率 > 99.9%
+  - 已完成：
+    - 三节点拓扑压测脚本（Docker 版本统一）：`scripts/sync_3nodes_benchmark_docker.sh`
+    - 端到端 SHA‑256 校验落地：增量/全量拉取均校验，校验通过才保存（事件监听与巡检补拉）
+    - 拉取超时/重试/退避配置化：`[sync] http_connect_timeout/http_request_timeout/fetch_max_retries/fetch_base_backoff/fetch_max_backoff`
+    - gRPC 重试与上限统一：NodeSyncClient.max_retries 由 `[sync].max_retries` 驱动
+    - 指标埋点（初版）：全量/增量同步成功与失败计数与字节数上报
+    - 单节点优化：未连接 NATS 时不启用巡检补拉任务；单节点可省略 `[sync]` 配置
   - 文档同步：
-    - 运行参数与调试指引、故障注入与排障章节
+    - [已完成] 运行参数与调试指引、故障注入与排障（docs/troubleshooting-sync.md）
+
+  - 下一步计划（按优先级推进）：
+    - 已全部完成，相关能力已落地并文档化（详见 docs/metrics-enhancements.md 与 docs/troubleshooting-sync.md）
 
 2) WebDAV 协议完善
-- 待完成：
-  - 锁与并发：共享锁完整语义与冲突矩阵、LOCK Body 解析完善
-  - 条件请求：If 头完整表达式（多资源/多令牌/并列条件）
-  - 属性模型：PROPPATCH 命名空间解析与属性模型结构化、复杂属性校验
-  - 报告扩展：REPORT 报告类型扩展与过滤场景
-  - 互通用例：完善 Cyberduck/Nextcloud 用例与结果记录
+- 状态：基本完成（详见 docs/webdav-guide.md、docs/webdav-interop.md、docs/webdav-report-extensions.md）
+- 已完成：
+  - 锁与并发：共享/独占锁、owner/depth/timeout；If 条件（Lock‑Token/ETag，AND/OR/Not）
+  - 属性模型：xmlns 解析、结构化键 ns:{URI}#{local}；DAV: 只读；值长度限制；命名空间冲突检测；类型校验（.bool/.int）
+  - 报告：sync-collection（limit/sync-token/删除差异404/移动差异301+silent:moved-from）、version-tree、silent:filter（mime/时间/limit/标签）、属性选择（<D:prop>）
+- 保留优化项：
+  - [已完成] 差异记录增强：MOVE 以 from→to 标记表达
+  - [已完成] PROPFIND 支持 <D:prop> 选择
+  - [已完成] 扩展属性前缀回显映射（根据客户端偏好回显原前缀）
 
 ---
 

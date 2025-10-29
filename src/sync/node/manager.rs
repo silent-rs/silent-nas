@@ -4,8 +4,9 @@
 use crate::error::{NasError, Result};
 use crate::sync::crdt::SyncManager;
 use chrono::{Local, NaiveDateTime};
+use rand::Rng;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tokio::time::{Duration, interval};
@@ -292,8 +293,24 @@ pub struct SyncConfig {
     pub sync_interval: u64,
     /// 每次同步的最大文件数
     pub max_files_per_sync: usize,
+    /// 同步并发文件数
+    pub max_concurrency: usize,
     /// 同步重试次数
     pub max_retries: u32,
+    /// 失败补偿队列容量上限
+    pub fail_queue_max: usize,
+    /// 失败任务TTL（秒）
+    pub fail_task_ttl_secs: u64,
+    /// gRPC 连接超时（秒）
+    pub grpc_connect_timeout: u64,
+    /// gRPC 请求超时（秒）
+    pub grpc_request_timeout: u64,
+    /// 故障注入：传输失败概率（0.0-1.0）
+    pub fault_transfer_error_rate: f64,
+    /// 故障注入：校验失败概率（0.0-1.0）
+    pub fault_verify_error_rate: f64,
+    /// 故障注入：额外延迟（毫秒）
+    pub fault_delay_ms: u64,
 }
 
 impl Default for SyncConfig {
@@ -302,7 +319,15 @@ impl Default for SyncConfig {
             auto_sync: true,
             sync_interval: 60,
             max_files_per_sync: 100,
+            max_concurrency: 8,
             max_retries: 3,
+            fail_queue_max: 1000,
+            fail_task_ttl_secs: 24 * 3600,
+            grpc_connect_timeout: 10,
+            grpc_request_timeout: 30,
+            fault_transfer_error_rate: 0.0,
+            fault_verify_error_rate: 0.0,
+            fault_delay_ms: 0,
         }
     }
 }
@@ -322,10 +347,31 @@ pub struct SyncStats {
     pub error_count: u32,
 }
 
+/// 失败补偿任务
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CompTask {
+    /// 任务 ID（scru128）
+    id: String,
+    /// 目标节点 ID
+    target_node_id: String,
+    /// 文件 ID
+    file_id: String,
+    /// 已尝试次数
+    attempt: u32,
+    /// 下次执行时间
+    next_at: NaiveDateTime,
+    /// 创建时间
+    #[serde(default = "CompTask::default_created_at")]
+    created_at: NaiveDateTime,
+    /// 最近一次错误信息（可选，用于诊断）
+    #[serde(default)]
+    last_error: Option<String>,
+}
+
 /// 跨节点同步协调器
 pub struct NodeSyncCoordinator {
     /// 配置
-    config: SyncConfig,
+    config: Arc<RwLock<SyncConfig>>,
     /// 节点管理器
     node_manager: Arc<NodeManager>,
     /// 同步管理器
@@ -334,22 +380,57 @@ pub struct NodeSyncCoordinator {
     storage: Arc<crate::storage::StorageManager>,
     /// 同步统计
     stats: Arc<RwLock<SyncStats>>,
+    /// 失败补偿队列
+    fail_queue: Arc<RwLock<VecDeque<CompTask>>>,
+    /// 失败补偿队列持久化路径
+    fail_queue_path: std::path::PathBuf,
 }
 
 impl NodeSyncCoordinator {
+    /// 更新运行时同步配置（热更新）
+    pub async fn update_config(&self, new_cfg: SyncConfig) {
+        let mut cfg = self.config.write().await;
+        *cfg = new_cfg;
+        info!("NodeSync 配置已更新");
+    }
+    fn prune_expired_and_trim(&self, q: &mut VecDeque<CompTask>, ttl_secs: i64, max_len: usize) {
+        if ttl_secs > 0 {
+            let now = Local::now().naive_local();
+            q.retain(|t| (now - t.created_at).num_seconds() <= ttl_secs);
+        }
+        if max_len > 0 {
+            while q.len() > max_len {
+                q.pop_front();
+            }
+        }
+    }
     pub fn new(
         config: SyncConfig,
         node_manager: Arc<NodeManager>,
         sync_manager: Arc<SyncManager>,
         storage: Arc<crate::storage::StorageManager>,
     ) -> Arc<Self> {
+        // 确定补偿队列持久化路径：<root>/.sync/fail_queue.json
+        let persist_dir = storage.root_dir().join(".sync");
+        let persist_path = persist_dir.join("fail_queue.json");
+
         let this = Arc::new(Self {
-            config,
+            config: Arc::new(RwLock::new(config)),
             node_manager,
             sync_manager,
             storage,
             stats: Arc::new(RwLock::new(SyncStats::default())),
+            fail_queue: Arc::new(RwLock::new(VecDeque::new())),
+            fail_queue_path: persist_path,
         });
+
+        // 尝试加载持久化队列
+        let loader = this.clone();
+        tokio::spawn(async move { loader.load_fail_queue().await });
+
+        // 启动失败补偿后台任务
+        let comp_clone = this.clone();
+        tokio::spawn(async move { comp_clone.start_compensation_worker().await });
 
         // 订阅本地变更事件，触发快速 push
         let this_clone = this.clone();
@@ -380,6 +461,184 @@ impl NodeSyncCoordinator {
         this
     }
 
+    /// 入队失败补偿任务
+    async fn enqueue_compensation(
+        &self,
+        target_node_id: &str,
+        file_id: &str,
+        attempt: u32,
+        last_error: Option<String>,
+    ) {
+        let next_secs = Self::backoff_secs(attempt);
+        let when = Local::now().naive_local() + chrono::TimeDelta::seconds(next_secs as i64);
+        let err_dbg = last_error.clone();
+        let task = CompTask {
+            id: scru128::new_string(),
+            target_node_id: target_node_id.to_string(),
+            file_id: file_id.to_string(),
+            attempt,
+            next_at: when,
+            created_at: Local::now().naive_local(),
+            last_error,
+        };
+        {
+            let mut q = self.fail_queue.write().await;
+            q.push_back(task);
+            let cfg = self.config.read().await.clone();
+            self.prune_expired_and_trim(&mut q, cfg.fail_task_ttl_secs as i64, cfg.fail_queue_max);
+        }
+        if let Err(e) = self.persist_fail_queue().await {
+            warn!("补偿队列持久化失败: {}", e);
+        }
+        // 指标：更新队列长度
+        let q_len = self.fail_queue.read().await.len() as i64;
+        crate::metrics::set_sync_fail_queue_length(q_len);
+        warn!(
+            "补偿入队: file_id={}, node={}, attempt={}, next_in={}s, err={:?}",
+            file_id, target_node_id, attempt, next_secs, err_dbg
+        );
+    }
+
+    fn backoff_secs(attempt: u32) -> u64 {
+        // 指数退避上限 60s，基础 2s，带抖动（0.8-1.2）
+        let base = 2u64.saturating_mul(1u64 << attempt.min(5));
+        let capped = base.min(60);
+        let mut rng = rand::thread_rng();
+        let jitter: f64 = rng.gen_range(0.8..=1.2);
+        ((capped as f64 * jitter).round() as u64).max(1)
+    }
+
+    /// 后台失败补偿 worker
+    async fn start_compensation_worker(self: Arc<Self>) {
+        let mut tick = interval(Duration::from_secs(1));
+        loop {
+            tick.tick().await;
+
+            let now = Local::now().naive_local();
+            let maybe_task = {
+                let mut q = self.fail_queue.write().await;
+                if let Some(front) = q.front() {
+                    if front.next_at <= now {
+                        q.pop_front()
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            };
+
+            let Some(task) = maybe_task else { continue };
+
+            // 执行单文件补偿同步
+            match self
+                .sync_to_node(&task.target_node_id, vec![task.file_id.clone()])
+                .await
+            {
+                Ok(n) if n > 0 => {
+                    info!(
+                        "补偿成功: file_id={}, node={}, attempt={}",
+                        task.file_id, task.target_node_id, task.attempt
+                    );
+                    if let Err(e) = self.persist_fail_queue().await {
+                        warn!("补偿后持久化失败: {}", e);
+                    }
+                }
+                Ok(_) => {
+                    let next_attempt = task.attempt.saturating_add(1);
+                    let max_retry = { self.config.read().await.max_retries };
+                    if next_attempt <= (max_retry * 3).max(3) {
+                        self.enqueue_compensation(
+                            &task.target_node_id,
+                            &task.file_id,
+                            next_attempt,
+                            Some("no_files_synced".to_string()),
+                        )
+                        .await;
+                        crate::metrics::record_sync_retry("transfer");
+                    } else {
+                        error!(
+                            "补偿放弃: file_id={}, node={}, final_attempt={}",
+                            task.file_id, task.target_node_id, task.attempt
+                        );
+                        if let Err(e) = self.persist_fail_queue().await {
+                            warn!("放弃后持久化失败: {}", e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    let next_attempt = task.attempt.saturating_add(1);
+                    let max_retry = { self.config.read().await.max_retries };
+                    if next_attempt <= (max_retry * 3).max(3) {
+                        self.enqueue_compensation(
+                            &task.target_node_id,
+                            &task.file_id,
+                            next_attempt,
+                            Some(e.to_string()),
+                        )
+                        .await;
+                        crate::metrics::record_sync_retry("transfer");
+                    } else {
+                        error!(
+                            "补偿放弃: file_id={}, node={}, final_attempt={}",
+                            task.file_id, task.target_node_id, task.attempt
+                        );
+                        if let Err(e) = self.persist_fail_queue().await {
+                            warn!("放弃后持久化失败: {}", e);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// 将失败补偿队列持久化到磁盘
+    async fn persist_fail_queue(&self) -> Result<()> {
+        use tokio::fs;
+        if let Some(parent) = self.fail_queue_path.parent() {
+            let _ = fs::create_dir_all(parent).await;
+        }
+        let q = self.fail_queue.read().await;
+        let data = serde_json::to_vec_pretty(&*q)
+            .map_err(|e| NasError::Other(format!("序列化补偿队列失败: {}", e)))?;
+        fs::write(&self.fail_queue_path, data)
+            .await
+            .map_err(|e| NasError::Other(format!("写入补偿队列失败: {}", e)))?;
+        crate::metrics::set_sync_fail_queue_length(q.len() as i64);
+        Ok(())
+    }
+
+    /// 启动时尝试加载失败补偿队列
+    async fn load_fail_queue(&self) {
+        use tokio::fs;
+        match fs::read(&self.fail_queue_path).await {
+            Ok(bytes) => match serde_json::from_slice::<VecDeque<CompTask>>(&bytes) {
+                Ok(mut items) => {
+                    let mut q = self.fail_queue.write().await;
+                    while let Some(it) = items.pop_front() {
+                        q.push_back(it);
+                    }
+                    let cfg = self.config.read().await.clone();
+                    self.prune_expired_and_trim(
+                        &mut q,
+                        cfg.fail_task_ttl_secs as i64,
+                        cfg.fail_queue_max,
+                    );
+                    crate::metrics::set_sync_fail_queue_length(q.len() as i64);
+                    info!(
+                        "已加载补偿队列: {} 项 -> {:?}",
+                        q.len(),
+                        self.fail_queue_path
+                    );
+                }
+                Err(e) => warn!("补偿队列解析失败: {}", e),
+            },
+            Err(_) => {
+                // 文件不存在不视为错误
+            }
+        }
+    }
+
     /// 同步文件到指定节点
     pub async fn sync_to_node(&self, node_id: &str, file_ids: Vec<String>) -> Result<usize> {
         use crate::rpc::file_service::{
@@ -400,105 +659,272 @@ impl NodeSyncCoordinator {
         drop(nodes);
 
         // 创建 gRPC 客户端
-        let client = NodeSyncClient::new(node_address.clone(), ClientConfig::default());
+        let cfg_now = self.config.read().await.clone();
+        let client_cfg = ClientConfig {
+            max_retries: cfg_now.max_retries,
+            connect_timeout: cfg_now.grpc_connect_timeout,
+            request_timeout: cfg_now.grpc_request_timeout,
+            max_backoff_secs: 60,
+            retry_budget_secs: 120,
+            ..Default::default()
+        };
+        let client = NodeSyncClient::new(node_address.clone(), client_cfg);
         client.connect().await?;
         debug!(
             "gRPC 客户端已连接: {} -> {}",
             self.node_manager.config.node_id, node_address
         );
 
-        let mut synced = 0;
-        let mut retry_count = 0;
+        use futures_util::stream::{FuturesUnordered, StreamExt};
+        use tokio::sync::Semaphore;
 
-        for file_id in file_ids.iter().take(self.config.max_files_per_sync) {
-            // 获取文件的同步状态
-            if let Some(file_sync) = self.sync_manager.get_sync_state(file_id).await {
-                // 先同步状态（VectorClock/LWW），以便对端处理冲突
-                let proto_meta = file_sync.metadata.value.clone().map(|m| ProtoFileMetadata {
-                    id: m.id,
-                    name: m.name,
-                    path: m.path,
-                    size: m.size,
-                    hash: m.hash,
-                    created_at: m.created_at.to_string(),
-                    modified_at: m.modified_at.to_string(),
-                });
+        let mut synced = 0usize;
+        let sem = Arc::new(Semaphore::new(cfg_now.max_concurrency.max(1)));
+        let client = Arc::new(client);
+        let mut futs = FuturesUnordered::new();
 
-                let vc_json = serde_json::to_string(&file_sync.vector_clock)
-                    .unwrap_or_else(|_| "{}".to_string());
+        for file_id in file_ids.iter().take(cfg_now.max_files_per_sync) {
+            // 克隆必要的上下文
+            let sem = sem.clone();
+            let client = client.clone();
+            let storage = self.storage.clone();
+            let sync_manager = self.sync_manager.clone();
+            let node_address = node_address.clone();
+            let node_id = node_id.to_string();
+            let cfg_now = cfg_now.clone();
+            let file_id = file_id.clone();
 
-                let state = ProtoFileSyncState {
-                    file_id: file_id.clone(),
-                    metadata: proto_meta,
-                    deleted: file_sync.deleted.value.unwrap_or(false),
-                    vector_clock: vc_json,
-                    timestamp: chrono::Local::now().timestamp_millis(),
-                };
+            futs.push(tokio::spawn(async move {
+                let _permit = sem.acquire_owned().await.unwrap();
+                // 获取文件的同步状态
+                if let Some(file_sync) = sync_manager.get_sync_state(&file_id).await {
+                    // 先同步状态（VectorClock/LWW），以便对端处理冲突
+                    let proto_meta = file_sync.metadata.value.clone().map(|m| ProtoFileMetadata {
+                        id: m.id,
+                        name: m.name,
+                        path: m.path,
+                        size: m.size,
+                        hash: m.hash,
+                        created_at: m.created_at.to_string(),
+                        modified_at: m.modified_at.to_string(),
+                    });
 
-                // 忽略返回的冲突列表，由服务端记录日志与审计
-                let _ = client
-                    .sync_file_states(self.sync_manager.node_id(), vec![state])
-                    .await;
+                    let vc_json = serde_json::to_string(&file_sync.vector_clock)
+                        .unwrap_or_else(|_| "{}".to_string());
 
-                // 读取文件内容：优先按路径（WebDAV/S3场景），否则按ID
-                let content_res = if let Some(meta) = file_sync.metadata.value.as_ref() {
-                    let full_path = self.storage.get_full_path(&meta.path);
-                    debug!(
-                        "读取文件内容(按路径): file_id={}, path={}, addr={}",
-                        file_id, meta.path, node_address
+                    let state = ProtoFileSyncState {
+                        file_id: file_id.clone(),
+                        metadata: proto_meta,
+                        deleted: file_sync.deleted.value.unwrap_or(false),
+                        vector_clock: vc_json,
+                        timestamp: chrono::Local::now().timestamp_millis(),
+                    };
+
+                    // 状态同步阶段埋点
+                    let span_state = tracing::info_span!(
+                        "state_sync",
+                        file_id = %file_id,
+                        target = %node_address
                     );
-                    fs::read(full_path)
-                        .await
-                        .map_err(|e| NasError::Other(e.to_string()))
-                } else {
-                    debug!(
-                        "读取文件内容(按ID): file_id={}, addr={}",
-                        file_id, node_address
-                    );
-                    self.storage.read_file(file_id).await
-                };
+                    let _enter_s = span_state.enter();
+                    // 忽略返回的冲突列表，由服务端记录日志与审计
+                    let _ = client.sync_file_states(&node_id, vec![state]).await;
 
-                match content_res {
-                    Ok(content) => {
-                        let file_size = content.len();
-
-                        // 统一采用流式传输，避免与服务端 TransferFile（拉取语义）不一致
-                        const CHUNK_SIZE: usize = 1024 * 1024; // 1MB
-                        let transfer_result = client
-                            .stream_file_content(file_id, content, CHUNK_SIZE)
+                    // 读取文件内容：优先按路径（WebDAV/S3场景），否则按ID
+                    let content_res = if let Some(meta) = file_sync.metadata.value.as_ref() {
+                        let full_path = storage.get_full_path(&meta.path);
+                        debug!(
+                            "读取文件内容(按路径): file_id={}, path={}, addr={}",
+                            file_id, meta.path, node_address
+                        );
+                        fs::read(full_path)
                             .await
-                            .map(|_| true);
+                            .map_err(|e| NasError::Other(e.to_string()))
+                    } else {
+                        debug!(
+                            "读取文件内容(按ID): file_id={}, addr={}",
+                            file_id, node_address
+                        );
+                        storage.read_file(&file_id).await
+                    };
 
-                        match transfer_result {
-                            Ok(_) => {
-                                synced += 1;
-                                retry_count = 0; // 重置重试计数
-                                info!(
-                                    "文件同步成功: {}, 大小: {} 字节 -> {}",
-                                    file_id, file_size, node_address
-                                );
+                    match content_res {
+                        Ok(content) => {
+                            let file_size = content.len();
+
+                            // 统一采用流式传输，避免与服务端 TransferFile（拉取语义）不一致
+                            const CHUNK_SIZE: usize = 1024 * 1024; // 1MB
+                            let span = tracing::info_span!(
+                                "sync_transfer",
+                                file_id = %file_id,
+                                target = %node_address
+                            );
+                            let _enter = span.enter();
+                            // 故障注入：可选的延迟
+                            if cfg_now.fault_delay_ms > 0 {
+                                tokio::time::sleep(Duration::from_millis(cfg_now.fault_delay_ms))
+                                    .await;
                             }
-                            Err(e) => {
-                                error!(
-                                    "文件同步失败: {} -> {}, 错误: {}",
-                                    file_id, node_address, e
-                                );
-                                retry_count += 1;
+                            let t_transfer = std::time::Instant::now();
+                            // 故障注入：按概率制造传输失败
+                            let inject_transfer =
+                                rand::random::<f64>() < cfg_now.fault_transfer_error_rate;
+                            let transfer_result = if inject_transfer {
+                                Err(NasError::Other("fault_injected_transfer".into()))
+                            } else {
+                                client
+                                    .stream_file_content(&file_id, content, CHUNK_SIZE)
+                                    .await
+                                    .map(|_| true)
+                            };
 
-                                if retry_count >= self.config.max_retries {
-                                    warn!("达到最大重试次数，停止同步");
-                                    break;
+                            match transfer_result {
+                                Ok(_) => {
+                                    crate::metrics::record_sync_stage(
+                                        "transfer",
+                                        "success",
+                                        t_transfer.elapsed().as_secs_f64(),
+                                    );
+                                    // 端到端一致性校验（SHA-256）
+                                    let span_v = tracing::info_span!(
+                                        "sync_verify",
+                                        file_id = %file_id,
+                                        target = %node_address
+                                    );
+                                    let _enter_v = span_v.enter();
+                                    let t_verify = std::time::Instant::now();
+                                    let mut verified = true;
+                                    if let Some(meta) = file_sync.metadata.value.as_ref()
+                                        && !meta.hash.is_empty()
+                                    {
+                                        match client.verify_remote_hash(&file_id, &meta.hash).await
+                                        {
+                                            Ok(ok) => {
+                                                verified = ok;
+                                                if !ok {
+                                                    error!(
+                                                        "端到端校验失败: {} -> {}，期望哈希不一致",
+                                                        file_id, node_address
+                                                    );
+                                                    crate::metrics::record_sync_operation(
+                                                        "full", "error", 0,
+                                                    );
+                                                    crate::metrics::record_sync_stage(
+                                                        "verify",
+                                                        "error",
+                                                        t_verify.elapsed().as_secs_f64(),
+                                                    );
+                                                }
+                                            }
+                                            Err(e) => {
+                                                verified = false;
+                                                error!(
+                                                    "端到端校验错误: {} -> {}, 错误: {}",
+                                                    file_id, node_address, e
+                                                );
+                                                crate::metrics::record_sync_operation(
+                                                    "full", "error", 0,
+                                                );
+                                                crate::metrics::record_sync_stage(
+                                                    "verify",
+                                                    "error",
+                                                    t_verify.elapsed().as_secs_f64(),
+                                                );
+                                                crate::metrics::record_sync_retry("verify");
+                                            }
+                                        }
+                                    }
+                                    // 故障注入：按概率制造校验失败
+                                    if verified
+                                        && (rand::random::<f64>() < cfg_now.fault_verify_error_rate)
+                                    {
+                                        verified = false;
+                                        warn!("故障注入：校验失败 file_id={}", file_id);
+                                        crate::metrics::record_sync_retry("verify");
+                                    }
+
+                                    if verified {
+                                        // 成功
+                                        info!(
+                                            "文件同步成功: {}, 大小: {} 字节 -> {}",
+                                            file_id, file_size, node_address
+                                        );
+                                        crate::metrics::record_sync_operation(
+                                            "full",
+                                            "success",
+                                            file_size as u64,
+                                        );
+                                        crate::metrics::record_sync_stage(
+                                            "verify",
+                                            "success",
+                                            t_verify.elapsed().as_secs_f64(),
+                                        );
+                                        return Ok::<(String, bool, Option<String>), ()>((
+                                            file_id, true, None,
+                                        ));
+                                    } else {
+                                        // 校验不通过，入队补偿重试
+                                        // 无法直接访问 self，这里仅上报重试，由调用方负责补偿入队
+                                        crate::metrics::record_sync_retry("verify");
+                                        // 维持原有短暂等待与重试退出逻辑，避免阻塞批量
+                                        tokio::time::sleep(Duration::from_secs(2)).await;
+                                    }
                                 }
+                                Err(e) => {
+                                    error!(
+                                        "文件同步失败: {} -> {}, 错误: {}",
+                                        file_id, node_address, e
+                                    );
+                                    crate::metrics::record_sync_retry("transfer");
 
-                                // 等待后重试
-                                tokio::time::sleep(Duration::from_secs(2)).await;
+                                    // 等待后重试
+                                    tokio::time::sleep(Duration::from_secs(2)).await;
+                                    crate::metrics::record_sync_operation("full", "error", 0);
+                                    crate::metrics::record_sync_stage(
+                                        "transfer",
+                                        "error",
+                                        t_transfer.elapsed().as_secs_f64(),
+                                    );
+                                    return Ok::<(String, bool, Option<String>), ()>((
+                                        file_id,
+                                        false,
+                                        Some(e.to_string()),
+                                    ));
+                                }
                             }
                         }
+                        Err(e) => {
+                            warn!("读取文件失败: {}, 错误: {}", file_id, e);
+                            return Ok::<(String, bool, Option<String>), ()>((
+                                file_id,
+                                false,
+                                Some(e.to_string()),
+                            ));
+                        }
                     }
-                    Err(e) => {
-                        warn!("读取文件失败: {}, 错误: {}", file_id, e);
-                    }
+                    // 失败或未校验通过（校验失败）
+                    Ok::<(String, bool, Option<String>), ()>((
+                        file_id,
+                        false,
+                        Some("verify_failed".into()),
+                    ))
+                } else {
+                    Ok::<(String, bool, Option<String>), ()>((
+                        file_id,
+                        false,
+                        Some("no_state".into()),
+                    ))
                 }
+            }));
+        }
+
+        // 收集结果并处理补偿入队
+        while let Some(res) = futs.next().await {
+            if let Ok(Ok((_fid, true, _))) = res {
+                synced += 1;
+            } else if let Ok(Ok((fid, false, err))) = res {
+                // 失败则入队补偿
+                self.enqueue_compensation(node_id, &fid, 1, err).await;
             }
         }
 
@@ -513,7 +939,7 @@ impl NodeSyncCoordinator {
         info!(
             "同步任务完成: 目标={}, 文件数={}, 成功数={}",
             node_address,
-            file_ids.len().min(self.config.max_files_per_sync),
+            file_ids.len().min(cfg_now.max_files_per_sync),
             synced
         );
         Ok(synced)
@@ -539,7 +965,16 @@ impl NodeSyncCoordinator {
         drop(nodes);
 
         // 创建 gRPC 客户端
-        let client = NodeSyncClient::new(node_address.clone(), ClientConfig::default());
+        let cfg_now = self.config.read().await.clone();
+        let client_cfg = ClientConfig {
+            max_retries: cfg_now.max_retries,
+            connect_timeout: cfg_now.grpc_connect_timeout,
+            request_timeout: cfg_now.grpc_request_timeout,
+            max_backoff_secs: 60,
+            retry_budget_secs: 120,
+            ..Default::default()
+        };
+        let client = NodeSyncClient::new(node_address.clone(), client_cfg);
         client.connect().await?;
 
         // 通过 gRPC 请求文件同步
@@ -555,11 +990,11 @@ impl NodeSyncCoordinator {
 
     /// 启动自动同步任务
     pub async fn start_auto_sync(self: Arc<Self>) {
-        if !self.config.auto_sync {
+        if !self.config.read().await.auto_sync {
             return;
         }
 
-        let mut interval = interval(Duration::from_secs(self.config.sync_interval));
+        let mut interval = interval(Duration::from_secs(self.config.read().await.sync_interval));
 
         tokio::spawn(async move {
             loop {
@@ -607,6 +1042,12 @@ impl NodeSyncCoordinator {
     /// 获取同步统计
     pub async fn get_stats(&self) -> SyncStats {
         self.stats.read().await.clone()
+    }
+}
+
+impl CompTask {
+    fn default_created_at() -> NaiveDateTime {
+        Local::now().naive_local()
     }
 }
 
@@ -720,7 +1161,15 @@ mod tests {
             auto_sync: false,
             sync_interval: 120,
             max_files_per_sync: 50,
+            max_concurrency: 8,
             max_retries: 5,
+            fail_queue_max: 1000,
+            fail_task_ttl_secs: 24 * 3600,
+            grpc_connect_timeout: 10,
+            grpc_request_timeout: 30,
+            fault_transfer_error_rate: 0.0,
+            fault_verify_error_rate: 0.0,
+            fault_delay_ms: 0,
         };
 
         assert!(!config.auto_sync);
@@ -744,5 +1193,36 @@ mod tests {
         assert_eq!(stats.pending_files, 20);
         assert!(stats.last_sync_time.is_some());
         assert_eq!(stats.error_count, 5);
+    }
+
+    #[test]
+    fn test_backoff_secs_bounds_and_cap() {
+        // 所有值应在 [1, 72] 内（60*1.2 抖动上限），不保证严格单调
+        for i in 0..10 {
+            let v = NodeSyncCoordinator::backoff_secs(i);
+            assert!((1..=72).contains(&v), "backoff {} out of range: {}", i, v);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_enqueue_compensation() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Arc::new(crate::storage::StorageManager::new(
+            dir.path().to_path_buf(),
+            4 * 1024 * 1024,
+        ));
+        storage.init().await.unwrap();
+        let syncm = SyncManager::new("node-test".into(), storage.clone(), None);
+        let nm = NodeManager::new(NodeDiscoveryConfig::default(), syncm.clone());
+        let coord = NodeSyncCoordinator::new(SyncConfig::default(), nm, syncm, storage);
+        coord
+            .enqueue_compensation("node-x", "file-1", 0, Some("unit_test".into()))
+            .await;
+        let q = coord.fail_queue.read().await;
+        assert_eq!(q.len(), 1);
+        let t = q.front().unwrap();
+        assert_eq!(t.target_node_id, "node-x");
+        assert_eq!(t.file_id, "file-1");
+        assert_eq!(t.last_error.as_deref(), Some("unit_test"));
     }
 }

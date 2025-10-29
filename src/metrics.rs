@@ -30,6 +30,8 @@ lazy_static! {
     )
     .unwrap();
 
+    // 分位数可在 Prometheus 端通过 histogram_quantile 计算
+
     /// HTTP 当前活跃连接数
     pub static ref HTTP_REQUESTS_IN_FLIGHT: IntGauge = register_int_gauge!(
         "http_requests_in_flight",
@@ -119,6 +121,30 @@ lazy_static! {
     )
     .unwrap();
 
+    /// 同步阶段时延（秒），按阶段与结果区分
+    pub static ref SYNC_STAGE_DURATION_SECONDS: HistogramVec = register_histogram_vec!(
+        "sync_stage_duration_seconds",
+        "Sync stage duration in seconds",
+        &["stage", "result"],
+        vec![0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0]
+    )
+    .unwrap();
+
+    // 分位数可在 Prometheus 端通过 histogram_quantile 计算
+
+    /// 同步重试次数
+    pub static ref SYNC_RETRIES_TOTAL: IntCounterVec = register_int_counter_vec!(
+        "sync_retries_total",
+        "Total number of sync retries",
+        &["stage"] // transfer, verify, other
+    ).unwrap();
+
+    /// 失败补偿队列长度
+    pub static ref SYNC_FAIL_QUEUE_LENGTH: IntGauge = register_int_gauge!(
+        "sync_fail_queue_length",
+        "Current length of sync failure compensation queue"
+    ).unwrap();
+
     // ============ 缓存指标 ============
     /// 缓存命中率
     pub static ref CACHE_HIT_RATE: Gauge = register_gauge!(
@@ -167,6 +193,7 @@ pub fn record_http_request(method: &str, path: &str, status: u16, duration: f64)
     HTTP_REQUEST_DURATION_SECONDS
         .with_label_values(&[method, path])
         .observe(duration);
+    // 分位数通过 Prometheus 端计算
 }
 
 /// 记录文件操作
@@ -213,11 +240,29 @@ pub fn record_sync_conflict(resolution: &str) {
     SYNC_CONFLICTS_TOTAL.with_label_values(&[resolution]).inc();
 }
 
+/// 记录同步阶段时延
+pub fn record_sync_stage(stage: &str, result: &str, seconds: f64) {
+    SYNC_STAGE_DURATION_SECONDS
+        .with_label_values(&[stage, result])
+        .observe(seconds);
+    // 分位数通过 Prometheus 端计算
+}
+
 /// 更新缓存统计
 pub fn update_cache_stats(hit_rate: f64, size_bytes: i64, entries: i64) {
     CACHE_HIT_RATE.set(hit_rate);
     CACHE_SIZE_BYTES.set(size_bytes);
     CACHE_ENTRIES.set(entries);
+}
+
+/// 记录一次同步重试
+pub fn record_sync_retry(stage: &str) {
+    SYNC_RETRIES_TOTAL.with_label_values(&[stage]).inc();
+}
+
+/// 更新失败补偿队列长度
+pub fn set_sync_fail_queue_length(len: i64) {
+    SYNC_FAIL_QUEUE_LENGTH.set(len);
 }
 
 #[cfg(test)]

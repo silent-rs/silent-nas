@@ -454,6 +454,7 @@ fn convert_from_proto_node(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     #[test]
     fn test_convert_node_info() {
@@ -471,5 +472,143 @@ mod tests {
         let converted_back = convert_from_proto_node(&proto_node).unwrap();
         assert_eq!(converted_back.node_id, internal_node.node_id);
         assert_eq!(converted_back.address, internal_node.address);
+    }
+
+    async fn build_service() -> NodeSyncServiceImpl {
+        // 构建最小依赖：Storage、SyncManager、NodeManager、Coordinator
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Arc::new(crate::storage::StorageManager::new(
+            dir.path().to_path_buf(),
+            4 * 1024 * 1024,
+        ));
+        storage.init().await.unwrap();
+
+        let sync_manager =
+            crate::sync::crdt::SyncManager::new("node-local".into(), storage.clone(), None);
+
+        let node_manager = crate::sync::node::manager::NodeManager::new(
+            crate::sync::node::manager::NodeDiscoveryConfig::default(),
+            sync_manager.clone(),
+        );
+
+        let coordinator = crate::sync::node::manager::NodeSyncCoordinator::new(
+            crate::sync::node::manager::SyncConfig::default(),
+            node_manager.clone(),
+            sync_manager.clone(),
+            storage.clone(),
+        );
+
+        NodeSyncServiceImpl::new(node_manager, coordinator, sync_manager, storage)
+    }
+
+    #[tokio::test]
+    async fn test_sync_file_state_apply_new() {
+        let service = build_service().await;
+
+        // 构造一个远程状态（本地不存在该文件）
+        let file_id = "file-new".to_string();
+        let now = chrono::Local::now().naive_local();
+        let state = FileSyncState {
+            file_id: file_id.clone(),
+            metadata: Some(FileMetadata {
+                id: file_id.clone(),
+                name: "a.txt".into(),
+                path: "/dir/a.txt".into(),
+                size: 5,
+                hash: "hash".into(),
+                created_at: now.to_string(),
+                modified_at: now.to_string(),
+            }),
+            deleted: false,
+            // 空向量时钟（结构需包含 clocks 字段）
+            vector_clock: serde_json::json!({"clocks":{}}).to_string(),
+            timestamp: chrono::Local::now().timestamp_millis(),
+        };
+
+        let req = SyncFileStateRequest {
+            source_node_id: "remote-node".into(),
+            states: vec![state],
+        };
+        let resp = service
+            .sync_file_state(tonic::Request::new(req))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(resp.success);
+        assert!(resp.conflicts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_sync_file_state_conflict_detected() {
+        let service = build_service().await;
+        let file_id = "file-conflict".to_string();
+
+        // 先写入本地状态，产生本地向量时钟（local 节点）
+        let meta_local = crate::models::FileMetadata {
+            id: file_id.clone(),
+            name: "b.txt".into(),
+            path: "/b.txt".into(),
+            size: 1,
+            hash: "h1".into(),
+            created_at: chrono::Local::now().naive_local(),
+            modified_at: chrono::Local::now().naive_local(),
+        };
+        service
+            .sync_manager
+            .handle_local_change(
+                crate::models::EventType::Created,
+                file_id.clone(),
+                Some(meta_local),
+            )
+            .await
+            .unwrap();
+
+        // 构造一个仅包含不同节点键的向量时钟，形成并发（concurrent）
+        let remote_vc = serde_json::json!({ "clocks": { "remote": 1 } }).to_string();
+        let newer =
+            (chrono::Local::now().naive_local() + chrono::TimeDelta::seconds(1)).to_string();
+        let state = FileSyncState {
+            file_id: file_id.clone(),
+            metadata: Some(FileMetadata {
+                id: file_id.clone(),
+                name: "b.txt".into(),
+                path: "/b.txt".into(),
+                size: 2,
+                hash: "h2".into(),
+                created_at: newer.clone(),
+                modified_at: newer,
+            }),
+            deleted: false,
+            vector_clock: remote_vc,
+            timestamp: chrono::Local::now().timestamp_millis(),
+        };
+
+        let req = SyncFileStateRequest {
+            source_node_id: "remote-node".into(),
+            states: vec![state],
+        };
+        let resp = service
+            .sync_file_state(tonic::Request::new(req))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(resp.success);
+        assert_eq!(resp.conflicts.len(), 1);
+        assert_eq!(resp.conflicts[0], file_id);
+    }
+
+    #[tokio::test]
+    async fn test_request_file_sync_node_not_found() {
+        let service = build_service().await;
+        let req = RequestFileSyncRequest {
+            node_id: "non-exist".into(),
+            file_ids: vec!["x".into()],
+        };
+        let err = service
+            .request_file_sync(tonic::Request::new(req))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(err.code(), tonic::Code::Internal);
     }
 }

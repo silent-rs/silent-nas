@@ -125,7 +125,7 @@ enable_auth = false
 
 # 节点发现/心跳（gRPC 节点同步）
 [node]
-# 是否启用节点功能（关闭则不进行心跳、发现与跨节点同步）
+# 是否启用节点功能（关闭=单节点部署，不进行心跳/发现/跨节点同步）
 enable = true
 # 种子节点地址列表（host:grpc_port），用于首次加入集群进行注册与发现
 # 例如: ["192.168.1.10:50051", "nas-node-2:50051"]
@@ -137,6 +137,7 @@ node_timeout = 30
 
 # 跨节点同步行为
 [sync]
+# 单节点部署可省略此段；多节点/NATS 场景按需配置
 # 是否启用自动同步任务
 auto_sync = true
 # 自动同步间隔（秒）
@@ -145,6 +146,28 @@ sync_interval = 60
 max_files_per_sync = 100
 # 失败重试次数
 max_retries = 3
+# 拉取连接超时（秒）
+http_connect_timeout = 5
+# 拉取请求超时（秒）
+http_request_timeout = 15
+# 拉取最大重试次数
+fetch_max_retries = 3
+# 拉取退避基数（秒）
+fetch_base_backoff = 1
+# 拉取退避上限（秒）
+fetch_max_backoff = 8
+# 失败补偿队列容量上限
+fail_queue_max = 1000
+# 失败任务TTL（秒），超过即丢弃
+fail_task_ttl_secs = 86400
+# gRPC 连接/请求超时（秒）
+grpc_connect_timeout = 10
+grpc_request_timeout = 30
+# 故障注入（开发/测试用）
+# 0.0-1.0 的概率注入传输/校验失败；或附加延迟（毫秒）
+fault_transfer_error_rate = 0.0
+fault_verify_error_rate = 0.0
+fault_delay_ms = 0
 
 # ==================== 部署场景示例 ====================
 

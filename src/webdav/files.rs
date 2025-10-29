@@ -32,21 +32,43 @@ impl WebDavHandler {
     pub(super) async fn handle_propfind(
         &self,
         path: &str,
-        req: &Request,
+        req: &mut Request,
     ) -> silent::Result<Response> {
         let path = Self::decode_path(path)?;
-        let depth = req
+        let depth_owned = req
             .headers()
             .get("Depth")
             .and_then(|v| v.to_str().ok())
-            .unwrap_or("0");
+            .unwrap_or("0")
+            .to_string();
 
         tracing::debug!(
             "PROPFIND path='{}' depth='{}' user-agent={:?}",
             path,
-            depth,
+            depth_owned.as_str(),
             req.headers().get("User-Agent")
         );
+
+        // 解析请求体中的 <D:prop> 选择与 xmlns 前缀映射
+        let (props_filter, ns_echo_map) = {
+            let body = req.take_body();
+            let xml_bytes = match body {
+                ReqBody::Incoming(b) => b
+                    .collect()
+                    .await
+                    .map_err(|e| {
+                        SilentError::business_error(
+                            StatusCode::BAD_REQUEST,
+                            format!("读取请求体失败: {}", e),
+                        )
+                    })?
+                    .to_bytes()
+                    .to_vec(),
+                ReqBody::Once(bytes) => bytes.to_vec(),
+                ReqBody::Empty => Vec::new(),
+            };
+            WebDavHandler::parse_prop_filter_and_nsmap(&xml_bytes)
+        };
 
         let storage_path = self.storage.get_full_path(&path);
         let metadata = fs::metadata(&storage_path).await.map_err(|e| {
@@ -86,9 +108,17 @@ impl WebDavHandler {
         xml.push_str(XML_NS_DAV);
         if metadata.is_dir() {
             let full_href = self.build_full_href(&path);
-            Self::add_prop_response(&mut xml, &full_href, &storage_path, true).await;
-            if depth != "0" {
-                if depth.eq_ignore_ascii_case("infinity") {
+            self.add_prop_response_with_filter(
+                &mut xml,
+                &full_href,
+                &storage_path,
+                true,
+                props_filter.as_ref(),
+                Some(&ns_echo_map),
+            )
+            .await;
+            if depth_owned.as_str() != "0" {
+                if depth_owned.as_str().eq_ignore_ascii_case("infinity") {
                     self.walk_propfind_recursive(&storage_path, &path, &mut xml)
                         .await?;
                 } else {
@@ -112,18 +142,39 @@ impl WebDavHandler {
                         };
                         let full_href = self.build_full_href(&relative_path);
                         let is_dir = entry_path.is_dir();
-                        Self::add_prop_response(&mut xml, &full_href, &entry_path, is_dir).await;
+                        self.add_prop_response_with_filter(
+                            &mut xml,
+                            &full_href,
+                            &entry_path,
+                            is_dir,
+                            props_filter.as_ref(),
+                            Some(&ns_echo_map),
+                        )
+                        .await;
                     }
                 }
             }
         } else {
             let full_href = self.build_full_href(&path);
-            Self::add_prop_response(&mut xml, &full_href, &storage_path, false).await;
+            self.add_prop_response_with_filter(
+                &mut xml,
+                &full_href,
+                &storage_path,
+                false,
+                props_filter.as_ref(),
+                Some(&ns_echo_map),
+            )
+            .await;
         }
         xml.push_str(XML_MULTISTATUS_END);
 
         // 添加调试日志，查看实际返回的 XML 内容
-        tracing::debug!("PROPFIND {} Depth:{} XML: {}", path, depth, xml);
+        tracing::debug!(
+            "PROPFIND {} Depth:{} XML: {}",
+            path,
+            depth_owned.as_str(),
+            xml
+        );
 
         let mut resp = Response::text(&xml);
         resp.set_status(StatusCode::MULTI_STATUS);
@@ -143,7 +194,26 @@ impl WebDavHandler {
         Ok(resp)
     }
 
-    pub(super) async fn add_prop_response(xml: &mut String, href: &str, path: &Path, is_dir: bool) {
+    pub(super) async fn add_prop_response(
+        &self,
+        xml: &mut String,
+        href: &str,
+        path: &Path,
+        is_dir: bool,
+    ) {
+        self.add_prop_response_with_filter(xml, href, path, is_dir, None, None)
+            .await;
+    }
+
+    pub(super) async fn add_prop_response_with_filter(
+        &self,
+        xml: &mut String,
+        href: &str,
+        path: &Path,
+        is_dir: bool,
+        props_filter: Option<&std::collections::HashSet<String>>,
+        ns_echo: Option<&std::collections::HashMap<String, String>>, // uri -> preferred prefix
+    ) {
         let metadata = match fs::metadata(path).await {
             Ok(m) => m,
             Err(_) => return,
@@ -160,33 +230,47 @@ impl WebDavHandler {
         xml.push_str("<D:prop>");
 
         // displayname - 必须在最前面，macOS Finder 严格要求
-        let displayname = if href_with_slash == "/" {
-            "/".to_string()
-        } else {
-            let s = href_with_slash.trim_end_matches('/');
-            s.rsplit('/').next().unwrap_or(s).to_string()
-        };
-        xml.push_str(&format!("<D:displayname>{}</D:displayname>", displayname));
+        if props_filter.is_none() || props_filter.unwrap().contains("displayname") {
+            let displayname = if href_with_slash == "/" {
+                "/".to_string()
+            } else {
+                let s = href_with_slash.trim_end_matches('/');
+                s.rsplit('/').next().unwrap_or(s).to_string()
+            };
+            xml.push_str(&format!("<D:displayname>{}</D:displayname>", displayname));
+        }
 
         // resourcetype - 必须明确声明集合类型，macOS Finder 严格检查
         if is_dir {
-            xml.push_str("<D:resourcetype><D:collection/></D:resourcetype>");
+            if props_filter.is_none() || props_filter.unwrap().contains("resourcetype") {
+                xml.push_str("<D:resourcetype><D:collection/></D:resourcetype>");
+            }
             // 兼容 Finder：目录不返回 getcontentlength
             // 为目录生成动态 ETag，基于目录内容
-            if let Some(etag) = Self::calc_dir_etag(path).await {
+            if (props_filter.is_none() || props_filter.unwrap().contains("getetag"))
+                && let Some(etag) = Self::calc_dir_etag(path).await
+            {
                 xml.push_str(&format!("<D:getetag>{}</D:getetag>", etag));
             }
         } else {
-            xml.push_str("<D:resourcetype/>");
-            xml.push_str(&format!(
-                "<D:getcontentlength>{}</D:getcontentlength>",
-                metadata.len()
-            ));
-            if let Some(ext) = path.extension() {
+            if props_filter.is_none() || props_filter.unwrap().contains("resourcetype") {
+                xml.push_str("<D:resourcetype/>");
+            }
+            if props_filter.is_none() || props_filter.unwrap().contains("getcontentlength") {
+                xml.push_str(&format!(
+                    "<D:getcontentlength>{}</D:getcontentlength>",
+                    metadata.len()
+                ));
+            }
+            if (props_filter.is_none() || props_filter.unwrap().contains("getcontenttype"))
+                && let Some(ext) = path.extension()
+            {
                 let mime = mime_guess::from_ext(&ext.to_string_lossy()).first_or_octet_stream();
                 xml.push_str(&format!("<D:getcontenttype>{}</D:getcontenttype>", mime));
             }
-            if let Some(etag) = Self::calc_etag_from_meta(&metadata) {
+            if (props_filter.is_none() || props_filter.unwrap().contains("getetag"))
+                && let Some(etag) = Self::calc_etag_from_meta(&metadata)
+            {
                 xml.push_str(&format!("<D:getetag>{}</D:getetag>", etag));
             }
         }
@@ -204,7 +288,9 @@ impl WebDavHandler {
         } else {
             None
         };
-        if let Some(dt) = creation_dt {
+        if (props_filter.is_none() || props_filter.unwrap().contains("creationdate"))
+            && let Some(dt) = creation_dt
+        {
             xml.push_str(&format!(
                 "<D:creationdate>{}</D:creationdate>",
                 dt.format("%Y-%m-%dT%H:%M:%SZ")
@@ -212,7 +298,8 @@ impl WebDavHandler {
         }
 
         // getlastmodified - 使用文件系统的实际修改时间
-        if let Ok(modified) = metadata.modified()
+        if (props_filter.is_none() || props_filter.unwrap().contains("getlastmodified"))
+            && let Ok(modified) = metadata.modified()
             && let Ok(datetime) = modified.duration_since(std::time::UNIX_EPOCH)
         {
             let timestamp = chrono::DateTime::from_timestamp(datetime.as_secs() as i64, 0);
@@ -223,10 +310,55 @@ impl WebDavHandler {
                 ));
             }
         }
+        // 扩展属性（自定义属性）：仅输出结构化键 ns:{URI}#{local}
+        let key_for_props = if is_dir {
+            href.trim_end_matches('/').to_string()
+        } else {
+            href.to_string()
+        };
+        if let Some(map) = self.props.read().await.get(&key_for_props) {
+            for (k, v) in map {
+                if let Some(rest) = k.strip_prefix("ns:")
+                    && let Some((uri, local)) = rest.split_once('#')
+                {
+                    let val = v.as_str();
+                    let esc = WebDavHandler::xml_escape(val);
+                    // 选择回显前缀：客户端声明的优先；避免使用 D/d
+                    let mut pfx = ns_echo
+                        .and_then(|m| m.get(uri).cloned())
+                        .unwrap_or_else(|| "x".to_string());
+                    if pfx.eq_ignore_ascii_case("d") || pfx.is_empty() {
+                        pfx = "x".to_string();
+                    }
+                    xml.push_str(&format!(
+                        "<{p}:{local} xmlns:{p}=\"{uri}\">{esc}</{p}:{local}>",
+                        p = pfx,
+                        local = local,
+                        uri = uri,
+                        esc = esc
+                    ));
+                }
+            }
+        }
         xml.push_str("</D:prop>");
         xml.push_str("<D:status>HTTP/1.1 200 OK</D:status>");
         xml.push_str("</D:propstat>");
         xml.push_str("</D:response>");
+    }
+
+    pub(super) fn xml_escape(s: &str) -> String {
+        let mut out = String::with_capacity(s.len());
+        for ch in s.chars() {
+            match ch {
+                '&' => out.push_str("&amp;"),
+                '<' => out.push_str("&lt;"),
+                '>' => out.push_str("&gt;"),
+                '"' => out.push_str("&quot;"),
+                '\'' => out.push_str("&apos;"),
+                _ => out.push(ch),
+            }
+        }
+        out
     }
 
     fn calc_etag_from_meta(metadata: &std::fs::Metadata) -> Option<String> {
@@ -302,7 +434,8 @@ impl WebDavHandler {
                 };
                 let full_href = self.build_full_href(&relative_path);
                 let is_dir = entry_path.is_dir();
-                Self::add_prop_response(xml, &full_href, &entry_path, is_dir).await;
+                self.add_prop_response(xml, &full_href, &entry_path, is_dir)
+                    .await;
                 if is_dir {
                     stack.push((entry_path, relative_path));
                 }
@@ -562,6 +695,13 @@ impl WebDavHandler {
             }
         }
 
+        // 记录变更（用于 REPORT sync-collection 差异集）
+        if file_exists {
+            self.append_change("modified", &path);
+        } else {
+            self.append_change("created", &path);
+        }
+
         let mut resp = Response::empty();
         // RFC 4918: 如果资源已存在则返回 204 No Content，新建则返回 201 Created
         resp.set_status(if file_exists {
@@ -634,6 +774,8 @@ impl WebDavHandler {
         if let Some(ref n) = self.notifier {
             let _ = n.notify_deleted(event).await;
         }
+        // 记录删除
+        self.append_change("deleted", &path);
         let mut resp = Response::empty();
         resp.set_status(StatusCode::NO_CONTENT);
         Ok(resp)
@@ -654,6 +796,8 @@ impl WebDavHandler {
                 format!("创建目录失败: {}", e),
             )
         })?;
+        // 记录创建
+        self.append_change("created", &path);
         let mut resp = Response::empty();
         resp.set_status(StatusCode::CREATED);
         Ok(resp)
@@ -688,6 +832,8 @@ impl WebDavHandler {
                     format!("移动失败: {}", e),
                 )
             })?;
+        // 记录为移动 from->to，供 REPORT 增量同步输出
+        self.append_move(&path, &dest_path);
         // 发布事件
         let file_id = scru128::new_string();
         let mut event = FileEvent::new(EventType::Modified, file_id, None);
@@ -752,6 +898,8 @@ impl WebDavHandler {
                     )
                 })?;
         }
+        // 记录创建
+        self.append_change("created", &dest_path);
         let mut resp = Response::empty();
         resp.set_status(StatusCode::CREATED);
         Ok(resp)
@@ -797,5 +945,224 @@ impl WebDavHandler {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    async fn build_handler() -> WebDavHandler {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Arc::new(crate::storage::StorageManager::new(
+            dir.path().to_path_buf(),
+            4 * 1024 * 1024,
+        ));
+        storage.init().await.unwrap();
+        let syncm = crate::sync::crdt::SyncManager::new("node-test".into(), storage.clone(), None);
+        let ver = crate::version::VersionManager::new(
+            storage.clone(),
+            Default::default(),
+            dir.path().to_str().unwrap(),
+        );
+        WebDavHandler::new(
+            storage,
+            None,
+            syncm,
+            "".into(),
+            "http://127.0.0.1:8080".into(),
+            ver,
+        )
+    }
+
+    #[tokio::test]
+    async fn test_calc_etag_from_meta_and_dir_etag() {
+        // 临时目录与文件
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("a.txt");
+        tokio::fs::write(&file_path, b"hello").await.unwrap();
+
+        // 文件 etag
+        let meta = std::fs::metadata(&file_path).unwrap();
+        let etag = WebDavHandler::calc_etag_from_meta(&meta).unwrap();
+        assert!(etag.starts_with('\"') && etag.ends_with('\"'));
+
+        // 目录 etag（非空目录）
+        let detag = WebDavHandler::calc_dir_etag(dir.path()).await.unwrap();
+        assert!(detag.starts_with('\"') && detag.ends_with('\"'));
+    }
+
+    #[tokio::test]
+    async fn test_propfind_depth_infinity_and_head_get() {
+        let handler = build_handler().await;
+
+        // 准备目录与文件
+        let root = handler.storage.root_dir().to_path_buf();
+        let data_root = root.join("data");
+        tokio::fs::create_dir_all(data_root.join("dir/sub"))
+            .await
+            .unwrap();
+        let fpath = handler.storage.get_full_path("/dir/sub/a.txt");
+        tokio::fs::write(&fpath, b"hello").await.unwrap();
+
+        // PROPFIND Depth: infinity
+        let mut req = Request::empty();
+        req.headers_mut()
+            .insert("Depth", http::HeaderValue::from_static("infinity"));
+        let resp = handler.handle_propfind("/dir", &mut req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::MULTI_STATUS);
+        // 仅校验头部存在，XML 体内容不做解析（已覆盖生成路径）
+        assert_eq!(
+            resp.headers()
+                .get(http::header::CONTENT_TYPE)
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            CONTENT_TYPE_XML
+        );
+
+        // HEAD 文件
+        let head = handler
+            .handle_head("/dir/sub/a.txt", &Request::empty())
+            .await
+            .unwrap();
+        assert_eq!(head.status(), StatusCode::OK);
+        assert!(head.headers().get(http::header::CONTENT_LENGTH).is_some());
+
+        // GET If-None-Match 命中返回 304
+        let meta = std::fs::metadata(&fpath).unwrap();
+        let etag = WebDavHandler::calc_etag_from_meta(&meta).unwrap();
+        let mut get_req = Request::empty();
+        get_req
+            .headers_mut()
+            .insert("If-None-Match", http::HeaderValue::from_str(&etag).unwrap());
+        let not_mod = handler
+            .handle_get("/dir/sub/a.txt", &get_req)
+            .await
+            .unwrap();
+        assert_eq!(not_mod.status(), StatusCode::NOT_MODIFIED);
+    }
+
+    #[tokio::test]
+    async fn test_mkcol_move_copy() {
+        let handler = build_handler().await;
+
+        // MKCOL 创建目录
+        let mk = handler.handle_mkcol("/mk/a").await.unwrap();
+        assert_eq!(mk.status(), StatusCode::CREATED);
+        assert!(handler.storage.get_full_path("/mk/a").exists());
+
+        // 创建源文件
+        tokio::fs::write(handler.storage.get_full_path("/mk/a/x.txt"), b"data")
+            .await
+            .unwrap();
+
+        // MOVE 到新路径
+        let http_req = http::Request::builder()
+            .method("MOVE")
+            .uri("/mk/a/x.txt")
+            .header("Destination", "/mk/b/y.txt")
+            .body(())
+            .unwrap();
+        let (parts, _) = http_req.into_parts();
+        let req = Request::from_parts(parts, ReqBody::Empty);
+        let mv = handler.handle_move("/mk/a/x.txt", &req).await.unwrap();
+        assert_eq!(mv.status(), StatusCode::CREATED);
+        assert!(handler.storage.get_full_path("/mk/b/y.txt").exists());
+        assert!(!handler.storage.get_full_path("/mk/a/x.txt").exists());
+
+        // COPY 复制文件
+        let http_req2 = http::Request::builder()
+            .method("COPY")
+            .uri("/mk/b/y.txt")
+            .header("Destination", "/mk/c/z.txt")
+            .body(())
+            .unwrap();
+        let (parts2, _) = http_req2.into_parts();
+        let req2 = Request::from_parts(parts2, ReqBody::Empty);
+        let cp = handler.handle_copy("/mk/b/y.txt", &req2).await.unwrap();
+        assert_eq!(cp.status(), StatusCode::CREATED);
+        assert!(handler.storage.get_full_path("/mk/c/z.txt").exists());
+        assert!(handler.storage.get_full_path("/mk/b/y.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn test_propfind_depth0_and1_and_errors() {
+        let handler = build_handler().await;
+
+        // 创建文件与目录
+        tokio::fs::create_dir_all(handler.storage.get_full_path("/p0"))
+            .await
+            .unwrap();
+        let f = handler.storage.get_full_path("/p0/a.txt");
+        tokio::fs::write(&f, b"x").await.unwrap();
+
+        // Depth: 0 针对文件
+        let mut d0 = Request::empty();
+        d0.headers_mut()
+            .insert("Depth", http::HeaderValue::from_static("0"));
+        let r0 = handler.handle_propfind("/p0/a.txt", &mut d0).await.unwrap();
+        assert_eq!(r0.status(), StatusCode::MULTI_STATUS);
+
+        // Depth: 1 针对目录
+        let mut d1 = Request::empty();
+        d1.headers_mut()
+            .insert("Depth", http::HeaderValue::from_static("1"));
+        let r1 = handler.handle_propfind("/p0", &mut d1).await.unwrap();
+        assert_eq!(r1.status(), StatusCode::MULTI_STATUS);
+
+        // PUT 空请求体 -> 400
+        let http_req = http::Request::builder()
+            .method("PUT")
+            .uri("/err.txt")
+            .body(())
+            .unwrap();
+        let (parts, _) = http_req.into_parts();
+        let mut req = Request::from_parts(parts, ReqBody::Empty);
+        let err = handler
+            .handle_put("/err.txt", &mut req)
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+
+        // DELETE 不存在 -> 404
+        let err2 = handler.handle_delete("/not-exist").await.err().unwrap();
+        assert_eq!(err2.status(), StatusCode::NOT_FOUND);
+
+        // MOVE/COPY 缺少 Destination -> 400
+        let http_req2 = http::Request::builder()
+            .method("MOVE")
+            .uri("/p0/a.txt")
+            .body(())
+            .unwrap();
+        let (p2, _) = http_req2.into_parts();
+        let req2 = Request::from_parts(p2, ReqBody::Empty);
+        let emv = handler.handle_move("/p0/a.txt", &req2).await.err().unwrap();
+        assert_eq!(emv.status(), StatusCode::BAD_REQUEST);
+
+        let http_req3 = http::Request::builder()
+            .method("COPY")
+            .uri("/p0/a.txt")
+            .body(())
+            .unwrap();
+        let (p3, _) = http_req3.into_parts();
+        let req3 = Request::from_parts(p3, ReqBody::Empty);
+        let ecp = handler.handle_copy("/p0/a.txt", &req3).await.err().unwrap();
+        assert_eq!(ecp.status(), StatusCode::BAD_REQUEST);
+
+        // extract_path_from_url 无效 URL -> 400
+        let e = handler.extract_path_from_url("invalid").err().unwrap();
+        assert_eq!(e.status(), StatusCode::BAD_REQUEST);
+
+        // HEAD If-None-Match 304
+        let meta = std::fs::metadata(&f).unwrap();
+        let etag = WebDavHandler::calc_etag_from_meta(&meta).unwrap();
+        let mut hreq = Request::empty();
+        hreq.headers_mut()
+            .insert("If-None-Match", http::HeaderValue::from_str(&etag).unwrap());
+        let head_resp = handler.handle_head("/p0/a.txt", &hreq).await.unwrap();
+        assert_eq!(head_resp.status(), StatusCode::NOT_MODIFIED);
     }
 }

@@ -275,7 +275,7 @@ mod tests {
 
     #[test]
     fn test_multiple_convert_metadata() {
-        let metadatas = vec![
+        let metadatas = [
             crate::models::FileMetadata {
                 id: "1".to_string(),
                 name: "file1.txt".to_string(),

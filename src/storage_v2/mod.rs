@@ -18,6 +18,7 @@ pub mod tiering;
 pub mod lifecycle;
 pub mod dedup;
 pub mod engine;
+pub mod compatibility;
 
 pub use chunker::*;
 pub use delta::*;
@@ -28,6 +29,7 @@ pub use tiering::*;
 pub use lifecycle::*;
 pub use dedup::*;
 pub use engine::*;
+pub use compatibility::*;
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;

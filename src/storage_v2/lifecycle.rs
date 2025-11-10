@@ -134,7 +134,7 @@ impl LifecycleManager {
     /// 添加生命周期条目
     pub fn add_entry(&mut self, entry: LifecycleEntry) -> Result<()> {
         let file_id = entry.file_id.clone();
-        self.entries.insert(file_id, entry);
+        self.entries.insert(file_id.clone(), entry);
         info!("添加生命周期条目: {}", file_id);
         Ok(())
     }
@@ -149,7 +149,8 @@ impl LifecycleManager {
         if let Some(entry) = self.entries.get_mut(file_id) {
             entry.last_accessed = chrono::Local::now().naive_local();
             // 重新计算清理时间
-            entry.scheduled_cleanup_at = self.calculate_cleanup_time(entry);
+            let cleanup_time = self.calculate_cleanup_time(entry);
+            entry.scheduled_cleanup_at = cleanup_time;
             info!("更新访问时间: {}", file_id);
         }
         Ok(())
@@ -160,7 +161,8 @@ impl LifecycleManager {
         if let Some(entry) = self.entries.get_mut(file_id) {
             entry.last_modified = chrono::Local::now().naive_local();
             // 重新计算清理时间
-            entry.scheduled_cleanup_at = self.calculate_cleanup_time(entry);
+            let cleanup_time = self.calculate_cleanup_time(entry);
+            entry.scheduled_cleanup_at = cleanup_time;
             info!("更新修改时间: {}", file_id);
         }
         Ok(())
@@ -171,27 +173,41 @@ impl LifecycleManager {
         let mut result = LifecycleCheckResult::default();
         let now = chrono::Local::now().naive_local();
 
-        // 扫描所有条目
+        // 预先计算所有状态变更
+        let mut state_changes = Vec::new();
+        let mut expired_files = Vec::new();
+
         for (file_id, entry) in self.entries.iter_mut() {
-            let new_state = self.calculate_state(entry, now);
+            let new_state = self.calculate_state(entry, now.clone());
 
             if new_state != entry.state {
-                result.state_changes.push(StateChange {
+                state_changes.push(StateChange {
                     file_id: file_id.clone(),
                     old_state: entry.state.clone(),
                     new_state: new_state.clone(),
                 });
-                entry.state = new_state;
             }
 
-            // 收集过期条目
-            if entry.state == LifecycleState::Expired {
-                result.expired_files.push(file_id.clone());
+            if new_state == LifecycleState::Expired {
+                expired_files.push(file_id.clone());
             }
         }
 
-        info!("生命周期检查完成: {} 项状态变更, {} 个过期文件",
-              result.state_changes.len(), result.expired_files.len());
+        // 应用状态变更
+        for change in &state_changes {
+            if let Some(entry) = self.entries.get_mut(&change.file_id) {
+                entry.state = change.new_state.clone();
+            }
+        }
+
+        result.state_changes = state_changes;
+        result.expired_files = expired_files;
+
+        info!(
+            "生命周期检查完成: {} 项状态变更, {} 个过期文件",
+            result.state_changes.len(),
+            result.expired_files.len()
+        );
 
         // 更新统计
         self.update_stats();
@@ -217,7 +233,8 @@ impl LifecycleManager {
         }
 
         // 限制清理批大小
-        let batch = to_cleanup.into_iter()
+        let batch = to_cleanup
+            .into_iter()
             .take(self.config.cleanup_batch_size)
             .collect::<Vec<_>>();
 
@@ -237,8 +254,10 @@ impl LifecycleManager {
             }
         }
 
-        info!("自动清理完成: {} 成功, {} 失败, 总大小 {} 字节",
-              result.success_count, result.failed_count, result.total_size);
+        info!(
+            "自动清理完成: {} 成功, {} 失败, 总大小 {} 字节",
+            result.success_count, result.failed_count, result.total_size
+        );
 
         // 更新统计
         self.update_stats();
@@ -284,17 +303,17 @@ impl LifecycleManager {
 
     /// 计算清理时间
     fn calculate_cleanup_time(&self, entry: &LifecycleEntry) -> Option<chrono::NaiveDateTime> {
-        let now = chrono::Local::now().naive_local();
-
         match &entry.policy {
             LifecyclePolicy::Permanent => None,
             LifecyclePolicy::Ttl { ttl_seconds } => {
                 Some(entry.created_at + chrono::Duration::seconds(*ttl_seconds as i64))
             }
-            LifecyclePolicy::LastAccess { days_after_last_access } => {
-                Some(entry.last_accessed + chrono::Duration::days(*days_after_last_access as i64))
-            }
-            LifecyclePolicy::LastModified { days_after_modification } => {
+            LifecyclePolicy::LastAccess {
+                days_after_last_access,
+            } => Some(entry.last_accessed + chrono::Duration::days(*days_after_last_access as i64)),
+            LifecyclePolicy::LastModified {
+                days_after_modification,
+            } => {
                 Some(entry.last_modified + chrono::Duration::days(*days_after_modification as i64))
             }
             LifecyclePolicy::VersionRetention { .. } => {
@@ -305,7 +324,11 @@ impl LifecycleManager {
     }
 
     /// 计算生命周期状态
-    fn calculate_state(&self, entry: &LifecycleEntry, now: chrono::NaiveDateTime) -> LifecycleState {
+    fn calculate_state(
+        &self,
+        entry: &LifecycleEntry,
+        now: chrono::NaiveDateTime,
+    ) -> LifecycleState {
         let cleanup_time = self.calculate_cleanup_time(entry);
 
         match cleanup_time {
@@ -334,16 +357,24 @@ impl LifecycleManager {
     /// 更新统计信息
     fn update_stats(&mut self) {
         self.stats.total_files = self.entries.len() as u64;
-        self.stats.active_files = self.entries.values()
+        self.stats.active_files = self
+            .entries
+            .values()
             .filter(|e| e.state == LifecycleState::Active)
             .count() as u64;
-        self.stats.expiring_soon_files = self.entries.values()
+        self.stats.expiring_soon_files = self
+            .entries
+            .values()
             .filter(|e| e.state == LifecycleState::ExpiringSoon)
             .count() as u64;
-        self.stats.expired_files = self.entries.values()
+        self.stats.expired_files = self
+            .entries
+            .values()
             .filter(|e| e.state == LifecycleState::Expired)
             .count() as u64;
-        self.stats.cleaned_files = self.entries.values()
+        self.stats.cleaned_files = self
+            .entries
+            .values()
             .filter(|e| e.state == LifecycleState::Cleaned)
             .count() as u64;
 
@@ -357,7 +388,11 @@ impl LifecycleManager {
                 LifecyclePolicy::LastModified { .. } => "last_modified",
                 LifecyclePolicy::VersionRetention { .. } => "version_retention",
             };
-            *self.stats.policy_stats.entry(policy_name.to_string()).or_insert(0) += 1;
+            *self
+                .stats
+                .policy_stats
+                .entry(policy_name.to_string())
+                .or_insert(0) += 1;
         }
     }
 
@@ -532,7 +567,10 @@ mod tests {
         manager.update_access_time("test_file").unwrap();
 
         let updated = manager.get_entry("test_file").unwrap();
-        assert!(updated.last_accessed > chrono::Local::now().naive_local() - chrono::Duration::seconds(1));
+        assert!(
+            updated.last_accessed
+                > chrono::Local::now().naive_local() - chrono::Duration::seconds(1)
+        );
     }
 
     #[tokio::test]

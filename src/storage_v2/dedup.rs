@@ -8,7 +8,7 @@
 //! - 并发去重控制
 
 use crate::error::{NasError, Result};
-use crate::storage_v2::{BlockIndex, BlockIndexEntry, BlockIndexConfig};
+use crate::storage_v2::{BlockIndex, BlockIndexConfig, BlockIndexEntry};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -117,7 +117,7 @@ impl DedupManager {
     pub fn new(config: DedupConfig, index_config: BlockIndexConfig, root_path: &str) -> Self {
         let block_index = Arc::new(AsyncRwLock::new(BlockIndex::new(
             index_config,
-            &format!("{}/dedup", root_path)
+            &format!("{}/dedup", root_path),
         )));
 
         Self {
@@ -185,7 +185,9 @@ impl DedupManager {
             } else {
                 // 新块，添加到索引
                 let storage_path = block_index.get_block_path(&chunk.chunk_id);
-                block_index.add_block(&chunk.chunk_id, chunk.size, storage_path).await?;
+                block_index
+                    .add_block(&chunk.chunk_id, chunk.size, storage_path)
+                    .await?;
 
                 // 创建新的引用信息
                 let mut block_refs = self.block_refs.write().unwrap();
@@ -217,7 +219,8 @@ impl DedupManager {
             let mut stats = self.stats.write().unwrap();
             stats.total_files += 1;
             stats.total_chunks += chunks.len() as u64;
-            stats.unique_chunks = self.block_index.read().await.get_stats().await.total_blocks as u64;
+            stats.unique_chunks =
+                self.block_index.read().await.get_stats().await.total_blocks as u64;
             stats.duplicate_chunks = stats.total_chunks.saturating_sub(stats.unique_chunks);
             stats.space_saved += space_saved;
 
@@ -234,7 +237,10 @@ impl DedupManager {
 
         info!(
             "文件 {} 去重完成: {} 个重复块, 节省 {} 字节, 耗时 {}ms",
-            file_id, deduped_blocks, space_saved, duration.as_millis()
+            file_id,
+            deduped_blocks,
+            space_saved,
+            duration.as_millis()
         );
 
         Ok(DedupResult {
@@ -415,7 +421,8 @@ impl DedupManager {
         let stats = self.get_stats().await;
 
         let total_size = stats.total_chunks * stats.avg_chunk_size as u64;
-        let deduplicated_size = stats.total_chunks * stats.avg_chunk_size as u64 - stats.space_saved;
+        let deduplicated_size =
+            stats.total_chunks * stats.avg_chunk_size as u64 - stats.space_saved;
 
         let efficiency = if total_size > 0 {
             stats.space_saved as f32 / total_size as f32
@@ -538,15 +545,13 @@ mod tests {
         let manager = DedupManager::new(config, index_config, temp_dir.path().to_str().unwrap());
         manager.init().await.unwrap();
 
-        let chunks = vec![
-            crate::storage_v2::ChunkInfo {
-                chunk_id: "chunk1".to_string(),
-                offset: 0,
-                size: 1024,
-                weak_hash: 0,
-                strong_hash: "hash1".to_string(),
-            },
-        ];
+        let chunks = vec![crate::storage_v2::ChunkInfo {
+            chunk_id: "chunk1".to_string(),
+            offset: 0,
+            size: 1024,
+            weak_hash: 0,
+            strong_hash: "hash1".to_string(),
+        }];
 
         // 第一次处理
         manager.process_file("file1", &chunks).await.unwrap();
@@ -567,15 +572,13 @@ mod tests {
         let manager = DedupManager::new(config, index_config, temp_dir.path().to_str().unwrap());
         manager.init().await.unwrap();
 
-        let chunks = vec![
-            crate::storage_v2::ChunkInfo {
-                chunk_id: "chunk1".to_string(),
-                offset: 0,
-                size: 1024,
-                weak_hash: 0,
-                strong_hash: "hash1".to_string(),
-            },
-        ];
+        let chunks = vec![crate::storage_v2::ChunkInfo {
+            chunk_id: "chunk1".to_string(),
+            offset: 0,
+            size: 1024,
+            weak_hash: 0,
+            strong_hash: "hash1".to_string(),
+        }];
 
         manager.process_file("file1", &chunks).await.unwrap();
         let removed = manager.remove_file("file1").await.unwrap();
@@ -591,15 +594,13 @@ mod tests {
         let manager = DedupManager::new(config, index_config, temp_dir.path().to_str().unwrap());
         manager.init().await.unwrap();
 
-        let chunks = vec![
-            crate::storage_v2::ChunkInfo {
-                chunk_id: "chunk1".to_string(),
-                offset: 0,
-                size: 1024,
-                weak_hash: 0,
-                strong_hash: "hash1".to_string(),
-            },
-        ];
+        let chunks = vec![crate::storage_v2::ChunkInfo {
+            chunk_id: "chunk1".to_string(),
+            offset: 0,
+            size: 1024,
+            weak_hash: 0,
+            strong_hash: "hash1".to_string(),
+        }];
 
         // 创建重复文件
         manager.process_file("file1", &chunks).await.unwrap();
@@ -617,15 +618,13 @@ mod tests {
         let manager = DedupManager::new(config, index_config, temp_dir.path().to_str().unwrap());
         manager.init().await.unwrap();
 
-        let chunks = vec![
-            crate::storage_v2::ChunkInfo {
-                chunk_id: "chunk1".to_string(),
-                offset: 0,
-                size: 1024,
-                weak_hash: 0,
-                strong_hash: "hash1".to_string(),
-            },
-        ];
+        let chunks = vec![crate::storage_v2::ChunkInfo {
+            chunk_id: "chunk1".to_string(),
+            offset: 0,
+            size: 1024,
+            weak_hash: 0,
+            strong_hash: "hash1".to_string(),
+        }];
 
         manager.process_file("file1", &chunks).await.unwrap();
         manager.process_file("file2", &chunks).await.unwrap();

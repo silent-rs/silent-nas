@@ -4,11 +4,8 @@
 
 use crate::error::{NasError, Result};
 use crate::models::{FileMetadata, FileVersion};
-use crate::storage_v2::{
-    ChunkInfo, FileDelta, VersionInfo, IncrementalConfig,
-use tracing::{debug, info};
-};
 use crate::storage::StorageManager;
+use crate::storage_v2::{ChunkInfo, FileDelta, IncrementalConfig, VersionInfo};
 use chrono::Local;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -16,6 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
+use tracing::{debug, info};
 
 /// 增量存储管理器
 pub struct IncrementalStorage {
@@ -34,11 +32,7 @@ pub struct IncrementalStorage {
 }
 
 impl IncrementalStorage {
-    pub fn new(
-        storage: Arc<StorageManager>,
-        config: IncrementalConfig,
-        root_path: &str,
-    ) -> Self {
+    pub fn new(storage: Arc<StorageManager>, config: IncrementalConfig, root_path: &str) -> Self {
         let version_root = Path::new(root_path).join("incremental");
         let chunk_root = version_root.join("chunks");
 
@@ -82,15 +76,9 @@ impl IncrementalStorage {
             Vec::new()
         };
 
-        let mut generator = crate::storage_v2::delta::DeltaGenerator::new(
-            self.config.clone()
-        );
-        let delta = generator.generate_delta(
-            &base_data,
-            data,
-            file_id,
-            parent_version_id.unwrap_or("")
-        )?;
+        let mut generator = crate::storage_v2::delta::DeltaGenerator::new(self.config.clone());
+        let delta =
+            generator.generate_delta(&base_data, data, file_id, parent_version_id.unwrap_or(""))?;
 
         // 保存块数据
         for chunk in &delta.chunks {
@@ -98,25 +86,19 @@ impl IncrementalStorage {
         }
 
         // 保存版本信息
-        let version_info = self.save_version_info(file_id, &delta, parent_version_id).await?;
+        let version_info = self
+            .save_version_info(file_id, &delta, parent_version_id)
+            .await?;
 
         // 创建FileVersion
         let file_version = FileVersion {
             version_id: version_id.clone(),
             file_id: file_id.to_string(),
+            name: file_id.to_string(),
             size: data.len() as u64,
             hash: self.calculate_hash(data),
             created_at: Local::now().naive_local(),
-            is_current: true,
-            metadata: Some(FileMetadata {
-                id: file_id.to_string(),
-                name: file_id.to_string(),
-                path: file_id.to_string(),
-                size: data.len() as u64,
-                hash: self.calculate_hash(data),
-                created_at: Local::now().naive_local(),
-                modified_at: Local::now().naive_local(),
-            }),
+            author: None,
         };
 
         Ok((delta, file_version))
@@ -133,7 +115,9 @@ impl IncrementalStorage {
 
         loop {
             let version = self.get_version_info(current_version_id).await?;
-            let delta = self.read_delta(&version.file_id, current_version_id).await?;
+            let delta = self
+                .read_delta(&version.file_id, current_version_id)
+                .await?;
 
             // 读取并应用分块
             for chunk in &delta.chunks {
@@ -283,7 +267,8 @@ impl IncrementalStorage {
         fs::write(&version_path, data).await.map_err(NasError::Io)?;
 
         // 更新索引
-        self.version_index.insert(version_info.version_id.clone(), version_info.clone());
+        self.version_index
+            .insert(version_info.version_id.clone(), version_info.clone());
 
         Ok(version_info)
     }
@@ -316,7 +301,8 @@ impl IncrementalStorage {
                     let data = fs::read(&path).await.map_err(NasError::Io)?;
                     let version_info: VersionInfo = serde_json::from_slice(&data)
                         .map_err(|e| NasError::Other(format!("加载版本信息失败: {}", e)))?;
-                    self.version_index.insert(version_id.to_string(), version_info);
+                    self.version_index
+                        .insert(version_id.to_string(), version_info);
                 }
             }
         }
@@ -367,10 +353,7 @@ impl IncrementalStorage {
     fn get_chunk_path(&self, chunk_id: &str) -> PathBuf {
         // 使用哈希前缀分层存储
         let prefix = &chunk_id[..2.min(chunk_id.len())];
-        self.chunk_root
-            .join("data")
-            .join(prefix)
-            .join(chunk_id)
+        self.chunk_root.join("data").join(prefix).join(chunk_id)
     }
 
     /// 计算哈希值
@@ -401,20 +384,15 @@ mod tests {
 
     async fn create_test_storage() -> (IncrementalStorage, TempDir) {
         let temp_dir = TempDir::new().unwrap();
-        let storage = Arc::new(
-            crate::storage::StorageManager::new(
-                temp_dir.path().to_path_buf(),
-                4 * 1024 * 1024
-            )
-        );
+        let storage = Arc::new(crate::storage::StorageManager::new(
+            temp_dir.path().to_path_buf(),
+            4 * 1024 * 1024,
+        ));
         storage.init().await.unwrap();
 
         let config = IncrementalConfig::default();
-        let incremental = IncrementalStorage::new(
-            storage,
-            config,
-            temp_dir.path().to_str().unwrap()
-        );
+        let incremental =
+            IncrementalStorage::new(storage, config, temp_dir.path().to_str().unwrap());
 
         (incremental, temp_dir)
     }
@@ -431,7 +409,10 @@ mod tests {
         assert!(!version.version_id.is_empty());
 
         // 读取版本数据
-        let read_data = storage.read_version_data(&version.version_id).await.unwrap();
+        let read_data = storage
+            .read_version_data(&version.version_id)
+            .await
+            .unwrap();
         assert_eq!(read_data, data);
     }
 
@@ -441,10 +422,16 @@ mod tests {
         storage.init().await.unwrap();
 
         let data1 = b"Version 1";
-        let (delta1, version1) = storage.save_version("test_file", data1, None).await.unwrap();
+        let (_delta1, version1) = storage
+            .save_version("test_file", data1, None)
+            .await
+            .unwrap();
 
         let data2 = b"Version 2 - updated";
-        let (_delta2, version2) = storage.save_version("test_file", data2, Some(&version1.version_id)).await.unwrap();
+        let (_delta2, version2) = storage
+            .save_version("test_file", data2, Some(&version1.version_id))
+            .await
+            .unwrap();
 
         let versions = storage.list_file_versions("test_file").await.unwrap();
         assert_eq!(versions.len(), 2);
@@ -455,8 +442,14 @@ mod tests {
         let (mut storage, _temp) = create_test_storage().await;
         storage.init().await.unwrap();
 
-        storage.save_version("file1", b"Data 1", None).await.unwrap();
-        storage.save_version("file2", b"Data 2", None).await.unwrap();
+        storage
+            .save_version("file1", b"Data 1", None)
+            .await
+            .unwrap();
+        storage
+            .save_version("file2", b"Data 2", None)
+            .await
+            .unwrap();
 
         let stats = storage.get_storage_stats().await.unwrap();
         assert_eq!(stats.total_versions, 2);

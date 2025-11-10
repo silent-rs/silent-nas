@@ -46,10 +46,10 @@ impl Default for CompressionConfig {
     fn default() -> Self {
         Self {
             algorithm: CompressionAlgorithm::LZ4,
-            level: 1, // 快速压缩
-            min_size: 1024, // 1KB
+            level: 1,              // 快速压缩
+            min_size: 1024,        // 1KB
             auto_compress_days: 7, // 7天未访问自动压缩
-            min_ratio: 1.1, // 压缩比至少10%
+            min_ratio: 1.1,        // 压缩比至少10%
         }
     }
 }
@@ -171,9 +171,11 @@ fn compress_zstd(data: &[u8], level: u32) -> Result<Vec<u8>> {
     // 使用zstd库进行压缩
     let mut encoder = zstd::Encoder::new(Vec::new(), level as i32)
         .map_err(|e| NasError::Other(format!("Zstd压缩初始化失败: {}", e)))?;
-    encoder.write_all(data)
+    encoder
+        .write_all(data)
         .map_err(|e| NasError::Other(format!("Zstd压缩写入失败: {}", e)))?;
-    let compressed = encoder.finish()
+    let compressed = encoder
+        .finish()
         .map_err(|e| NasError::Other(format!("Zstd压缩失败: {}", e)))?;
     Ok(compressed)
 }
@@ -183,7 +185,8 @@ fn decompress_zstd(data: &[u8]) -> Result<Vec<u8>> {
     let mut decoder = zstd::Decoder::new(data)
         .map_err(|e| NasError::Other(format!("Zstd解压缩初始化失败: {}", e)))?;
     let mut decompressed = Vec::new();
-    decoder.read_to_end(&mut decompressed)
+    decoder
+        .read_to_end(&mut decompressed)
         .map_err(|e| NasError::Other(format!("Zstd解压缩失败: {}", e)))?;
     Ok(decompressed)
 }

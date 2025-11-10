@@ -9,8 +9,8 @@
 
 use crate::error::{NasError, Result};
 use crate::storage_v2::{
-    BlockIndex, BlockIndexConfig, ChunkInfo, DedupConfig, DedupManager,
-    LifecycleConfig, LifecycleManager, TierConfig, TieredStorage,
+    BlockIndex, BlockIndexConfig, ChunkInfo, DedupConfig, DedupManager, LifecycleConfig,
+    LifecycleManager, TierConfig, TieredStorage,
 };
 use moka::future::Cache as MokaCache;
 use serde::{Deserialize, Serialize};
@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
-use tokio::sync::{mpsc, Semaphore, RwLock as AsyncRwLock};
+use tokio::sync::{RwLock as AsyncRwLock, Semaphore, mpsc};
 use tracing::{debug, info, warn};
 
 /// 存储引擎配置
@@ -53,7 +53,7 @@ impl Default for EngineConfig {
             write_queue_size: 1000,
             concurrent_reads: 100,
             concurrent_writes: 10,
-            cache_ttl_secs: 3600, // 1小时
+            cache_ttl_secs: 3600,   // 1小时
             flush_interval_ms: 100, // 100ms
         }
     }
@@ -198,9 +198,7 @@ impl StorageEngine {
             &format!("{}/tiered", root_path),
         )));
 
-        let lifecycle_manager = Arc::new(RwLock::new(LifecycleManager::new(
-            lifecycle_config,
-        )));
+        let lifecycle_manager = Arc::new(RwLock::new(LifecycleManager::new(lifecycle_config)));
 
         let read_cache = Arc::new(AsyncRwLock::new(
             MokaCache::builder()
@@ -285,12 +283,7 @@ impl StorageEngine {
     }
 
     /// 写入数据
-    pub async fn write(
-        &self,
-        file_id: &str,
-        offset: u64,
-        data: &[u8],
-    ) -> Result<u64> {
+    pub async fn write(&self, file_id: &str, offset: u64, data: &[u8]) -> Result<u64> {
         let _write_permit = self.write_semaphore.acquire().await.unwrap();
         let start = Instant::now();
 
@@ -324,12 +317,7 @@ impl StorageEngine {
     }
 
     /// 队列写入（小写入优化）
-    async fn queue_write(
-        &self,
-        file_id: &str,
-        offset: u64,
-        data: &[u8],
-    ) -> Result<u64> {
+    async fn queue_write(&self, file_id: &str, offset: u64, data: &[u8]) -> Result<u64> {
         let task_id = self
             .write_stats
             .write_requests
@@ -363,12 +351,7 @@ impl StorageEngine {
     }
 
     /// 直接写入
-    async fn write_direct(
-        &self,
-        file_id: &str,
-        offset: u64,
-        data: &[u8],
-    ) -> Result<u64> {
+    async fn write_direct(&self, file_id: &str, offset: u64, data: &[u8]) -> Result<u64> {
         // 1. 检查MVCC版本
         let version = {
             let versions = self.mvcc_versions.read().unwrap();
@@ -425,12 +408,7 @@ impl StorageEngine {
     }
 
     /// 读取数据
-    pub async fn read(
-        &self,
-        file_id: &str,
-        offset: u64,
-        size: usize,
-    ) -> Result<Vec<u8>> {
+    pub async fn read(&self, file_id: &str, offset: u64, size: usize) -> Result<Vec<u8>> {
         let _read_permit = self.read_semaphore.acquire().await.unwrap();
         let start = Instant::now();
 
@@ -465,24 +443,28 @@ impl StorageEngine {
         // 3. 缓存数据
         {
             let mut cache = self.read_cache.write().await;
-            cache.insert(
-                cache_key,
-                CacheEntry {
-                    data: data.clone(),
-                    accessed_at: Instant::now(),
-                    access_count: 1,
-                    file_id: file_id.to_string(),
-                    offset,
-                    size,
-                },
-            ).await;
+            cache
+                .insert(
+                    cache_key,
+                    CacheEntry {
+                        data: data.clone(),
+                        accessed_at: Instant::now(),
+                        access_count: 1,
+                        file_id: file_id.to_string(),
+                        offset,
+                        size,
+                    },
+                )
+                .await;
         }
 
         // 4. 触发预读
         self.trigger_readahead(file_id, offset, size).await;
 
         // 更新统计
-        self.read_stats.read_requests.fetch_add(1, Ordering::Relaxed);
+        self.read_stats
+            .read_requests
+            .fetch_add(1, Ordering::Relaxed);
         self.read_stats
             .bytes_read
             .fetch_add(data.len() as u64, Ordering::Relaxed);
@@ -496,24 +478,14 @@ impl StorageEngine {
     }
 
     /// 执行实际读取
-    async fn read_actual(
-        &self,
-        file_id: &str,
-        offset: u64,
-        size: usize,
-    ) -> Result<Vec<u8>> {
+    async fn read_actual(&self, file_id: &str, offset: u64, size: usize) -> Result<Vec<u8>> {
         // TODO: 从实际存储中读取数据
         // 这里应该根据版本链和块索引来重构数据
         Ok(vec![0u8; size])
     }
 
     /// 触发预读
-    async fn trigger_readahead(
-        &self,
-        file_id: &str,
-        offset: u64,
-        size: usize,
-    ) {
+    async fn trigger_readahead(&self, file_id: &str, offset: u64, size: usize) {
         let readahead_size = self.config.readahead_size;
         let start_offset = offset + size as u64;
         let end_offset = start_offset + readahead_size as u64;
@@ -548,11 +520,7 @@ impl StorageEngine {
     }
 
     /// MVCC：读取指定版本
-    pub async fn read_version(
-        &self,
-        file_id: &str,
-        version: u64,
-    ) -> Result<Vec<u8>> {
+    pub async fn read_version(&self, file_id: &str, version: u64) -> Result<Vec<u8>> {
         // TODO: 实现版本读取逻辑
         let size = 1024;
         Ok(vec![0u8; size])
@@ -599,7 +567,10 @@ impl StorageEngine {
     /// 获取写放大比
     pub fn get_write_amplification(&self) -> f32 {
         let written = self.write_stats.bytes_written.load(Ordering::Relaxed);
-        let physical = self.write_stats.physical_bytes_written.load(Ordering::Relaxed);
+        let physical = self
+            .write_stats
+            .physical_bytes_written
+            .load(Ordering::Relaxed);
 
         if written == 0 {
             1.0

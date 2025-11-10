@@ -8,6 +8,7 @@ use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio::sync::RwLock;
+use tracing::{debug, info, warn};
 
 /// 存储层级
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -63,10 +64,10 @@ pub struct TierConfig {
 impl Default for TierConfig {
     fn default() -> Self {
         Self {
-            hot_capacity: 10 * 1024 * 1024 * 1024,      // 10GB
-            warm_capacity: 100 * 1024 * 1024 * 1024,   // 100GB
-            cold_capacity: 0,                            // 无限制
-            migration_interval_secs: 3600,              // 1小时
+            hot_capacity: 10 * 1024 * 1024 * 1024,   // 10GB
+            warm_capacity: 100 * 1024 * 1024 * 1024, // 100GB
+            cold_capacity: 0,                        // 无限制
+            migration_interval_secs: 3600,           // 1小时
             lru_window_size: 10000,
             hot_access_threshold: 100,
             warm_access_threshold: 10,
@@ -144,7 +145,9 @@ impl TieredStorage {
     pub async fn init(&self) -> Result<()> {
         // 创建各层级目录
         for (tier, path) in &self.tier_roots {
-            tokio::fs::create_dir_all(path).await.map_err(NasError::Io)?;
+            tokio::fs::create_dir_all(path)
+                .await
+                .map_err(NasError::Io)?;
             info!("初始化存储层级 {:?}: {:?}", tier.as_str(), path);
         }
 
@@ -185,7 +188,12 @@ impl TieredStorage {
     }
 
     /// 将数据项分配到合适的层级
-    pub async fn assign_tier(&self, file_id: &str, size: u64, storage_path: PathBuf) -> Result<StorageTier> {
+    pub async fn assign_tier(
+        &self,
+        file_id: &str,
+        size: u64,
+        storage_path: PathBuf,
+    ) -> Result<StorageTier> {
         let mut items = self.items.write().await;
 
         // 计算推荐层级
@@ -196,7 +204,9 @@ impl TieredStorage {
             recommended_tier
         } else {
             // 容量不足，选择下一个层级
-            self.find_available_tier(size).await.unwrap_or(recommended_tier)
+            self.find_available_tier(size)
+                .await
+                .unwrap_or(recommended_tier)
         };
 
         // 创建数据项
@@ -212,7 +222,9 @@ impl TieredStorage {
         };
 
         // 检查目标层级
-        let target_path = self.tier_roots.get(&tier)
+        let target_path = self
+            .tier_roots
+            .get(&tier)
             .ok_or_else(|| NasError::Other(format!("未找到层级 {:?} 的根目录", tier.as_str())))?
             .join(storage_path.file_name().unwrap_or_default());
 
@@ -313,12 +325,19 @@ impl TieredStorage {
             }
         }
 
-        info!("层级迁移完成: {} 项，{} 字节", migrated.migrated_count, migrated.total_migrated_size);
+        info!(
+            "层级迁移完成: {} 项，{} 字节",
+            migrated.migrated_count, migrated.total_migrated_size
+        );
         Ok(migrated)
     }
 
     /// 迁移单个数据项
-    async fn migrate_item(&self, file_id: &str, new_tier: StorageTier) -> Result<Option<MigrationItemResult>> {
+    async fn migrate_item(
+        &self,
+        file_id: &str,
+        new_tier: StorageTier,
+    ) -> Result<Option<MigrationItemResult>> {
         let mut items = self.items.write().await;
 
         if let Some(item) = items.get_mut(file_id) {
@@ -326,7 +345,11 @@ impl TieredStorage {
 
             // 检查新层级容量
             if !self.can_fit_in_tier(new_tier, item.size).await {
-                warn!("数据项 {} 无法迁移到层级 {:?}：容量不足", file_id, new_tier.as_str());
+                warn!(
+                    "数据项 {} 无法迁移到层级 {:?}：容量不足",
+                    file_id,
+                    new_tier.as_str()
+                );
                 return Ok(None);
             }
 
@@ -339,7 +362,8 @@ impl TieredStorage {
 
             // 更新使用统计
             let mut tier_sizes = self.tier_sizes.write().await;
-            *tier_sizes.entry(old_tier).or_insert(0) = tier_sizes.get(&old_tier).copied().unwrap_or(0) - item.size;
+            *tier_sizes.entry(old_tier).or_insert(0) =
+                tier_sizes.get(&old_tier).copied().unwrap_or(0) - item.size;
             *tier_sizes.entry(new_tier).or_insert(0) += item.size;
 
             let result = MigrationItemResult {
@@ -349,7 +373,12 @@ impl TieredStorage {
                 size: item.size,
             };
 
-            info!("数据项 {} 从层级 {:?} 迁移到 {:?}", file_id, old_tier.as_str(), new_tier.as_str());
+            info!(
+                "数据项 {} 从层级 {:?} 迁移到 {:?}",
+                file_id,
+                old_tier.as_str(),
+                new_tier.as_str()
+            );
             return Ok(Some(result));
         }
 
@@ -405,7 +434,11 @@ impl TieredStorage {
         // 标记为可删除（实际删除由外部处理）
         for file_id in to_remove {
             if let Some(item) = items.get(&file_id) {
-                warn!("发现未引用的数据项: {} (层级: {:?})", file_id, item.tier.as_str());
+                warn!(
+                    "发现未引用的数据项: {} (层级: {:?})",
+                    file_id,
+                    item.tier.as_str()
+                );
             }
         }
 
@@ -561,7 +594,10 @@ mod tests {
         let size = 1024;
         let storage_path = temp_dir.path().to_path_buf().join("test_file");
 
-        storage.assign_tier(file_id, size, storage_path).await.unwrap();
+        storage
+            .assign_tier(file_id, size, storage_path)
+            .await
+            .unwrap();
         storage.record_access(file_id).await.unwrap();
 
         let item = storage.get_item(file_id).await.unwrap();

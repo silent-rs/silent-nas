@@ -11,6 +11,7 @@ pub mod notify;
 pub mod s3;
 pub mod search;
 pub mod storage;
+pub mod storage_v2;
 pub mod version;
 
 // 注意：sync、transfer、webdav、event_listener 模块包含复杂的依赖，

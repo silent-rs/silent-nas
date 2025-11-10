@@ -160,7 +160,10 @@ impl BlockIndex {
             }
         }
 
-        Err(NasError::Other(format!("块不存在或引用计数异常: {}", chunk_id)))
+        Err(NasError::Other(format!(
+            "块不存在或引用计数异常: {}",
+            chunk_id
+        )))
     }
 
     /// 移除块
@@ -269,7 +272,9 @@ impl BlockIndex {
         // 原子性写入
         let temp_path = self.index_path.with_extension("tmp");
         fs::write(&temp_path, data).await.map_err(NasError::Io)?;
-        fs::rename(temp_path, &self.index_path).await.map_err(NasError::Io)?;
+        fs::rename(temp_path, &self.index_path)
+            .await
+            .map_err(NasError::Io)?;
 
         Ok(())
     }
@@ -278,6 +283,14 @@ impl BlockIndex {
     pub fn get_block_path(&self, chunk_id: &str) -> PathBuf {
         let prefix = &chunk_id[..2.min(chunk_id.len())];
         self.block_root.join(prefix).join(chunk_id)
+    }
+
+    /// 同步索引到磁盘
+    pub async fn sync(&self) -> Result<()> {
+        // 将内存中的热索引保存到磁盘
+        self.save_index().await?;
+        info!("块索引已同步到磁盘");
+        Ok(())
     }
 }
 
@@ -335,7 +348,10 @@ mod tests {
         let size = 1024;
         let storage_path = index.get_block_path(chunk_id);
 
-        let entry = index.add_block(chunk_id, size, storage_path.clone()).await.unwrap();
+        let entry = index
+            .add_block(chunk_id, size, storage_path.clone())
+            .await
+            .unwrap();
         assert_eq!(entry.chunk_id, chunk_id);
         assert_eq!(entry.ref_count, 1);
 
@@ -380,8 +396,14 @@ mod tests {
         let storage_path1 = index.get_block_path("chunk1");
         let storage_path2 = index.get_block_path("chunk2");
 
-        index.add_block("chunk1", 1024, storage_path1).await.unwrap();
-        index.add_block("chunk2", 2048, storage_path2).await.unwrap();
+        index
+            .add_block("chunk1", 1024, storage_path1)
+            .await
+            .unwrap();
+        index
+            .add_block("chunk2", 2048, storage_path2)
+            .await
+            .unwrap();
 
         let stats = index.get_stats().await;
         assert_eq!(stats.total_blocks, 2);

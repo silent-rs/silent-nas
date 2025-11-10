@@ -10,26 +10,26 @@
 //! - 跨文件块级去重
 
 pub mod chunker;
-pub mod delta;
-pub mod storage;
-pub mod index;
-pub mod compression;
-pub mod tiering;
-pub mod lifecycle;
-pub mod dedup;
-pub mod engine;
 pub mod compatibility;
+pub mod compression;
+pub mod dedup;
+pub mod delta;
+pub mod engine;
+pub mod index;
+pub mod lifecycle;
+pub mod storage;
+pub mod tiering;
 
 pub use chunker::*;
-pub use delta::*;
-pub use storage::*;
-pub use index::*;
-pub use compression::*;
-pub use tiering::*;
-pub use lifecycle::*;
-pub use dedup::*;
-pub use engine::*;
 pub use compatibility::*;
+pub use compression::*;
+pub use dedup::*;
+pub use delta::*;
+pub use engine::*;
+pub use index::*;
+pub use lifecycle::*;
+pub use storage::*;
+pub use tiering::*;
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -61,11 +61,11 @@ impl Default for IncrementalConfig {
     fn default() -> Self {
         Self {
             chunker_type: ChunkerType::RabinKarp,
-            avg_chunk_size: 8 * 1024,    // 8KB
-            min_chunk_size: 4 * 1024,    // 4KB
-            max_chunk_size: 16 * 1024,   // 16KB
-            rabin_poly: 0x3b9aca07,      // 常用质数
-            weak_hash_mod: 2048,         // 2^11
+            avg_chunk_size: 8 * 1024,  // 8KB
+            min_chunk_size: 4 * 1024,  // 4KB
+            max_chunk_size: 16 * 1024, // 16KB
+            rabin_poly: 0x3b9aca07,    // 常用质数
+            weak_hash_mod: 2048,       // 2^11
             enable_compression: true,
             compression_algorithm: "lz4".to_string(),
             enable_deduplication: true,

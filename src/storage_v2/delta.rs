@@ -4,9 +4,7 @@
 
 use crate::error::{NasError, Result};
 use crate::models::FileMetadata;
-use crate::storage_v2::{
-    ChunkInfo, FileDelta, VersionInfo, IncrementalConfig, RabinKarpChunker,
-};
+use crate::storage_v2::{ChunkInfo, FileDelta, IncrementalConfig, RabinKarpChunker, VersionInfo};
 use chrono::Local;
 use scru128::Scru128Id;
 use std::collections::HashMap;
@@ -30,7 +28,7 @@ impl DeltaGenerator {
     /// base_version_id: 基础版本ID（空字符串表示从空文件开始）
     pub fn generate_delta(
         &mut self,
-        base_data: &[u8],
+        _base_data: &[u8],
         new_data: &[u8],
         file_id: &str,
         base_version_id: &str,
@@ -47,7 +45,9 @@ impl DeltaGenerator {
         }
 
         // 对新数据分块
-        let chunks = self.chunker.chunk_data(new_data)
+        let chunks = self
+            .chunker
+            .chunk_data(new_data)
             .map_err(|e| NasError::Other(format!("分块失败: {}", e)))?;
 
         Ok(FileDelta {
@@ -60,11 +60,7 @@ impl DeltaGenerator {
     }
 
     /// 生成完整版本的差异（从空文件开始）
-    pub fn generate_full_delta(
-        &mut self,
-        data: &[u8],
-        file_id: &str,
-    ) -> Result<FileDelta> {
+    pub fn generate_full_delta(&mut self, data: &[u8], file_id: &str) -> Result<FileDelta> {
         self.generate_delta(&[], data, file_id, "")
     }
 
@@ -138,7 +134,8 @@ impl DeltaApplier {
                 result.extend_from_slice(cached_chunk);
             } else {
                 let chunk_data = chunk_reader(&chunk.chunk_id)?;
-                self.block_cache.insert(chunk.chunk_id.clone(), chunk_data.clone());
+                self.block_cache
+                    .insert(chunk.chunk_id.clone(), chunk_data.clone());
                 result.extend_from_slice(&chunk_data);
             }
         }
@@ -152,7 +149,7 @@ impl DeltaApplier {
     }
 
     /// 验证差异的完整性
-    pub fn verify_delta(&mut self, delta: &FileDelta, mut chunk_reader: F) -> Result<bool>
+    pub fn verify_delta<F>(&mut self, delta: &FileDelta, mut chunk_reader: F) -> Result<bool>
     where
         F: FnMut(&str) -> Result<Vec<u8>>,
     {
@@ -162,7 +159,8 @@ impl DeltaApplier {
                 cached.clone()
             } else {
                 let data = chunk_reader(&chunk.chunk_id)?;
-                self.block_cache.insert(chunk.chunk_id.clone(), data.clone());
+                self.block_cache
+                    .insert(chunk.chunk_id.clone(), data.clone());
                 data
             };
 
@@ -198,7 +196,7 @@ impl DeltaApplier {
 
 /// 生成版本ID
 fn generate_version_id() -> String {
-    format!("v_{}", Scru128Id::new())
+    format!("v_{}", Scru128Id::new().to_string())
 }
 
 /// 差异统计信息
@@ -287,7 +285,9 @@ mod tests {
         let base_data = b"Hello, World!";
         let new_data = b"Hello, World! This is a test.";
 
-        let delta = generator.generate_delta(base_data, new_data, "test_file", "v_1").unwrap();
+        let delta = generator
+            .generate_delta(base_data, new_data, "test_file", "v_1")
+            .unwrap();
 
         assert_eq!(delta.file_id, "test_file");
         assert_eq!(delta.base_version_id, "v_1");
@@ -301,7 +301,9 @@ mod tests {
         let new_data = b"Hello, World! This is a test.";
 
         let mut generator = create_test_generator();
-        let delta = generator.generate_delta(base_data, new_data, "test_file", "v_1").unwrap();
+        let delta = generator
+            .generate_delta(base_data, new_data, "test_file", "v_1")
+            .unwrap();
 
         // 模拟块读取器
         let mut chunks: HashMap<String, Vec<u8>> = HashMap::new();
@@ -311,12 +313,12 @@ mod tests {
         }
 
         let chunk_reader = |chunk_id: &str| -> Result<Vec<u8>> {
-            Ok(chunks.get(chunk_id)
-                .cloned()
-                .unwrap_or_default())
+            Ok(chunks.get(chunk_id).cloned().unwrap_or_default())
         };
 
-        let result = applier.apply_delta(Some(base_data), &delta, chunk_reader).unwrap();
+        let result = applier
+            .apply_delta(Some(base_data), &delta, chunk_reader)
+            .unwrap();
 
         assert_eq!(result, new_data);
     }
@@ -337,9 +339,7 @@ mod tests {
         }
 
         let chunk_reader = |chunk_id: &str| -> Result<Vec<u8>> {
-            Ok(chunks.get(chunk_id)
-                .cloned()
-                .unwrap_or_default())
+            Ok(chunks.get(chunk_id).cloned().unwrap_or_default())
         };
 
         assert!(applier.verify_delta(&delta, chunk_reader).unwrap());
@@ -362,7 +362,9 @@ mod tests {
     #[test]
     fn test_is_empty() {
         let mut generator = create_test_generator();
-        let empty_delta = generator.generate_delta(&[], &[], "test_file", "v_1").unwrap();
+        let empty_delta = generator
+            .generate_delta(&[], &[], "test_file", "v_1")
+            .unwrap();
 
         assert!(empty_delta.is_empty());
     }

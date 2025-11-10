@@ -18,7 +18,7 @@ use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 use tokio::fs as async_fs;
 use tokio::sync::mpsc;
-use tracing::{debug, info, warn, error};
+use tracing::{debug, error, info, warn};
 
 /// 存储格式版本
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -241,15 +241,13 @@ impl CompatibilityManager {
 
     /// 开始在线迁移
     pub async fn start_online_migration(
-        &self,
+        self: &Arc<Self>,
         source_path: &Path,
         target_path: &Path,
     ) -> Result<()> {
         let mut state = self.migration_state.write().unwrap();
         if *state != MigrationState::NotStarted {
-            return Err(NasError::Other(
-                "迁移已经进行中或已完成".to_string(),
-            ));
+            return Err(NasError::Other("迁移已经进行中或已完成".to_string()));
         }
 
         info!("开始在线迁移: {:?} -> {:?}", source_path, target_path);
@@ -292,7 +290,7 @@ impl CompatibilityManager {
     }
 
     /// 扫描文件
-    async fn scan_files(&self, path: &Path) -> Result<Vec<PathBuf>> {
+    async fn scan_files(self: &Arc<Self>, path: &Path) -> Result<Vec<PathBuf>> {
         let mut files = Vec::new();
         let mut entries = async_fs::read_dir(path).await?;
 
@@ -311,7 +309,7 @@ impl CompatibilityManager {
     }
 
     /// 启动迁移工作线程
-    async fn spawn_migration_workers(&self) -> Result<()> {
+    async fn spawn_migration_workers(self: &Arc<Self>) -> Result<()> {
         let num_workers = self.config.concurrent_migrations;
         let migration_queue = self.migration_queue.clone();
         let progress = self.progress.clone();
@@ -575,9 +573,7 @@ impl CompatibilityManager {
     /// API兼容性层：旧版API适配
     pub async fn handle_legacy_api(&self, request: &str) -> Result<String> {
         if !self.api_config.enable_compat_layer {
-            return Err(NasError::Other(
-                "API兼容性层未启用".to_string(),
-            ));
+            return Err(NasError::Other("API兼容性层未启用".to_string()));
         }
 
         // 这里实现旧版API的适配逻辑
@@ -617,11 +613,7 @@ mod tests {
     async fn test_compatibility_manager_new() {
         let config = MigrationConfig::default();
         let api_config = ApiCompatibilityConfig::default();
-        let manager = CompatibilityManager::new(
-            StorageVersion::V06,
-            config,
-            api_config,
-        );
+        let manager = CompatibilityManager::new(StorageVersion::V06, config, api_config);
 
         manager.init().unwrap();
     }
@@ -631,19 +623,15 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let config = MigrationConfig::default();
         let api_config = ApiCompatibilityConfig::default();
-        let manager = CompatibilityManager::new(
-            StorageVersion::V07,
-            config,
-            api_config,
-        );
+        let manager = CompatibilityManager::new(StorageVersion::V07, config, api_config);
 
         // 创建版本文件
-        fs::write(
-            temp_dir.path().join(".storage_version"),
-            "0.7",
-        ).unwrap();
+        fs::write(temp_dir.path().join(".storage_version"), "0.7").unwrap();
 
-        let version = manager.detect_storage_version(temp_dir.path()).await.unwrap();
+        let version = manager
+            .detect_storage_version(temp_dir.path())
+            .await
+            .unwrap();
         assert_eq!(version, StorageVersion::V07);
     }
 
@@ -651,11 +639,7 @@ mod tests {
     async fn test_migration_progress() {
         let config = MigrationConfig::default();
         let api_config = ApiCompatibilityConfig::default();
-        let manager = CompatibilityManager::new(
-            StorageVersion::V06,
-            config,
-            api_config,
-        );
+        let manager = CompatibilityManager::new(StorageVersion::V06, config, api_config);
 
         let progress = manager.check_migration_progress().await;
         assert_eq!(progress.total_files, 0);
@@ -666,11 +650,7 @@ mod tests {
     async fn test_api_compatibility_check() {
         let config = MigrationConfig::default();
         let api_config = ApiCompatibilityConfig::default();
-        let manager = CompatibilityManager::new(
-            StorageVersion::V07,
-            config,
-            api_config,
-        );
+        let manager = CompatibilityManager::new(StorageVersion::V07, config, api_config);
 
         assert!(manager.check_api_compatibility("0.6.0"));
         assert!(manager.check_api_compatibility("0.7.0"));

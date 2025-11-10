@@ -62,7 +62,9 @@ impl RabinKarpChunker {
     fn calculate_weak_hash(&self, data: &[u8]) -> u32 {
         let mut hash: u64 = 0;
         for &byte in data {
-            hash = hash.wrapping_mul(self.config.rabin_poly as u64).wrapping_add(byte as u64);
+            hash = hash
+                .wrapping_mul(self.config.rabin_poly as u64)
+                .wrapping_add(byte as u64);
         }
         (hash % u32::MAX as u64) as u32
     }
@@ -132,11 +134,7 @@ impl RabinKarpChunker {
                 self.window.push(data[i]);
 
                 if self.window.len() == self.window_size {
-                    self.weak_hash = self.roll_hash(
-                        self.window[0],
-                        data[i],
-                        self.weak_hash,
-                    );
+                    self.weak_hash = self.roll_hash(self.window[0], data[i], self.weak_hash);
                 }
 
                 bytes_processed += 1;

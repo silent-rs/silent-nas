@@ -5,16 +5,24 @@
 //! - 内容定义分块（Content-Defined Chunking）
 //! - 版本链式存储
 //! - 增量更新与读取
+//! - 自动压缩与冷热分离
+//! - 数据生命周期管理
 
 pub mod chunker;
 pub mod delta;
 pub mod storage;
 pub mod index;
+pub mod compression;
+pub mod tiering;
+pub mod lifecycle;
 
 pub use chunker::*;
 pub use delta::*;
 pub use storage::*;
 pub use index::*;
+pub use compression::*;
+pub use tiering::*;
+pub use lifecycle::*;
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;

@@ -119,6 +119,7 @@ pub struct TieredStorage {
     /// LRU访问队列
     lru_queue: RwLock<VecDeque<String>>,
     /// 层级使用统计
+    #[allow(dead_code)]
     tier_usage: RwLock<HashMap<StorageTier, u64>>,
     /// 当前层级使用量
     tier_sizes: RwLock<HashMap<StorageTier, u64>>,

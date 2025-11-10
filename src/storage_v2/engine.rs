@@ -507,7 +507,6 @@ impl StorageEngine {
         }
 
         // 启动异步预读
-        let readahead_size = readahead_size;
         self.read_stats
             .readahead_bytes
             .fetch_add(readahead_size as u64, Ordering::Relaxed);

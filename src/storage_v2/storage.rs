@@ -18,6 +18,7 @@ use tracing::info;
 /// 增量存储管理器
 pub struct IncrementalStorage {
     /// 基础存储管理器
+    #[allow(dead_code)]
     storage: Arc<StorageManager>,
     /// 配置
     config: IncrementalConfig,
@@ -69,21 +70,27 @@ impl IncrementalStorage {
     ) -> Result<(FileDelta, FileVersion)> {
         let version_id = format!("v_{}", scru128::new());
 
-        // 生成差异
+        // 生成差异（使用相同的version_id）
         let base_data = if let Some(parent_id) = parent_version_id {
+            // 只有在有父版本时才读取
             self.read_version_data(parent_id).await?
         } else {
             Vec::new()
         };
 
         let mut generator = crate::storage_v2::delta::DeltaGenerator::new(self.config.clone());
-        let delta =
+        let mut delta =
             generator.generate_delta(&base_data, data, file_id, parent_version_id.unwrap_or(""))?;
+        // 使用相同的version_id
+        delta.new_version_id = version_id.clone();
 
         // 保存块数据
         for chunk in &delta.chunks {
             self.save_chunk(chunk, data).await?;
         }
+
+        // 保存差异数据
+        self.save_delta(file_id, &delta).await?;
 
         // 保存版本信息
         let _version_info = self
@@ -263,6 +270,12 @@ impl IncrementalStorage {
 
         // 保存到磁盘
         let version_path = self.get_version_path(&version_info.version_id);
+
+        // 确保父目录存在
+        if let Some(parent) = version_path.parent() {
+            fs::create_dir_all(parent).await.map_err(NasError::Io)?;
+        }
+
         let data = serde_json::to_vec(&version_info)
             .map_err(|e| NasError::Other(format!("序列化版本信息失败: {}", e)))?;
 
@@ -350,6 +363,24 @@ impl IncrementalStorage {
             .join("deltas")
             .join(file_id)
             .join(format!("{}.json", version_id))
+    }
+
+    /// 保存差异数据
+    async fn save_delta(&self, file_id: &str, delta: &FileDelta) -> Result<()> {
+        let delta_path = self.get_delta_path(file_id, &delta.new_version_id);
+
+        // 创建父目录
+        if let Some(parent) = delta_path.parent() {
+            fs::create_dir_all(parent).await?;
+        }
+
+        // 序列化并保存
+        let data = serde_json::to_vec(delta)
+            .map_err(|e| NasError::Other(format!("序列化差异数据失败: {}", e)))?;
+
+        fs::write(&delta_path, data).await.map_err(NasError::Io)?;
+
+        Ok(())
     }
 
     /// 获取块路径

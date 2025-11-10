@@ -36,6 +36,7 @@ pub struct BlockIndexEntry {
 /// 块索引管理器
 pub struct BlockIndex {
     /// 索引配置
+    #[allow(dead_code)]
     config: BlockIndexConfig,
     /// 内存热索引（常驻内存）
     hot_index: Arc<RwLock<HashMap<String, BlockIndexEntry>>>,

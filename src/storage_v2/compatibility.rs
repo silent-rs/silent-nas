@@ -244,8 +244,13 @@ impl CompatibilityManager {
         source_path: &Path,
         target_path: &Path,
     ) -> Result<()> {
-        let mut state = self.migration_state.write().unwrap();
-        if *state != MigrationState::NotStarted {
+        // 检查迁移状态（先获取状态值）
+        let state_value = {
+            let state = self.migration_state.read().unwrap();
+            state.clone()
+        };
+
+        if state_value != MigrationState::NotStarted {
             return Err(NasError::Other("迁移已经进行中或已完成".to_string()));
         }
 
@@ -280,7 +285,11 @@ impl CompatibilityManager {
             }
         }
 
-        *state = MigrationState::InProgress;
+        // 更新迁移状态
+        {
+            let mut state = self.migration_state.write().unwrap();
+            *state = MigrationState::InProgress;
+        }
 
         // 启动迁移任务
         self.spawn_migration_workers().await?;

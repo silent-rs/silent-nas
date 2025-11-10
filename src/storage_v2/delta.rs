@@ -10,6 +10,7 @@ use std::collections::HashMap;
 
 /// 差异生成器
 pub struct DeltaGenerator {
+    #[allow(dead_code)]
     config: IncrementalConfig,
     chunker: RabinKarpChunker,
 }
@@ -76,6 +77,7 @@ impl DeltaGenerator {
 
 /// 差异应用器
 pub struct DeltaApplier {
+    #[allow(dead_code)]
     config: IncrementalConfig,
     /// 块存储缓存：chunk_id -> 块数据
     block_cache: HashMap<String, Vec<u8>>,

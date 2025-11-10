@@ -217,11 +217,13 @@ impl DedupManager {
 
         // 更新统计信息
         {
+            // 先获取unique_chunks的值（避免在持有stats锁时await）
+            let unique_chunks = self.block_index.read().await.get_stats().await.total_blocks as u64;
+
             let mut stats = self.stats.write().unwrap();
             stats.total_files += 1;
             stats.total_chunks += chunks.len() as u64;
-            stats.unique_chunks =
-                self.block_index.read().await.get_stats().await.total_blocks as u64;
+            stats.unique_chunks = unique_chunks;
             stats.duplicate_chunks = stats.total_chunks.saturating_sub(stats.unique_chunks);
             stats.space_saved += space_saved;
 

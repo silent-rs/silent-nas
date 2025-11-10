@@ -5,10 +5,9 @@
 //! - 弱哈希 + 强哈希双校验
 //! - 边界检测
 
-use crate::error::{NasError, Result};
-use crate::storage_v2::{ChunkInfo, ChunkerType, IncrementalConfig};
+use crate::error::Result;
+use crate::storage_v2::{ChunkInfo, IncrementalConfig};
 use sha2::{Digest, Sha256};
-use std::io::{self, Read};
 
 /// Rabin-Karp 滚动哈希分块器
 pub struct RabinKarpChunker {
@@ -40,7 +39,7 @@ impl RabinKarpChunker {
     /// 计算块的边界检查
     fn is_chunk_boundary(&self, weak_hash: u32, bytes_processed: usize) -> bool {
         // 弱哈希值满足边界条件且已达到最小分块大小
-        (weak_hash as usize) % self.config.weak_hash_mod == 0
+        (weak_hash as usize).is_multiple_of(self.config.weak_hash_mod)
             && bytes_processed >= self.config.min_chunk_size
     }
 
@@ -52,7 +51,7 @@ impl RabinKarpChunker {
         let incoming_u64 = incoming as u64;
 
         let new_hash = (old_hash_u64 + self.config.rabin_poly - outgoing_u64 * self.hash_power)
-            * self.config.rabin_poly as u64
+            * self.config.rabin_poly
             + incoming_u64;
 
         (new_hash % u32::MAX as u64) as u32
@@ -63,7 +62,7 @@ impl RabinKarpChunker {
         let mut hash: u64 = 0;
         for &byte in data {
             hash = hash
-                .wrapping_mul(self.config.rabin_poly as u64)
+                .wrapping_mul(self.config.rabin_poly)
                 .wrapping_add(byte as u64);
         }
         (hash % u32::MAX as u64) as u32
@@ -79,7 +78,7 @@ impl RabinKarpChunker {
     /// 生成分块
     pub fn chunk_data(&mut self, data: &[u8]) -> Result<Vec<ChunkInfo>> {
         let mut chunks = Vec::new();
-        let mut offset = 0u64;
+        let mut offset = 0usize;
         let mut bytes_processed = 0;
 
         // 初始化：填充窗口
@@ -108,7 +107,7 @@ impl RabinKarpChunker {
                 chunks.push(chunk);
 
                 // 更新状态
-                offset = i as u64;
+                offset = i;
                 bytes_processed = 0;
 
                 // 重新初始化窗口
@@ -127,7 +126,7 @@ impl RabinKarpChunker {
             } else {
                 // 滑动窗口：移除最旧字节，添加新字节
                 if self.window.len() == self.window_size {
-                    let outgoing = self.window[0];
+                    let _outgoing = self.window[0];
                     self.window.remove(0);
                 }
 
@@ -143,8 +142,8 @@ impl RabinKarpChunker {
         }
 
         // 处理最后一个块
-        if offset < data.len() as u64 {
-            let remaining_data = &data[offset as usize..];
+        if offset < data.len() {
+            let remaining_data = &data[offset..];
             if !remaining_data.is_empty() {
                 let chunk = ChunkInfo {
                     chunk_id: self.calculate_strong_hash(remaining_data),
@@ -185,7 +184,7 @@ impl FixedSizeChunker {
 impl Chunker for FixedSizeChunker {
     fn chunk(&mut self, data: &[u8]) -> Result<Vec<ChunkInfo>> {
         let mut chunks = Vec::new();
-        let mut offset = 0u64;
+        let mut offset = 0usize;
 
         for chunk in data.chunks(self.chunk_size) {
             let mut hasher = Sha256::new();
@@ -200,7 +199,7 @@ impl Chunker for FixedSizeChunker {
                 strong_hash,
             });
 
-            offset += chunk.len() as u64;
+            offset += chunk.len();
         }
 
         Ok(chunks)
@@ -227,7 +226,7 @@ impl FastChunker {
 impl Chunker for FastChunker {
     fn chunk(&mut self, data: &[u8]) -> Result<Vec<ChunkInfo>> {
         let mut chunks = Vec::new();
-        let mut offset = 0u64;
+        let mut offset = 0usize;
         let mut i = 0;
 
         while i < data.len() {
@@ -258,7 +257,7 @@ impl Chunker for FastChunker {
                 strong_hash,
             });
 
-            offset += chunk.len() as u64;
+            offset += chunk.len();
             i = chunk_end;
         }
 

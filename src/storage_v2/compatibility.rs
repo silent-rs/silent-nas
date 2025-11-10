@@ -17,8 +17,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 use tokio::fs as async_fs;
-use tokio::sync::mpsc;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info};
 
 /// 存储格式版本
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -129,7 +128,7 @@ pub struct MigrationResult {
 }
 
 /// API兼容性配置
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ApiCompatibilityConfig {
     /// 启用API兼容性层
     pub enable_compat_layer: bool,
@@ -292,16 +291,18 @@ impl CompatibilityManager {
     /// 扫描文件
     async fn scan_files(self: &Arc<Self>, path: &Path) -> Result<Vec<PathBuf>> {
         let mut files = Vec::new();
-        let mut entries = async_fs::read_dir(path).await?;
+        let mut stack = vec![path.to_path_buf()];
 
-        while let Some(entry) = entries.next_entry().await? {
-            let path = entry.path();
-            if path.is_file() {
-                files.push(path);
-            } else if path.is_dir() {
-                // 递归扫描子目录
-                let sub_files = self.scan_files(&path).await?;
-                files.extend(sub_files);
+        while let Some(current_path) = stack.pop() {
+            let mut entries = async_fs::read_dir(&current_path).await?;
+
+            while let Some(entry) = entries.next_entry().await? {
+                let path = entry.path();
+                if path.is_file() {
+                    files.push(path);
+                } else if path.is_dir() {
+                    stack.push(path);
+                }
             }
         }
 
@@ -459,7 +460,7 @@ impl CompatibilityManager {
 
         // 模拟格式转换（这里应该实现实际的格式转换逻辑）
         // 例如：压缩、去重、重新组织块等
-        let converted_data = data; // 简化实现
+        let converted_data = data.clone(); // 简化实现
 
         // 写入目标文件
         if let Some(parent) = task.target_path.parent() {
@@ -545,7 +546,7 @@ impl CompatibilityManager {
     /// 获取迁移状态
     pub async fn get_migration_state(&self) -> MigrationState {
         let state = self.migration_state.read().unwrap();
-        *state
+        state.clone()
     }
 
     /// 获取迁移统计

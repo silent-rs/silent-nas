@@ -4,7 +4,7 @@
 //! - 块哈希映射
 //! - 引用计数管理
 //! - 内存热索引 + 磁盘持久化
-use tracing::{info, warn};
+use tracing::info;
 
 use crate::error::{NasError, Result};
 use serde::{Deserialize, Serialize};
@@ -81,7 +81,9 @@ impl BlockIndex {
 
         let now = chrono::Local::now().naive_local();
 
-        let entry = if let Some(mut existing) = index.get_mut(chunk_id) {
+        let entry = if let Some(existing) = index.get_mut(chunk_id) {
+            #[allow(unused_mut)]
+            let mut existing = existing;
             // 块已存在，增加引用计数
             existing.ref_count += 1;
             existing.last_accessed = now;
@@ -145,19 +147,19 @@ impl BlockIndex {
     pub async fn dec_ref(&self, chunk_id: &str) -> Result<u32> {
         let mut index = self.hot_index.write().await;
 
-        if let Some(entry) = index.get_mut(chunk_id) {
-            if entry.ref_count > 0 {
-                entry.ref_count -= 1;
-                entry.last_accessed = chrono::Local::now().naive_local();
+        if let Some(entry) = index.get_mut(chunk_id)
+            && entry.ref_count > 0
+        {
+            entry.ref_count -= 1;
+            entry.last_accessed = chrono::Local::now().naive_local();
 
-                // 如果引用计数为0，标记为可删除
-                if entry.ref_count == 0 {
-                    info!("块引用计数为0: {}", chunk_id);
-                }
-
-                self.save_index().await?;
-                return Ok(entry.ref_count);
+            // 如果引用计数为0，标记为可删除
+            if entry.ref_count == 0 {
+                info!("块引用计数为0: {}", chunk_id);
             }
+
+            self.save_index().await?;
+            return Ok(entry.ref_count);
         }
 
         Err(NasError::Other(format!(
@@ -170,7 +172,7 @@ impl BlockIndex {
     pub async fn remove_block(&self, chunk_id: &str) -> Result<()> {
         let mut index = self.hot_index.write().await;
 
-        if let Some(entry) = index.remove(chunk_id) {
+        if let Some(_entry) = index.remove(chunk_id) {
             // 实际删除文件由调用者处理
             self.save_index().await?;
             info!("从索引中移除块: {}", chunk_id);

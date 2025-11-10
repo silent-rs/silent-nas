@@ -20,19 +20,28 @@ pub mod lifecycle;
 pub mod storage;
 pub mod tiering;
 
+#[allow(ambiguous_glob_reexports)]
 pub use chunker::*;
+#[allow(ambiguous_glob_reexports)]
 pub use compatibility::*;
+#[allow(ambiguous_glob_reexports)]
 pub use compression::*;
+#[allow(ambiguous_glob_reexports)]
 pub use dedup::*;
+#[allow(ambiguous_glob_reexports)]
 pub use delta::*;
+#[allow(ambiguous_glob_reexports)]
 pub use engine::*;
+#[allow(ambiguous_glob_reexports)]
 pub use index::*;
+#[allow(ambiguous_glob_reexports)]
 pub use lifecycle::*;
+#[allow(ambiguous_glob_reexports)]
 pub use storage::*;
+#[allow(ambiguous_glob_reexports)]
 pub use tiering::*;
 
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
 
 /// 增量存储配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -48,7 +57,7 @@ pub struct IncrementalConfig {
     /// 滚动哈希多项式（Rabin-Karp）
     pub rabin_poly: u64,
     /// 弱哈希模数
-    pub weak_hash_mod: u32,
+    pub weak_hash_mod: usize,
     /// 启用压缩
     pub enable_compression: bool,
     /// 压缩算法 (lz4, zstd)
@@ -90,7 +99,7 @@ pub struct ChunkInfo {
     /// 块ID（哈希值）
     pub chunk_id: String,
     /// 块在文件中的偏移量
-    pub offset: u64,
+    pub offset: usize,
     /// 块大小
     pub size: usize,
     /// 弱哈希值

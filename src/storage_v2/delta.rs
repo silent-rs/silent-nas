@@ -3,10 +3,9 @@
 //! 该模块实现增量更新的差异生成和应用功能
 
 use crate::error::{NasError, Result};
-use crate::models::FileMetadata;
-use crate::storage_v2::{ChunkInfo, FileDelta, IncrementalConfig, RabinKarpChunker, VersionInfo};
+use crate::storage_v2::{FileDelta, IncrementalConfig, RabinKarpChunker};
 use chrono::Local;
-use scru128::Scru128Id;
+use sha2::Digest;
 use std::collections::HashMap;
 
 /// 差异生成器
@@ -121,12 +120,12 @@ impl DeltaApplier {
 
         for chunk in &delta.chunks {
             // 复制基础数据中到当前块偏移量的部分
-            if chunk.offset as usize > base_pos {
-                let copy_len = (chunk.offset as usize) - base_pos;
+            if chunk.offset > base_pos {
+                let copy_len = chunk.offset - base_pos;
                 if base_pos + copy_len <= base_data.len() {
                     result.extend_from_slice(&base_data[base_pos..base_pos + copy_len]);
                 }
-                base_pos = chunk.offset as usize;
+                base_pos = chunk.offset;
             }
 
             // 读取并添加新块数据
@@ -196,7 +195,7 @@ impl DeltaApplier {
 
 /// 生成版本ID
 fn generate_version_id() -> String {
-    format!("v_{}", Scru128Id::new().to_string())
+    format!("v_{}", scru128::new())
 }
 
 /// 差异统计信息
@@ -308,7 +307,7 @@ mod tests {
         // 模拟块读取器
         let mut chunks: HashMap<String, Vec<u8>> = HashMap::new();
         for chunk in &delta.chunks {
-            let chunk_data = &new_data[chunk.offset as usize..chunk.offset as usize + chunk.size];
+            let chunk_data = &new_data[chunk.offset..chunk.offset + chunk.size];
             chunks.insert(chunk.chunk_id.clone(), chunk_data.to_vec());
         }
 
@@ -334,7 +333,7 @@ mod tests {
         // 创建块数据
         let mut chunks: HashMap<String, Vec<u8>> = HashMap::new();
         for chunk in &delta.chunks {
-            let chunk_data = &data[chunk.offset as usize..chunk.offset as usize + chunk.size];
+            let chunk_data = &data[chunk.offset..chunk.offset + chunk.size];
             chunks.insert(chunk.chunk_id.clone(), chunk_data.to_vec());
         }
 

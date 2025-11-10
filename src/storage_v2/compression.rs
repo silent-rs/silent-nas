@@ -8,23 +8,18 @@
 
 use crate::error::{NasError, Result};
 use serde::{Deserialize, Serialize};
-use std::io::{self, Read, Write};
+use std::io::{Read, Write};
 
 /// 压缩算法类型
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum CompressionAlgorithm {
     /// 无压缩
     None,
     /// LZ4压缩（快速）
+    #[default]
     LZ4,
     /// Zstd压缩（高压缩比）
     Zstd,
-}
-
-impl Default for CompressionAlgorithm {
-    fn default() -> Self {
-        CompressionAlgorithm::LZ4
-    }
 }
 
 /// 压缩配置
@@ -107,7 +102,7 @@ impl Compressor {
         };
 
         let duration = start.elapsed();
-        let ratio = if data.len() > 0 {
+        let ratio = if !data.is_empty() {
             data.len() as f32 / compressed_data.len() as f32
         } else {
             1.0
@@ -152,16 +147,15 @@ impl Compressor {
 }
 
 /// LZ4压缩
-fn compress_lz4(data: &[u8], level: u32) -> Result<Vec<u8>> {
+fn compress_lz4(data: &[u8], _level: u32) -> Result<Vec<u8>> {
     // 使用lz4_flex库进行压缩
-    let compressed = lz4_flex::block::compress(data)
-        .map_err(|e| NasError::Other(format!("LZ4压缩失败: {}", e)))?;
+    let compressed = lz4_flex::block::compress(data);
     Ok(compressed)
 }
 
 /// LZ4解压缩
 fn decompress_lz4(data: &[u8]) -> Result<Vec<u8>> {
-    let decompressed = lz4_flex::block::decompress(data, None)
+    let decompressed = lz4_flex::block::decompress(data, 0)
         .map_err(|e| NasError::Other(format!("LZ4解压缩失败: {}", e)))?;
     Ok(decompressed)
 }
@@ -216,6 +210,12 @@ pub struct AlgorithmStats {
     pub algorithm: CompressionAlgorithm,
     pub count: u64,
     pub avg_ratio: f32,
+}
+
+impl Default for CompressionStats {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl CompressionStats {
@@ -287,7 +287,7 @@ mod tests {
         assert!(result.original_size >= result.compressed_size);
         assert!(result.ratio >= 1.0);
 
-        let decompressed = compressor.decompress(&data, result.algorithm).unwrap();
+        let decompressed = compressor.decompress(data, result.algorithm).unwrap();
         assert_eq!(decompressed, data);
     }
 

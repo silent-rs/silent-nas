@@ -6,12 +6,12 @@ use crate::error::{NasError, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::str::FromStr;
 use tokio::sync::RwLock;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 /// 存储层级
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum StorageTier {
     /// 热数据（SSD，频繁访问）
     Hot,
@@ -30,14 +30,16 @@ impl StorageTier {
             StorageTier::Cold => "cold",
         }
     }
+}
 
-    /// 从字符串创建
-    pub fn from_str(s: &str) -> Option<Self> {
+impl FromStr for StorageTier {
+    type Err = ();
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         match s {
-            "hot" => Some(StorageTier::Hot),
-            "warm" => Some(StorageTier::Warm),
-            "cold" => Some(StorageTier::Cold),
-            _ => None,
+            "hot" => Ok(StorageTier::Hot),
+            "warm" => Ok(StorageTier::Warm),
+            "cold" => Ok(StorageTier::Cold),
+            _ => Err(()),
         }
     }
 }
@@ -209,12 +211,16 @@ impl TieredStorage {
                 .unwrap_or(recommended_tier)
         };
 
+        // 提取文件名
+        let file_name = storage_path.file_name().unwrap_or_default();
+        let file_name_path = std::path::Path::new(file_name).to_path_buf();
+
         // 创建数据项
         let item = DataItem {
             file_id: file_id.to_string(),
             size,
             tier,
-            storage_path,
+            storage_path: storage_path.clone(),
             created_at: chrono::Local::now().naive_local(),
             last_accessed: chrono::Local::now().naive_local(),
             total_accesses: 0,
@@ -222,11 +228,11 @@ impl TieredStorage {
         };
 
         // 检查目标层级
-        let target_path = self
+        let _target_path = self
             .tier_roots
             .get(&tier)
             .ok_or_else(|| NasError::Other(format!("未找到层级 {:?} 的根目录", tier.as_str())))?
-            .join(storage_path.file_name().unwrap_or_default());
+            .join(file_name_path);
 
         // 实际移动文件由调用者处理
         items.insert(file_id.to_string(), item);
@@ -420,7 +426,7 @@ impl TieredStorage {
 
     /// 清理未引用的数据项
     pub async fn cleanup_unreferenced(&self) -> Result<u32> {
-        let mut items = self.items.write().await;
+        let items = self.items.read().await;
         let lru_queue = self.lru_queue.read().await;
 
         // 查找LRU队列中不存在的数据项
@@ -432,6 +438,7 @@ impl TieredStorage {
         }
 
         // 标记为可删除（实际删除由外部处理）
+        let count = to_remove.len();
         for file_id in to_remove {
             if let Some(item) = items.get(&file_id) {
                 warn!(
@@ -442,7 +449,7 @@ impl TieredStorage {
             }
         }
 
-        Ok(to_remove.len() as u32)
+        Ok(count as u32)
     }
 
     /// 加载现有数据项
@@ -453,23 +460,23 @@ impl TieredStorage {
 
             while let Some(entry) = entries.next_entry().await.map_err(NasError::Io)? {
                 let path = entry.path();
-                if path.is_file() {
-                    if let Some(file_id) = path.file_name().and_then(|s| s.to_str()) {
-                        let metadata = entry.metadata().await.map_err(NasError::Io)?;
+                if path.is_file()
+                    && let Some(file_id) = path.file_name().and_then(|s| s.to_str())
+                {
+                    let metadata = entry.metadata().await.map_err(NasError::Io)?;
 
-                        let item = DataItem {
-                            file_id: file_id.to_string(),
-                            size: metadata.len(),
-                            tier: *tier,
-                            storage_path: path.clone(),
-                            created_at: chrono::Local::now().naive_local(),
-                            last_accessed: chrono::Local::now().naive_local(),
-                            total_accesses: 0,
-                            is_compressed: false,
-                        };
+                    let item = DataItem {
+                        file_id: file_id.to_string(),
+                        size: metadata.len(),
+                        tier: *tier,
+                        storage_path: path.clone(),
+                        created_at: chrono::Local::now().naive_local(),
+                        last_accessed: chrono::Local::now().naive_local(),
+                        total_accesses: 0,
+                        is_compressed: false,
+                    };
 
-                        self.items.write().await.insert(file_id.to_string(), item);
-                    }
+                    self.items.write().await.insert(file_id.to_string(), item);
                 }
             }
         }
@@ -510,6 +517,12 @@ pub struct TierStats {
     pub cold_size: u64,
     pub cold_capacity: u64,
     pub cold_used: u64,
+}
+
+impl Default for TierStats {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl TierStats {
@@ -556,10 +569,10 @@ mod tests {
 
     #[test]
     fn test_storage_tier_from_str() {
-        assert_eq!(StorageTier::from_str("hot"), Some(StorageTier::Hot));
-        assert_eq!(StorageTier::from_str("warm"), Some(StorageTier::Warm));
-        assert_eq!(StorageTier::from_str("cold"), Some(StorageTier::Cold));
-        assert_eq!(StorageTier::from_str("invalid"), None);
+        assert_eq!(StorageTier::from_str("hot"), Ok(StorageTier::Hot));
+        assert_eq!(StorageTier::from_str("warm"), Ok(StorageTier::Warm));
+        assert_eq!(StorageTier::from_str("cold"), Ok(StorageTier::Cold));
+        assert_eq!(StorageTier::from_str("invalid"), Err(()));
     }
 
     #[test]

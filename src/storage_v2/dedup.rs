@@ -7,14 +7,14 @@
 //! - 批量去重操作
 //! - 并发去重控制
 
-use crate::error::{NasError, Result};
-use crate::storage_v2::{BlockIndex, BlockIndexConfig, BlockIndexEntry};
+use crate::error::Result;
+use crate::storage_v2::{BlockIndex, BlockIndexConfig};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use tokio::sync::RwLock as AsyncRwLock;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 /// 去重配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -158,6 +158,7 @@ impl DedupManager {
         }
 
         let mut file_chunks = HashSet::new();
+        #[allow(unused_mut)]
         let mut block_index = self.block_index.write().await;
 
         for chunk in chunks {
@@ -322,21 +323,22 @@ impl DedupManager {
         };
 
         if let Some(chunks) = file_chunks {
+            #[allow(unused_mut)]
             let mut block_index = self.block_index.write().await;
 
             for chunk_id in chunks {
                 // 减少引用计数
-                if let Ok(ref_count) = block_index.dec_ref(&chunk_id).await {
-                    if ref_count == 0 {
-                        // 引用计数为0，清理块
-                        block_index.remove_block(&chunk_id).await?;
+                if let Ok(ref_count) = block_index.dec_ref(&chunk_id).await
+                    && ref_count == 0
+                {
+                    // 引用计数为0，清理块
+                    block_index.remove_block(&chunk_id).await?;
 
-                        // 清理内存中的引用信息
-                        let mut block_refs = self.block_refs.write().unwrap();
-                        block_refs.remove(&chunk_id);
+                    // 清理内存中的引用信息
+                    let mut block_refs = self.block_refs.write().unwrap();
+                    block_refs.remove(&chunk_id);
 
-                        removed_blocks += 1;
-                    }
+                    removed_blocks += 1;
                 }
             }
         }
@@ -355,7 +357,7 @@ impl DedupManager {
             for chunk_id in chunks {
                 chunk_to_files
                     .entry(chunk_id.clone())
-                    .or_insert_with(HashSet::new)
+                    .or_default()
                     .insert(file_id.clone());
             }
         }
@@ -363,7 +365,7 @@ impl DedupManager {
         // 查找共享相同块集的文件
         let mut duplicate_groups: HashMap<String, HashSet<String>> = HashMap::new();
 
-        for (chunk_id, file_ids) in chunk_to_files {
+        for (_chunk_id, file_ids) in chunk_to_files {
             if file_ids.len() > 1 {
                 // 对文件ID列表排序，生成组合键
                 let mut sorted_files: Vec<String> = file_ids.iter().cloned().collect();
@@ -372,7 +374,7 @@ impl DedupManager {
                 let group_key = sorted_files.join("|");
                 duplicate_groups
                     .entry(group_key)
-                    .or_insert_with(HashSet::new)
+                    .or_default()
                     .extend(sorted_files);
             }
         }
@@ -410,7 +412,7 @@ impl DedupManager {
 
     /// 同步索引到磁盘
     pub async fn sync(&self) -> Result<()> {
-        let block_index = self.block_index.read().await;
+        let _block_index = self.block_index.read().await;
         // BlockIndex 内部会自动处理持久化
         debug!("去重索引已同步");
         Ok(())

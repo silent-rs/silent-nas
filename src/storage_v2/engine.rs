@@ -7,20 +7,19 @@
 //! - 读写锁分离与写入队列管理
 //! - 锁竞争优化
 
-use crate::error::{NasError, Result};
+use crate::error::Result;
 use crate::storage_v2::{
-    BlockIndex, BlockIndexConfig, ChunkInfo, DedupConfig, DedupManager, LifecycleConfig,
-    LifecycleManager, TierConfig, TieredStorage,
+    BlockIndex, BlockIndexConfig, DedupConfig, DedupManager, LifecycleConfig, LifecycleManager,
+    TierConfig, TieredStorage,
 };
 use moka::future::Cache as MokaCache;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap, VecDeque};
-use std::path::{Path, PathBuf};
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
-use tokio::sync::{RwLock as AsyncRwLock, Semaphore, mpsc};
-use tracing::{debug, info, warn};
+use tokio::sync::{RwLock as AsyncRwLock, Semaphore};
+use tracing::info;
 
 /// 存储引擎配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -105,7 +104,7 @@ pub struct ReadaheadWindow {
 }
 
 /// 写入统计
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default)]
 pub struct WriteStats {
     /// 写入请求数
     pub write_requests: AtomicU64,
@@ -124,7 +123,7 @@ pub struct WriteStats {
 }
 
 /// 读取统计
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default)]
 pub struct ReadStats {
     /// 读取请求数
     pub read_requests: AtomicU64,
@@ -182,14 +181,15 @@ impl StorageEngine {
         lifecycle_config: LifecycleConfig,
         root_path: &str,
     ) -> Self {
+        let index_config_clone = index_config.clone();
         let block_index = Arc::new(AsyncRwLock::new(BlockIndex::new(
-            index_config,
+            index_config_clone,
             &format!("{}/index", root_path),
         )));
 
         let dedup_manager = Arc::new(AsyncRwLock::new(DedupManager::new(
             dedup_config,
-            index_config.clone(),
+            index_config,
             &format!("{}/dedup", root_path),
         )));
 
@@ -202,7 +202,7 @@ impl StorageEngine {
 
         let read_cache = Arc::new(AsyncRwLock::new(
             MokaCache::builder()
-                .max_capacity(config.cache_size)
+                .max_capacity(config.cache_size as u64)
                 .time_to_live(Duration::from_secs(config.cache_ttl_secs))
                 .build(),
         ));
@@ -269,7 +269,7 @@ impl StorageEngine {
 
         // 启动缓存清理任务
         let read_cache = self.read_cache.clone();
-        let cache_ttl = Duration::from_secs(self.config.cache_ttl_secs);
+        let _cache_ttl = Duration::from_secs(self.config.cache_ttl_secs);
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(300)); // 5分钟
             loop {
@@ -351,9 +351,9 @@ impl StorageEngine {
     }
 
     /// 直接写入
-    async fn write_direct(&self, file_id: &str, offset: u64, data: &[u8]) -> Result<u64> {
+    async fn write_direct(&self, file_id: &str, _offset: u64, data: &[u8]) -> Result<u64> {
         // 1. 检查MVCC版本
-        let version = {
+        let _version = {
             let versions = self.mvcc_versions.read().unwrap();
             versions.get(file_id).copied().unwrap_or(0)
         };
@@ -361,7 +361,7 @@ impl StorageEngine {
         // 2. 执行去重
         // 这里应该先分块，然后去重
         // 简化实现：直接将整个数据作为一个块
-        let chunk_id = format!("{}_{:x}", file_id, md5::compute(data));
+        let _chunk_id = format!("{}_{:x}", file_id, md5::compute(data));
 
         // 3. 更新生命周期
         self.lifecycle_manager
@@ -391,6 +391,7 @@ impl StorageEngine {
 
         // 收集要刷新的任务
         let tasks: Vec<_> = queue.drain(..).collect();
+        let task_count = tasks.len();
 
         // 批量处理
         for task in tasks {
@@ -404,7 +405,7 @@ impl StorageEngine {
         }
 
         write_stats.flush_count.fetch_add(1, Ordering::Relaxed);
-        info!("刷新了 {} 个写入任务", tasks.len());
+        info!("刷新了 {} 个写入任务", task_count);
     }
 
     /// 读取数据
@@ -418,7 +419,7 @@ impl StorageEngine {
         // 1. 检查缓存
         {
             let cache = self.read_cache.read().await;
-            if let Some(entry) = cache.get(&cache_key) {
+            if let Some(entry) = cache.get(&cache_key).await {
                 // 缓存命中
                 self.read_stats.cache_hits.fetch_add(1, Ordering::Relaxed);
 
@@ -442,6 +443,7 @@ impl StorageEngine {
 
         // 3. 缓存数据
         {
+            #[allow(unused_mut)]
             let mut cache = self.read_cache.write().await;
             cache
                 .insert(
@@ -478,7 +480,7 @@ impl StorageEngine {
     }
 
     /// 执行实际读取
-    async fn read_actual(&self, file_id: &str, offset: u64, size: usize) -> Result<Vec<u8>> {
+    async fn read_actual(&self, _file_id: &str, _offset: u64, size: usize) -> Result<Vec<u8>> {
         // TODO: 从实际存储中读取数据
         // 这里应该根据版本链和块索引来重构数据
         Ok(vec![0u8; size])
@@ -520,39 +522,39 @@ impl StorageEngine {
     }
 
     /// MVCC：读取指定版本
-    pub async fn read_version(&self, file_id: &str, version: u64) -> Result<Vec<u8>> {
+    pub async fn read_version(&self, _file_id: &str, _version: u64) -> Result<Vec<u8>> {
         // TODO: 实现版本读取逻辑
         let size = 1024;
         Ok(vec![0u8; size])
     }
 
     /// MVCC：提交版本
-    pub async fn commit_version(&self, file_id: &str, version: u64) -> Result<()> {
+    pub async fn commit_version(&self, _file_id: &str, _version: u64) -> Result<()> {
         // 版本提交后需要强制刷新
         self.force_flush.store(true, Ordering::Relaxed);
         Ok(())
     }
 
     /// MVCC：回滚版本
-    pub async fn rollback_version(&self, file_id: &str, version: u64) -> Result<()> {
+    pub async fn rollback_version(&self, file_id: &str, _version: u64) -> Result<()> {
         let mut versions = self.mvcc_versions.write().unwrap();
         versions.remove(file_id);
         Ok(())
     }
 
     /// 获取写入统计
-    pub fn get_write_stats(&self) -> WriteStats {
+    pub fn get_write_stats(&self) -> Arc<WriteStats> {
         self.write_stats.clone()
     }
 
     /// 获取读取统计
-    pub fn get_read_stats(&self) -> ReadStats {
+    pub fn get_read_stats(&self) -> Arc<ReadStats> {
         self.read_stats.clone()
     }
 
     /// 获取缓存效率
     pub async fn get_cache_efficiency(&self) -> f32 {
-        let cache = self.read_cache.read().await;
+        let _cache = self.read_cache.read().await;
         let hits = self.read_stats.cache_hits.load(Ordering::Relaxed);
         let misses = self.read_stats.cache_misses.load(Ordering::Relaxed);
         let total = hits + misses;
@@ -583,9 +585,8 @@ impl StorageEngine {
     pub async fn flush(&self) -> Result<u32> {
         self.force_flush.store(true, Ordering::Relaxed);
 
-        let mut flushed_count = 0;
         let mut queue = self.write_queue.write().await;
-        flushed_count = queue.len() as u32;
+        let flushed_count = queue.len() as u32;
         queue.clear();
 
         self.write_stats.flush_count.fetch_add(1, Ordering::Relaxed);
@@ -597,6 +598,7 @@ impl StorageEngine {
 
     /// 清理缓存
     pub async fn clear_cache(&self) -> Result<u32> {
+        #[allow(unused_mut)]
         let mut cache = self.read_cache.write().await;
         let size = cache.weighted_size();
         cache.invalidate_all();

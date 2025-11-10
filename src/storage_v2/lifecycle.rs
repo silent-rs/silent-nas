@@ -2,7 +2,7 @@
 //!
 //! 实现TTL、版本保留和自动清理功能
 
-use crate::error::{NasError, Result};
+use crate::error::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -10,9 +10,10 @@ use tokio::fs;
 use tracing::{info, warn};
 
 /// 生命周期策略
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub enum LifecyclePolicy {
     /// 永久保存
+    #[default]
     Permanent,
     /// 基于TTL的自动过期
     Ttl {
@@ -36,12 +37,6 @@ pub enum LifecyclePolicy {
         /// 版本保留天数
         retain_days: u64,
     },
-}
-
-impl Default for LifecyclePolicy {
-    fn default() -> Self {
-        LifecyclePolicy::Permanent
-    }
 }
 
 /// 生命周期配置
@@ -72,7 +67,7 @@ impl Default for LifecycleConfig {
 }
 
 /// 生命周期状态
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LifecycleState {
     /// 活跃
     Active,
@@ -149,7 +144,7 @@ impl LifecycleManager {
         if let Some(entry) = self.entries.get_mut(file_id) {
             entry.last_accessed = chrono::Local::now().naive_local();
             // 重新计算清理时间
-            let cleanup_time = self.calculate_cleanup_time(entry);
+            let cleanup_time = Self::calculate_cleanup_time(entry);
             entry.scheduled_cleanup_at = cleanup_time;
             info!("更新访问时间: {}", file_id);
         }
@@ -161,7 +156,7 @@ impl LifecycleManager {
         if let Some(entry) = self.entries.get_mut(file_id) {
             entry.last_modified = chrono::Local::now().naive_local();
             // 重新计算清理时间
-            let cleanup_time = self.calculate_cleanup_time(entry);
+            let cleanup_time = Self::calculate_cleanup_time(entry);
             entry.scheduled_cleanup_at = cleanup_time;
             info!("更新修改时间: {}", file_id);
         }
@@ -178,7 +173,7 @@ impl LifecycleManager {
         let mut expired_files = Vec::new();
 
         for (file_id, entry) in self.entries.iter_mut() {
-            let new_state = self.calculate_state(entry, now.clone());
+            let new_state = Self::calculate_state(entry, now);
 
             if new_state != entry.state {
                 state_changes.push(StateChange {
@@ -222,7 +217,7 @@ impl LifecycleManager {
         }
 
         let mut result = CleanupResult::default();
-        let now = chrono::Local::now().naive_local();
+        let _now = chrono::Local::now().naive_local();
 
         // 收集所有已过期的文件
         let mut to_cleanup: Vec<String> = Vec::new();
@@ -302,7 +297,7 @@ impl LifecycleManager {
     }
 
     /// 计算清理时间
-    fn calculate_cleanup_time(&self, entry: &LifecycleEntry) -> Option<chrono::NaiveDateTime> {
+    fn calculate_cleanup_time(entry: &LifecycleEntry) -> Option<chrono::NaiveDateTime> {
         match &entry.policy {
             LifecyclePolicy::Permanent => None,
             LifecyclePolicy::Ttl { ttl_seconds } => {
@@ -324,12 +319,8 @@ impl LifecycleManager {
     }
 
     /// 计算生命周期状态
-    fn calculate_state(
-        &self,
-        entry: &LifecycleEntry,
-        now: chrono::NaiveDateTime,
-    ) -> LifecycleState {
-        let cleanup_time = self.calculate_cleanup_time(entry);
+    fn calculate_state(entry: &LifecycleEntry, now: chrono::NaiveDateTime) -> LifecycleState {
+        let cleanup_time = Self::calculate_cleanup_time(entry);
 
         match cleanup_time {
             None => LifecycleState::Active, // 永久保存
@@ -450,6 +441,12 @@ pub struct LifecycleStats {
     pub expired_files: u64,
     pub cleaned_files: u64,
     pub policy_stats: HashMap<String, u64>,
+}
+
+impl Default for LifecycleStats {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl LifecycleStats {

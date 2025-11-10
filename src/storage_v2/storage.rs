@@ -3,7 +3,7 @@
 //! 实现版本链式存储和块级存储功能
 
 use crate::error::{NasError, Result};
-use crate::models::{FileMetadata, FileVersion};
+use crate::models::FileVersion;
 use crate::storage::StorageManager;
 use crate::storage_v2::{ChunkInfo, FileDelta, IncrementalConfig, VersionInfo};
 use chrono::Local;
@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
-use tracing::{debug, info};
+use tracing::info;
 
 /// 增量存储管理器
 pub struct IncrementalStorage {
@@ -47,7 +47,7 @@ impl IncrementalStorage {
     }
 
     /// 初始化增量存储
-    pub async fn init(&self) -> Result<()> {
+    pub async fn init(&mut self) -> Result<()> {
         // 创建版本目录
         fs::create_dir_all(&self.version_root).await?;
         fs::create_dir_all(&self.chunk_root).await?;
@@ -67,7 +67,7 @@ impl IncrementalStorage {
         data: &[u8],
         parent_version_id: Option<&str>,
     ) -> Result<(FileDelta, FileVersion)> {
-        let version_id = format!("v_{}", scru128::Scru128Id::new());
+        let version_id = format!("v_{}", scru128::new());
 
         // 生成差异
         let base_data = if let Some(parent_id) = parent_version_id {
@@ -86,7 +86,7 @@ impl IncrementalStorage {
         }
 
         // 保存版本信息
-        let version_info = self
+        let _version_info = self
             .save_version_info(file_id, &delta, parent_version_id)
             .await?;
 
@@ -99,6 +99,8 @@ impl IncrementalStorage {
             hash: self.calculate_hash(data),
             created_at: Local::now().naive_local(),
             author: None,
+            comment: None,
+            is_current: true,
         };
 
         Ok((delta, file_version))
@@ -107,31 +109,31 @@ impl IncrementalStorage {
     /// 读取版本数据
     pub async fn read_version_data(&self, version_id: &str) -> Result<Vec<u8>> {
         // 获取版本信息
-        let version_info = self.get_version_info(version_id).await?;
+        let _version_info = self.get_version_info(version_id).await?;
 
         // 重建文件数据
         let mut result = Vec::new();
-        let mut current_version_id = version_id;
+        let mut current_version_id = version_id.to_string();
 
         loop {
-            let version = self.get_version_info(current_version_id).await?;
+            let version = self.get_version_info(&current_version_id).await?;
             let delta = self
-                .read_delta(&version.file_id, current_version_id)
+                .read_delta(&version.file_id, &current_version_id)
                 .await?;
 
             // 读取并应用分块
             for chunk in &delta.chunks {
                 let chunk_data = self.read_chunk(&chunk.chunk_id).await?;
                 // 扩展到正确的偏移量
-                if result.len() < chunk.offset as usize {
-                    result.resize(chunk.offset as usize, 0);
+                if result.len() < chunk.offset {
+                    result.resize(chunk.offset, 0);
                 }
                 result.extend_from_slice(&chunk_data);
             }
 
             // 如果有父版本，继续向上遍历
             if let Some(parent_id) = version.parent_version_id {
-                current_version_id = &parent_id;
+                current_version_id = parent_id;
             } else {
                 break;
             }
@@ -216,7 +218,7 @@ impl IncrementalStorage {
 
     /// 保存块数据
     async fn save_chunk(&mut self, chunk: &ChunkInfo, file_data: &[u8]) -> Result<()> {
-        let chunk_data = &file_data[chunk.offset as usize..chunk.offset as usize + chunk.size];
+        let chunk_data = &file_data[chunk.offset..chunk.offset + chunk.size];
         let chunk_path = self.get_chunk_path(&chunk.chunk_id);
 
         // 创建父目录
@@ -295,15 +297,16 @@ impl IncrementalStorage {
 
         while let Some(entry) = entries.next_entry().await? {
             let path = entry.path();
-            if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("json") {
-                if let Some(file_name) = path.file_name().and_then(|s| s.to_str()) {
-                    let version_id = file_name.strip_suffix(".json").unwrap_or(file_name);
-                    let data = fs::read(&path).await.map_err(NasError::Io)?;
-                    let version_info: VersionInfo = serde_json::from_slice(&data)
-                        .map_err(|e| NasError::Other(format!("加载版本信息失败: {}", e)))?;
-                    self.version_index
-                        .insert(version_id.to_string(), version_info);
-                }
+            if path.is_file()
+                && path.extension().and_then(|s| s.to_str()) == Some("json")
+                && let Some(file_name) = path.file_name().and_then(|s| s.to_str())
+            {
+                let version_id = file_name.strip_suffix(".json").unwrap_or(file_name);
+                let data = fs::read(&path).await.map_err(NasError::Io)?;
+                let version_info: VersionInfo = serde_json::from_slice(&data)
+                    .map_err(|e| NasError::Other(format!("加载版本信息失败: {}", e)))?;
+                self.version_index
+                    .insert(version_id.to_string(), version_info);
             }
         }
 
@@ -323,10 +326,10 @@ impl IncrementalStorage {
 
         while let Some(entry) = entries.next_entry().await? {
             let path = entry.path();
-            if path.is_file() {
-                if let Some(file_name) = path.file_name().and_then(|s| s.to_str()) {
-                    self.block_index.insert(file_name.to_string(), path);
-                }
+            if path.is_file()
+                && let Some(file_name) = path.file_name().and_then(|s| s.to_str())
+            {
+                self.block_index.insert(file_name.to_string(), path);
             }
         }
 
@@ -428,7 +431,7 @@ mod tests {
             .unwrap();
 
         let data2 = b"Version 2 - updated";
-        let (_delta2, version2) = storage
+        let (_delta2, _version2) = storage
             .save_version("test_file", data2, Some(&version1.version_id))
             .await
             .unwrap();

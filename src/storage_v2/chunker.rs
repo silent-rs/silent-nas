@@ -46,15 +46,18 @@ impl RabinKarpChunker {
     /// 滚动计算哈希值
     fn roll_hash(&self, outgoing: u8, incoming: u8, old_hash: u32) -> u32 {
         // (old_hash - outgoing * base^window_size-1) * base + incoming
-        let old_hash_u64 = old_hash as u64;
         let outgoing_u64 = outgoing as u64;
         let incoming_u64 = incoming as u64;
 
-        let new_hash = (old_hash_u64 + self.config.rabin_poly - outgoing_u64 * self.hash_power)
-            * self.config.rabin_poly
-            + incoming_u64;
+        // 使用u128防止溢出，先加一个大的模数避免负数
+        const MODULO: u128 = u32::MAX as u128;
+        let base_power = self.config.rabin_poly as u128 * self.hash_power as u128 % MODULO;
 
-        (new_hash % u32::MAX as u64) as u32
+        let new_hash_u128 = ((old_hash as u128 + MODULO - base_power)
+            * self.config.rabin_poly as u128
+            + incoming_u64 as u128) % MODULO;
+
+        new_hash_u128 as u32
     }
 
     /// 计算弱哈希

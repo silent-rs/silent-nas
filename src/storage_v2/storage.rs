@@ -490,3 +490,6 @@ mod tests {
         assert!(stats.total_chunks > 0);
     }
 }
+// 性能对比测试：原版存储 vs v0.7.0增量存储
+// 使用方法：cargo test --lib bench_comparison
+

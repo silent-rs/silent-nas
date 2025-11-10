@@ -9,6 +9,7 @@
 //! - 数据生命周期管理
 //! - 跨文件块级去重
 
+pub mod bench;
 pub mod chunker;
 pub mod compatibility;
 pub mod compression;

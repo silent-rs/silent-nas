@@ -110,7 +110,7 @@ impl IncrementalSyncHandler {
         // 4. 如果哈希相同，无需同步
         if local_sig.file_hash == remote_signature.file_hash {
             info!("文件哈希相同，无需同步: file_id={}", file_id);
-            return self.storage.read_file(file_id).await;
+            return self.storage.read_file(file_id).await.map_err(Into::into);
         }
 
         // 5. 计算差异
@@ -121,7 +121,7 @@ impl IncrementalSyncHandler {
             Some(d) => d,
             None => {
                 info!("无差异，无需同步: file_id={}", file_id);
-                return self.storage.read_file(file_id).await;
+                return self.storage.read_file(file_id).await.map_err(Into::into);
             }
         };
 

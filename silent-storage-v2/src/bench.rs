@@ -3,8 +3,8 @@
 
 #[cfg(test)]
 mod tests {
-    use crate::storage::StorageManager;
-    use crate::storage_v2::{IncrementalConfig, IncrementalStorage};
+    use silent_storage_v1::StorageManager;
+    use crate::{IncrementalConfig, IncrementalStorage};
     use std::sync::Arc;
     use tempfile::TempDir;
 

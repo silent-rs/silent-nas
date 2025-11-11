@@ -745,7 +745,7 @@ impl NodeSyncCoordinator {
                             "读取文件内容(按ID): file_id={}, addr={}",
                             file_id, node_address
                         );
-                        storage.read_file(&file_id).await
+                        storage.read_file(&file_id).await.map_err(Into::into)
                     };
 
                     match content_res {

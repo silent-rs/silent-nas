@@ -8,7 +8,7 @@
 //! - 锁竞争优化
 
 use crate::error::Result;
-use crate::storage_v2::{
+use crate::{
     BlockIndex, BlockIndexConfig, DedupConfig, DedupManager, LifecycleConfig, LifecycleManager,
     TierConfig, TieredStorage,
 };

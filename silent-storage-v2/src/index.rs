@@ -6,7 +6,7 @@
 //! - 内存热索引 + 磁盘持久化
 use tracing::info;
 
-use crate::error::{NasError, Result};
+use crate::error::{StorageError, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -144,7 +144,7 @@ impl BlockIndex {
             return Ok(entry.ref_count);
         }
 
-        Err(NasError::Other(format!("块不存在: {}", chunk_id)))
+        Err(StorageError::Storage(format!("块不存在: {}", chunk_id)))
     }
 
     /// 减少引用计数
@@ -168,7 +168,7 @@ impl BlockIndex {
             return Ok(entry.ref_count);
         }
 
-        Err(NasError::Other(format!(
+        Err(StorageError::Storage(format!(
             "块不存在或引用计数异常: {}",
             chunk_id
         )))
@@ -258,9 +258,9 @@ impl BlockIndex {
             return Ok(());
         }
 
-        let data = fs::read(&self.index_path).await.map_err(NasError::Io)?;
+        let data = fs::read(&self.index_path).await.map_err(StorageError::Io)?;
         let entries: Vec<BlockIndexEntry> = serde_json::from_slice(&data)
-            .map_err(|e| NasError::Other(format!("反序列化索引失败: {}", e)))?;
+            .map_err(|e| StorageError::Storage(format!("反序列化索引失败: {}", e)))?;
 
         let mut index = self.hot_index.write().await;
         for entry in entries {
@@ -277,14 +277,14 @@ impl BlockIndex {
         let entries: Vec<BlockIndexEntry> = index.values().cloned().collect();
 
         let data = serde_json::to_vec_pretty(&entries)
-            .map_err(|e| NasError::Other(format!("序列化索引失败: {}", e)))?;
+            .map_err(|e| StorageError::Storage(format!("序列化索引失败: {}", e)))?;
 
         // 原子性写入
         let temp_path = self.index_path.with_extension("tmp");
-        fs::write(&temp_path, data).await.map_err(NasError::Io)?;
+        fs::write(&temp_path, data).await.map_err(StorageError::Io)?;
         fs::rename(temp_path, &self.index_path)
             .await
-            .map_err(NasError::Io)?;
+            .map_err(StorageError::Io)?;
 
         Ok(())
     }

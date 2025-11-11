@@ -2,10 +2,10 @@
 //!
 //! 实现版本链式存储和块级存储功能
 
-use crate::error::{NasError, Result};
-use crate::models::FileVersion;
-use crate::storage::StorageManager;
-use crate::storage_v2::{ChunkInfo, FileDelta, IncrementalConfig, VersionInfo};
+use crate::error::{StorageError, Result};
+use silent_nas_core::FileVersion;
+use silent_storage_v1::StorageManager;
+use crate::{ChunkInfo, FileDelta, IncrementalConfig, VersionInfo};
 use chrono::Local;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -78,7 +78,7 @@ impl IncrementalStorage {
             Vec::new()
         };
 
-        let mut generator = crate::storage_v2::delta::DeltaGenerator::new(self.config.clone());
+        let mut generator = crate::delta::DeltaGenerator::new(self.config.clone());
         let mut delta =
             generator.generate_delta(&base_data, data, file_id, parent_version_id.unwrap_or(""))?;
         // 使用相同的version_id
@@ -157,9 +157,9 @@ impl IncrementalStorage {
 
         // 从磁盘读取
         let version_path = self.get_version_path(version_id);
-        let data = fs::read(&version_path).await.map_err(NasError::Io)?;
+        let data = fs::read(&version_path).await.map_err(StorageError::Io)?;
         let version_info: VersionInfo = serde_json::from_slice(&data)
-            .map_err(|e| NasError::Other(format!("反序列化版本信息失败: {}", e)))?;
+            .map_err(|e| StorageError::Storage(format!("反序列化版本信息失败: {}", e)))?;
 
         Ok(version_info)
     }
@@ -247,7 +247,7 @@ impl IncrementalStorage {
     /// 读取块数据
     async fn read_chunk(&self, chunk_id: &str) -> Result<Vec<u8>> {
         let chunk_path = self.get_chunk_path(chunk_id);
-        fs::read(&chunk_path).await.map_err(NasError::Io)
+        fs::read(&chunk_path).await.map_err(StorageError::Io)
     }
 
     /// 保存版本信息
@@ -273,13 +273,13 @@ impl IncrementalStorage {
 
         // 确保父目录存在
         if let Some(parent) = version_path.parent() {
-            fs::create_dir_all(parent).await.map_err(NasError::Io)?;
+            fs::create_dir_all(parent).await.map_err(StorageError::Io)?;
         }
 
         let data = serde_json::to_vec(&version_info)
-            .map_err(|e| NasError::Other(format!("序列化版本信息失败: {}", e)))?;
+            .map_err(|e| StorageError::Storage(format!("序列化版本信息失败: {}", e)))?;
 
-        fs::write(&version_path, data).await.map_err(NasError::Io)?;
+        fs::write(&version_path, data).await.map_err(StorageError::Io)?;
 
         // 更新索引
         self.version_index
@@ -291,9 +291,9 @@ impl IncrementalStorage {
     /// 读取差异数据
     async fn read_delta(&self, file_id: &str, version_id: &str) -> Result<FileDelta> {
         let delta_path = self.get_delta_path(file_id, version_id);
-        let data = fs::read(&delta_path).await.map_err(NasError::Io)?;
+        let data = fs::read(&delta_path).await.map_err(StorageError::Io)?;
         let delta: FileDelta = serde_json::from_slice(&data)
-            .map_err(|e| NasError::Other(format!("反序列化差异数据失败: {}", e)))?;
+            .map_err(|e| StorageError::Storage(format!("反序列化差异数据失败: {}", e)))?;
 
         Ok(delta)
     }
@@ -306,7 +306,7 @@ impl IncrementalStorage {
             return Ok(());
         }
 
-        let mut entries = fs::read_dir(&versions_dir).await.map_err(NasError::Io)?;
+        let mut entries = fs::read_dir(&versions_dir).await.map_err(StorageError::Io)?;
 
         while let Some(entry) = entries.next_entry().await? {
             let path = entry.path();
@@ -315,9 +315,9 @@ impl IncrementalStorage {
                 && let Some(file_name) = path.file_name().and_then(|s| s.to_str())
             {
                 let version_id = file_name.strip_suffix(".json").unwrap_or(file_name);
-                let data = fs::read(&path).await.map_err(NasError::Io)?;
+                let data = fs::read(&path).await.map_err(StorageError::Io)?;
                 let version_info: VersionInfo = serde_json::from_slice(&data)
-                    .map_err(|e| NasError::Other(format!("加载版本信息失败: {}", e)))?;
+                    .map_err(|e| StorageError::Storage(format!("加载版本信息失败: {}", e)))?;
                 self.version_index
                     .insert(version_id.to_string(), version_info);
             }
@@ -335,7 +335,7 @@ impl IncrementalStorage {
             return Ok(());
         }
 
-        let mut entries = fs::read_dir(&chunks_dir).await.map_err(NasError::Io)?;
+        let mut entries = fs::read_dir(&chunks_dir).await.map_err(StorageError::Io)?;
 
         while let Some(entry) = entries.next_entry().await? {
             let path = entry.path();
@@ -376,9 +376,9 @@ impl IncrementalStorage {
 
         // 序列化并保存
         let data = serde_json::to_vec(delta)
-            .map_err(|e| NasError::Other(format!("序列化差异数据失败: {}", e)))?;
+            .map_err(|e| StorageError::Storage(format!("序列化差异数据失败: {}", e)))?;
 
-        fs::write(&delta_path, data).await.map_err(NasError::Io)?;
+        fs::write(&delta_path, data).await.map_err(StorageError::Io)?;
 
         Ok(())
     }

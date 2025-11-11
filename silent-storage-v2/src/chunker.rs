@@ -6,7 +6,7 @@
 //! - 边界检测
 
 use crate::error::Result;
-use crate::storage_v2::{ChunkInfo, IncrementalConfig};
+use crate::{ChunkInfo, IncrementalConfig};
 use sha2::{Digest, Sha256};
 
 /// Rabin-Karp 滚动哈希分块器

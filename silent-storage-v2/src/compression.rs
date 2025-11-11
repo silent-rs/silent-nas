@@ -6,7 +6,7 @@
 //! - 性能优化
 //! - 冷数据自动压缩
 
-use crate::error::{NasError, Result};
+use crate::error::{StorageError, Result};
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 
@@ -156,7 +156,7 @@ fn compress_lz4(data: &[u8], _level: u32) -> Result<Vec<u8>> {
 /// LZ4解压缩
 fn decompress_lz4(data: &[u8]) -> Result<Vec<u8>> {
     let decompressed = lz4_flex::block::decompress(data, 0)
-        .map_err(|e| NasError::Other(format!("LZ4解压缩失败: {}", e)))?;
+        .map_err(|e| StorageError::Storage(format!("LZ4解压缩失败: {}", e)))?;
     Ok(decompressed)
 }
 
@@ -164,24 +164,24 @@ fn decompress_lz4(data: &[u8]) -> Result<Vec<u8>> {
 fn compress_zstd(data: &[u8], level: u32) -> Result<Vec<u8>> {
     // 使用zstd库进行压缩
     let mut encoder = zstd::Encoder::new(Vec::new(), level as i32)
-        .map_err(|e| NasError::Other(format!("Zstd压缩初始化失败: {}", e)))?;
+        .map_err(|e| StorageError::Storage(format!("Zstd压缩初始化失败: {}", e)))?;
     encoder
         .write_all(data)
-        .map_err(|e| NasError::Other(format!("Zstd压缩写入失败: {}", e)))?;
+        .map_err(|e| StorageError::Storage(format!("Zstd压缩写入失败: {}", e)))?;
     let compressed = encoder
         .finish()
-        .map_err(|e| NasError::Other(format!("Zstd压缩失败: {}", e)))?;
+        .map_err(|e| StorageError::Storage(format!("Zstd压缩失败: {}", e)))?;
     Ok(compressed)
 }
 
 /// Zstd解压缩
 fn decompress_zstd(data: &[u8]) -> Result<Vec<u8>> {
     let mut decoder = zstd::Decoder::new(data)
-        .map_err(|e| NasError::Other(format!("Zstd解压缩初始化失败: {}", e)))?;
+        .map_err(|e| StorageError::Storage(format!("Zstd解压缩初始化失败: {}", e)))?;
     let mut decompressed = Vec::new();
     decoder
         .read_to_end(&mut decompressed)
-        .map_err(|e| NasError::Other(format!("Zstd解压缩失败: {}", e)))?;
+        .map_err(|e| StorageError::Storage(format!("Zstd解压缩失败: {}", e)))?;
     Ok(decompressed)
 }
 

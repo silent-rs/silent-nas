@@ -8,7 +8,7 @@
 //! - 并发去重控制
 
 use crate::error::Result;
-use crate::storage_v2::{BlockIndex, BlockIndexConfig};
+use crate::{BlockIndex, BlockIndexConfig};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -142,7 +142,7 @@ impl DedupManager {
     pub async fn process_file(
         &self,
         file_id: &str,
-        chunks: &[crate::storage_v2::ChunkInfo],
+        chunks: &[crate::ChunkInfo],
     ) -> Result<DedupResult> {
         let start = std::time::Instant::now();
         let mut deduped_blocks = 0;
@@ -263,7 +263,7 @@ impl DedupManager {
     /// 批量处理文件
     pub async fn batch_process_files(
         &self,
-        files: Vec<(&str, Vec<crate::storage_v2::ChunkInfo>)>,
+        files: Vec<(&str, Vec<crate::ChunkInfo>)>,
     ) -> Result<DedupResult> {
         let start = std::time::Instant::now();
         let mut total_deduped_files = 0;
@@ -530,14 +530,14 @@ mod tests {
         manager.init().await.unwrap();
 
         let chunks = vec![
-            crate::storage_v2::ChunkInfo {
+            crate::ChunkInfo {
                 chunk_id: "chunk1".to_string(),
                 offset: 0,
                 size: 1024,
                 weak_hash: 0,
                 strong_hash: "hash1".to_string(),
             },
-            crate::storage_v2::ChunkInfo {
+            crate::ChunkInfo {
                 chunk_id: "chunk2".to_string(),
                 offset: 1024,
                 size: 2048,
@@ -564,7 +564,7 @@ mod tests {
         let manager = DedupManager::new(config, index_config, temp_dir.path().to_str().unwrap());
         manager.init().await.unwrap();
 
-        let chunks = vec![crate::storage_v2::ChunkInfo {
+        let chunks = vec![crate::ChunkInfo {
             chunk_id: "chunk1".to_string(),
             offset: 0,
             size: 1024,
@@ -594,7 +594,7 @@ mod tests {
         let manager = DedupManager::new(config, index_config, temp_dir.path().to_str().unwrap());
         manager.init().await.unwrap();
 
-        let chunks = vec![crate::storage_v2::ChunkInfo {
+        let chunks = vec![crate::ChunkInfo {
             chunk_id: "chunk1".to_string(),
             offset: 0,
             size: 1024,
@@ -619,7 +619,7 @@ mod tests {
         let manager = DedupManager::new(config, index_config, temp_dir.path().to_str().unwrap());
         manager.init().await.unwrap();
 
-        let chunks = vec![crate::storage_v2::ChunkInfo {
+        let chunks = vec![crate::ChunkInfo {
             chunk_id: "chunk1".to_string(),
             offset: 0,
             size: 1024,
@@ -646,7 +646,7 @@ mod tests {
         let manager = DedupManager::new(config, index_config, temp_dir.path().to_str().unwrap());
         manager.init().await.unwrap();
 
-        let chunks = vec![crate::storage_v2::ChunkInfo {
+        let chunks = vec![crate::ChunkInfo {
             chunk_id: "chunk1".to_string(),
             offset: 0,
             size: 1024,

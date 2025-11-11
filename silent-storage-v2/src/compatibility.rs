@@ -8,7 +8,7 @@
 //! - API兼容性层
 //! - 向后兼容策略
 
-use crate::error::{NasError, Result};
+use crate::error::{StorageError, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::fs;
@@ -251,7 +251,7 @@ impl CompatibilityManager {
         };
 
         if state_value != MigrationState::NotStarted {
-            return Err(NasError::Other("迁移已经进行中或已完成".to_string()));
+            return Err(StorageError::Storage("迁移已经进行中或已完成".to_string()));
         }
 
         info!("开始在线迁移: {:?} -> {:?}", source_path, target_path);
@@ -583,7 +583,7 @@ impl CompatibilityManager {
     /// API兼容性层：旧版API适配
     pub async fn handle_legacy_api(&self, request: &str) -> Result<String> {
         if !self.api_config.enable_compat_layer {
-            return Err(NasError::Other("API兼容性层未启用".to_string()));
+            return Err(StorageError::Storage("API兼容性层未启用".to_string()));
         }
 
         // 这里实现旧版API的适配逻辑

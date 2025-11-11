@@ -2,8 +2,8 @@
 //!
 //! 该模块实现增量更新的差异生成和应用功能
 
-use crate::error::{NasError, Result};
-use crate::storage_v2::{FileDelta, IncrementalConfig, RabinKarpChunker};
+use crate::error::{StorageError, Result};
+use crate::{FileDelta, IncrementalConfig, RabinKarpChunker};
 use chrono::Local;
 use sha2::Digest;
 use std::collections::HashMap;
@@ -48,7 +48,7 @@ impl DeltaGenerator {
         let chunks = self
             .chunker
             .chunk_data(new_data)
-            .map_err(|e| NasError::Other(format!("分块失败: {}", e)))?;
+            .map_err(|e| StorageError::Storage(format!("分块失败: {}", e)))?;
 
         Ok(FileDelta {
             file_id: file_id.to_string(),

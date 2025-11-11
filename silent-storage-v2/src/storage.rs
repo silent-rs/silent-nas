@@ -2,12 +2,12 @@
 //!
 //! 实现版本链式存储和块级存储功能
 
-use crate::error::{StorageError, Result};
-use silent_nas_core::FileVersion;
-use silent_storage_v1::StorageManager;
+use crate::error::{Result, StorageError};
 use crate::{ChunkInfo, FileDelta, IncrementalConfig, VersionInfo};
 use chrono::Local;
 use serde::{Deserialize, Serialize};
+use silent_nas_core::FileVersion;
+use silent_storage_v1::StorageManager;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -279,7 +279,9 @@ impl IncrementalStorage {
         let data = serde_json::to_vec(&version_info)
             .map_err(|e| StorageError::Storage(format!("序列化版本信息失败: {}", e)))?;
 
-        fs::write(&version_path, data).await.map_err(StorageError::Io)?;
+        fs::write(&version_path, data)
+            .await
+            .map_err(StorageError::Io)?;
 
         // 更新索引
         self.version_index
@@ -306,7 +308,9 @@ impl IncrementalStorage {
             return Ok(());
         }
 
-        let mut entries = fs::read_dir(&versions_dir).await.map_err(StorageError::Io)?;
+        let mut entries = fs::read_dir(&versions_dir)
+            .await
+            .map_err(StorageError::Io)?;
 
         while let Some(entry) = entries.next_entry().await? {
             let path = entry.path();
@@ -378,7 +382,9 @@ impl IncrementalStorage {
         let data = serde_json::to_vec(delta)
             .map_err(|e| StorageError::Storage(format!("序列化差异数据失败: {}", e)))?;
 
-        fs::write(&delta_path, data).await.map_err(StorageError::Io)?;
+        fs::write(&delta_path, data)
+            .await
+            .map_err(StorageError::Io)?;
 
         Ok(())
     }

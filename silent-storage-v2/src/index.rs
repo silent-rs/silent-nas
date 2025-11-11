@@ -6,7 +6,7 @@
 //! - 内存热索引 + 磁盘持久化
 use tracing::info;
 
-use crate::error::{StorageError, Result};
+use crate::error::{Result, StorageError};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -281,7 +281,9 @@ impl BlockIndex {
 
         // 原子性写入
         let temp_path = self.index_path.with_extension("tmp");
-        fs::write(&temp_path, data).await.map_err(StorageError::Io)?;
+        fs::write(&temp_path, data)
+            .await
+            .map_err(StorageError::Io)?;
         fs::rename(temp_path, &self.index_path)
             .await
             .map_err(StorageError::Io)?;

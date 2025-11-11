@@ -5,15 +5,13 @@ use crate::auth::AuthManager;
 use crate::notify::EventNotifier;
 use crate::search::SearchEngine;
 use crate::storage::StorageManager;
-use crate::version::VersionManager;
-use serde::Deserialize;
-use std::sync::Arc;
-
-// 当作为 main.rs 的子模块时，使用 super 访问同级模块
 #[cfg(not(test))]
 use crate::sync::crdt::SyncManager;
 #[cfg(not(test))]
 use crate::sync::incremental::IncrementalSyncHandler;
+use crate::version::VersionManager;
+use serde::Deserialize;
+use std::sync::Arc;
 
 // 测试时的占位符
 #[cfg(test)]

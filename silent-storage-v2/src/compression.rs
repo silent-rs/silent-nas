@@ -6,7 +6,7 @@
 //! - 性能优化
 //! - 冷数据自动压缩
 
-use crate::error::{StorageError, Result};
+use crate::error::{Result, StorageError};
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 

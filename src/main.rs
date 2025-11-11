@@ -11,6 +11,7 @@ mod notify;
 mod rpc;
 mod s3;
 mod search;
+mod storage;
 mod sync;
 mod transfer;
 mod version;
@@ -23,10 +24,9 @@ use notify::EventNotifier;
 use rpc::FileServiceImpl;
 use sha2::Digest;
 use silent::prelude::*;
-use silent_storage_v1 as storage;
-use silent_storage_v1::StorageManager;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use storage::StorageManager;
 use sync::crdt::SyncManager;
 use tonic::transport::Server as TonicServer;
 use tracing::{Level, error, info};
@@ -44,8 +44,9 @@ async fn main() -> Result<()> {
     let config = Config::load();
     info!("配置加载完成: {:?}", config);
 
-    // 初始化存储管理器
-    let storage = StorageManager::new(config.storage.root_path.clone(), config.storage.chunk_size);
+    // 初始化存储管理器（根据配置选择版本）
+    let storage = storage::create_storage(&config.storage)?;
+    info!("存储引擎版本: {}", config.storage.version);
     storage.init().await?;
 
     // 尝试连接 NATS（可选，单节点模式下可不连接）
@@ -61,7 +62,7 @@ async fn main() -> Result<()> {
     let node_id = scru128::new_string();
     let sync_manager = SyncManager::new(
         node_id.clone(),
-        Arc::new(storage.clone()),
+        storage.clone(),
         notifier.clone().map(Arc::new),
     );
     info!("同步管理器已初始化: node_id={}", node_id);
@@ -69,7 +70,7 @@ async fn main() -> Result<()> {
     // 初始化版本管理器
     let version_config = VersionConfig::default();
     let version_manager = VersionManager::new(
-        Arc::new(storage.clone()),
+        storage.clone(),
         version_config,
         &config.storage.root_path.to_string_lossy(),
     );
@@ -103,7 +104,7 @@ async fn main() -> Result<()> {
             sync_manager.clone(),
             nats_notifier.get_client(),
             config.nats.topic_prefix.clone(),
-            storage.clone(),
+            storage.as_ref().clone(),
             config.storage.chunk_size,
             config.sync.http_connect_timeout,
             config.sync.http_request_timeout,
@@ -143,7 +144,7 @@ async fn main() -> Result<()> {
     let http_handle = tokio::spawn(async move {
         if let Err(e) = http::start_http_server(
             &http_addr_clone,
-            storage_clone,
+            storage_clone.as_ref().clone(),
             notifier_clone,
             sync_clone,
             version_clone,
@@ -325,7 +326,8 @@ async fn main() -> Result<()> {
     let storage_quic = storage.clone();
     let notifier_quic = notifier.clone();
     let quic_handle = tokio::spawn(async move {
-        let mut quic_server = transfer::QuicTransferServer::new(storage_quic, notifier_quic);
+        let mut quic_server =
+            transfer::QuicTransferServer::new(storage_quic.as_ref().clone(), notifier_quic);
         if let Err(e) = quic_server.start(quic_addr).await {
             error!("QUIC 服务器错误: {}", e);
         }
@@ -382,7 +384,7 @@ async fn main() -> Result<()> {
 /// 启动 gRPC 服务器
 async fn start_grpc_server(
     addr: SocketAddr,
-    storage: StorageManager,
+    storage: Arc<StorageManager>,
     notifier: Option<EventNotifier>,
     source_http_addr: String,
     sync_manager: Arc<SyncManager>,
@@ -395,7 +397,7 @@ async fn start_grpc_server(
     use crate::sync::node::service::NodeSyncServiceImpl;
 
     let file_service = FileServiceImpl::new(
-        storage.clone(),
+        storage.as_ref().clone(),
         notifier.clone(),
         Some(source_http_addr.clone()),
     );
@@ -436,7 +438,7 @@ async fn start_grpc_server(
         },
         node_manager.clone(),
         sync_manager.clone(),
-        Arc::new(storage.clone()),
+        storage.clone(),
     );
 
     // 启动节点心跳与自动同步任务
@@ -489,12 +491,8 @@ async fn start_grpc_server(
         tracing::warn!("连接种子节点失败: {}", e);
     }
 
-    let node_service = NodeSyncServiceImpl::new(
-        node_manager,
-        node_sync,
-        sync_manager,
-        Arc::new(storage.clone()),
-    );
+    let node_service =
+        NodeSyncServiceImpl::new(node_manager, node_sync, sync_manager, storage.clone());
 
     info!("gRPC 服务器启动: {}", addr);
 
@@ -511,14 +509,13 @@ async fn start_grpc_server(
 /// 启动 WebDAV 服务器
 async fn start_webdav_server(
     addr: &str,
-    storage: StorageManager,
+    storage: Arc<StorageManager>,
     notifier: Option<EventNotifier>,
     sync_manager: Arc<SyncManager>,
     source_http_addr: String,
     version_manager: Arc<VersionManager>,
     search_engine: Arc<search::SearchEngine>,
 ) -> Result<()> {
-    let storage = Arc::new(storage);
     let notifier = notifier.map(Arc::new);
 
     let route = webdav::create_webdav_routes(
@@ -545,14 +542,13 @@ async fn start_webdav_server(
 /// 启动 S3 服务器
 async fn start_s3_server(
     addr: &str,
-    storage: StorageManager,
+    storage: Arc<StorageManager>,
     notifier: Option<EventNotifier>,
     s3_config: config::S3Config,
     source_http_addr: String,
     versioning_manager: Arc<s3::VersioningManager>,
     version_manager: Arc<VersionManager>,
 ) -> Result<()> {
-    let storage = Arc::new(storage);
     let notifier = notifier.map(Arc::new);
 
     // 配置S3认证

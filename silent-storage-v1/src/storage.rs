@@ -1,7 +1,7 @@
 use crate::error::{Result, StorageError};
 use async_trait::async_trait;
-use silent_nas_core::FileMetadata;
 use sha2::{Digest, Sha256};
+use silent_nas_core::FileMetadata;
 use std::path::{Path, PathBuf};
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
@@ -399,7 +399,11 @@ impl silent_nas_core::StorageManager for StorageManager {
         StorageManager::init(self).await
     }
 
-    async fn save_file(&self, file_id: &str, data: &[u8]) -> std::result::Result<FileMetadata, Self::Error> {
+    async fn save_file(
+        &self,
+        file_id: &str,
+        data: &[u8],
+    ) -> std::result::Result<FileMetadata, Self::Error> {
         StorageManager::save_file(self, file_id, data).await
     }
 
@@ -431,7 +435,11 @@ impl silent_nas_core::StorageManager for StorageManager {
         StorageManager::list_files(self).await
     }
 
-    async fn verify_hash(&self, file_id: &str, expected_hash: &str) -> std::result::Result<bool, Self::Error> {
+    async fn verify_hash(
+        &self,
+        file_id: &str,
+        expected_hash: &str,
+    ) -> std::result::Result<bool, Self::Error> {
         StorageManager::verify_hash(self, file_id, expected_hash).await
     }
 

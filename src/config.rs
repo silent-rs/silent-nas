@@ -31,6 +31,15 @@ pub struct ServerConfig {
 pub struct StorageConfig {
     pub root_path: PathBuf,
     pub chunk_size: usize,
+    /// 存储引擎版本: "v1" (基础存储) 或 "v2" (增量存储，支持去重和压缩)
+    #[serde(default = "StorageConfig::default_version")]
+    pub version: String,
+}
+
+impl StorageConfig {
+    fn default_version() -> String {
+        "v1".to_string()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -217,6 +226,7 @@ impl Default for Config {
             storage: StorageConfig {
                 root_path: PathBuf::from("./storage"),
                 chunk_size: 4 * 1024 * 1024, // 4MB
+                version: "v1".to_string(),
             },
             nats: NatsConfig {
                 url: "nats://127.0.0.1:4222".to_string(),
@@ -473,10 +483,12 @@ mod tests {
         let storage = StorageConfig {
             root_path: PathBuf::from("/tmp/storage"),
             chunk_size: 8 * 1024 * 1024,
+            version: "v2".to_string(),
         };
 
         assert_eq!(storage.root_path, PathBuf::from("/tmp/storage"));
         assert_eq!(storage.chunk_size, 8 * 1024 * 1024);
+        assert_eq!(storage.version, "v2");
     }
 
     #[test]

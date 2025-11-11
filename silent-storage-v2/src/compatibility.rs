@@ -8,7 +8,7 @@
 //! - API兼容性层
 //! - 向后兼容策略
 
-use crate::error::{StorageError, Result};
+use crate::error::{Result, StorageError};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::fs;

@@ -2,7 +2,7 @@
 //!
 //! 实现基于LRU的访问频率统计和冷热数据自动分层存储
 
-use crate::error::{StorageError, Result};
+use crate::error::{Result, StorageError};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -233,7 +233,9 @@ impl TieredStorage {
         let _target_path = self
             .tier_roots
             .get(&tier)
-            .ok_or_else(|| StorageError::Storage(format!("未找到层级 {:?} 的根目录", tier.as_str())))?
+            .ok_or_else(|| {
+                StorageError::Storage(format!("未找到层级 {:?} 的根目录", tier.as_str()))
+            })?
             .join(file_name_path);
 
         // 实际移动文件由调用者处理

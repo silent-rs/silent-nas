@@ -2,7 +2,7 @@
 //!
 //! 该模块实现增量更新的差异生成和应用功能
 
-use crate::error::{StorageError, Result};
+use crate::error::{Result, StorageError};
 use crate::{FileDelta, IncrementalConfig, RabinKarpChunker};
 use chrono::Local;
 use sha2::Digest;

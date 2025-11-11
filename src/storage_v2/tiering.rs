@@ -197,12 +197,10 @@ impl TieredStorage {
         size: u64,
         storage_path: PathBuf,
     ) -> Result<StorageTier> {
-        let mut items = self.items.write().await;
-
-        // 计算推荐层级
+        // 计算推荐层级（在获取写锁之前）
         let recommended_tier = self.calculate_recommended_tier(file_id).await;
 
-        // 检查容量限制
+        // 检查容量限制（在获取写锁之前）
         let tier = if self.can_fit_in_tier(recommended_tier, size).await {
             recommended_tier
         } else {
@@ -211,6 +209,9 @@ impl TieredStorage {
                 .await
                 .unwrap_or(recommended_tier)
         };
+
+        // 现在获取写锁进行实际操作
+        let mut items = self.items.write().await;
 
         // 提取文件名
         let file_name = storage_path.file_name().unwrap_or_default();
@@ -237,6 +238,7 @@ impl TieredStorage {
 
         // 实际移动文件由调用者处理
         items.insert(file_id.to_string(), item);
+        drop(items); // 显式释放 items 写锁
 
         // 更新使用统计
         let mut tier_sizes = self.tier_sizes.write().await;

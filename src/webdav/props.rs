@@ -287,6 +287,13 @@ mod tests {
             Default::default(),
             dir.path().to_str().unwrap(),
         );
+        let search_engine = Arc::new(
+            crate::search::SearchEngine::new(
+                dir.path().join("search_index"),
+                dir.path().to_path_buf(),
+            )
+            .unwrap(),
+        );
         WebDavHandler::new(
             storage,
             None,
@@ -294,6 +301,7 @@ mod tests {
             "".into(),
             "http://127.0.0.1:8080".into(),
             ver,
+            search_engine,
         )
     }
 

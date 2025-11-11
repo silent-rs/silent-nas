@@ -158,8 +158,6 @@ impl DedupManager {
         }
 
         let mut file_chunks = HashSet::new();
-        #[allow(unused_mut)]
-        let mut block_index = self.block_index.write().await;
 
         for chunk in chunks {
             // 跳过小于阈值的块
@@ -168,10 +166,16 @@ impl DedupManager {
                 continue;
             }
 
-            // 检查块是否已存在
-            if block_index.contains(&chunk.chunk_id).await {
+            // 检查块是否已存在（需要获取锁）
+            let block_index = self.block_index.read().await;
+            let exists = block_index.contains(&chunk.chunk_id).await;
+            drop(block_index); // 释放读锁
+
+            if exists {
                 // 块已存在，增加引用
+                let block_index = self.block_index.read().await;
                 let ref_count = block_index.inc_ref(&chunk.chunk_id).await?;
+                drop(block_index); // 释放读锁
                 deduped_blocks += 1;
                 space_saved += chunk.size as u64;
 
@@ -185,10 +189,12 @@ impl DedupManager {
                 debug!("块 {} 已存在，增加引用计数到 {}", chunk.chunk_id, ref_count);
             } else {
                 // 新块，添加到索引
+                let block_index = self.block_index.read().await;
                 let storage_path = block_index.get_block_path(&chunk.chunk_id);
                 block_index
-                    .add_block(&chunk.chunk_id, chunk.size, storage_path)
+                    .add_block(&chunk.chunk_id, chunk.size, storage_path.clone())
                     .await?;
+                drop(block_index); // 释放读锁
 
                 // 创建新的引用信息
                 let mut block_refs = self.block_refs.write().unwrap();
@@ -199,7 +205,7 @@ impl DedupManager {
                         file_ids: HashSet::from([file_id.to_string()]),
                         ref_count: 1,
                         size: chunk.size as u64,
-                        storage_path: block_index.get_block_path(&chunk.chunk_id),
+                        storage_path,
                         last_accessed: chrono::Local::now().naive_local(),
                         created_at: chrono::Local::now().naive_local(),
                     },
@@ -499,7 +505,10 @@ mod tests {
     async fn test_dedup_manager_new() {
         let temp_dir = TempDir::new().unwrap();
         let config = DedupConfig::default();
-        let index_config = BlockIndexConfig::default();
+        let index_config = BlockIndexConfig {
+            auto_save: false, // 禁用自动保存以提高测试速度
+            ..Default::default()
+        };
         let manager = DedupManager::new(config, index_config, temp_dir.path().to_str().unwrap());
 
         manager.init().await.unwrap();
@@ -513,7 +522,10 @@ mod tests {
     async fn test_process_file_new_blocks() {
         let temp_dir = TempDir::new().unwrap();
         let config = DedupConfig::default();
-        let index_config = BlockIndexConfig::default();
+        let index_config = BlockIndexConfig {
+            auto_save: false, // 禁用自动保存以提高测试速度
+            ..Default::default()
+        };
         let manager = DedupManager::new(config, index_config, temp_dir.path().to_str().unwrap());
         manager.init().await.unwrap();
 
@@ -545,7 +557,10 @@ mod tests {
     async fn test_process_file_duplicate_blocks() {
         let temp_dir = TempDir::new().unwrap();
         let config = DedupConfig::default();
-        let index_config = BlockIndexConfig::default();
+        let index_config = BlockIndexConfig {
+            auto_save: false, // 禁用自动保存以提高测试速度
+            ..Default::default()
+        };
         let manager = DedupManager::new(config, index_config, temp_dir.path().to_str().unwrap());
         manager.init().await.unwrap();
 
@@ -572,7 +587,10 @@ mod tests {
     async fn test_remove_file() {
         let temp_dir = TempDir::new().unwrap();
         let config = DedupConfig::default();
-        let index_config = BlockIndexConfig::default();
+        let index_config = BlockIndexConfig {
+            auto_save: false, // 禁用自动保存以提高测试速度
+            ..Default::default()
+        };
         let manager = DedupManager::new(config, index_config, temp_dir.path().to_str().unwrap());
         manager.init().await.unwrap();
 
@@ -594,7 +612,10 @@ mod tests {
     async fn test_find_duplicate_files() {
         let temp_dir = TempDir::new().unwrap();
         let config = DedupConfig::default();
-        let index_config = BlockIndexConfig::default();
+        let index_config = BlockIndexConfig {
+            auto_save: false, // 禁用自动保存以提高测试速度
+            ..Default::default()
+        };
         let manager = DedupManager::new(config, index_config, temp_dir.path().to_str().unwrap());
         manager.init().await.unwrap();
 
@@ -618,7 +639,10 @@ mod tests {
     async fn test_get_efficiency_analysis() {
         let temp_dir = TempDir::new().unwrap();
         let config = DedupConfig::default();
-        let index_config = BlockIndexConfig::default();
+        let index_config = BlockIndexConfig {
+            auto_save: false, // 禁用自动保存以提高测试速度
+            ..Default::default()
+        };
         let manager = DedupManager::new(config, index_config, temp_dir.path().to_str().unwrap());
         manager.init().await.unwrap();
 

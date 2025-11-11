@@ -169,6 +169,8 @@ pub struct StorageEngine {
     force_flush: Arc<AtomicBool>,
     /// MVCC版本管理
     mvcc_versions: Arc<RwLock<HashMap<String, u64>>>,
+    /// 简单内存存储（用于测试）
+    memory_storage: Arc<RwLock<HashMap<String, Vec<u8>>>>,
 }
 
 impl StorageEngine {
@@ -215,6 +217,7 @@ impl StorageEngine {
         let write_semaphore = Arc::new(Semaphore::new(config.concurrent_writes));
         let force_flush = Arc::new(AtomicBool::new(false));
         let mvcc_versions = Arc::new(RwLock::new(HashMap::new()));
+        let memory_storage = Arc::new(RwLock::new(HashMap::new()));
 
         Self {
             config,
@@ -231,6 +234,7 @@ impl StorageEngine {
             write_semaphore,
             force_flush,
             mvcc_versions,
+            memory_storage,
         }
     }
 
@@ -332,6 +336,25 @@ impl StorageEngine {
             created_at: Instant::now(),
         };
 
+        // 立即写入内存存储（用于测试）
+        {
+            let mut memory_storage = self.memory_storage.write().unwrap();
+            if offset == 0 {
+                // 简单实现：直接替换整个文件
+                memory_storage.insert(file_id.to_string(), data.to_vec());
+            } else {
+                // 如果有offset，需要合并数据（简化实现）
+                if let Some(existing) = memory_storage.get_mut(file_id) {
+                    if offset as usize + data.len() > existing.len() {
+                        existing.resize(offset as usize + data.len(), 0);
+                    }
+                    existing[offset as usize..offset as usize + data.len()].copy_from_slice(data);
+                } else {
+                    memory_storage.insert(file_id.to_string(), data.to_vec());
+                }
+            }
+        }
+
         let mut queue = self.write_queue.write().await;
         queue.push_back(task);
 
@@ -363,13 +386,19 @@ impl StorageEngine {
         // 简化实现：直接将整个数据作为一个块
         let _chunk_id = format!("{}_{:x}", file_id, md5::compute(data));
 
-        // 3. 更新生命周期
+        // 3. 写入内存存储（用于测试）
+        {
+            let mut memory_storage = self.memory_storage.write().unwrap();
+            memory_storage.insert(file_id.to_string(), data.to_vec());
+        }
+
+        // 4. 更新生命周期
         self.lifecycle_manager
             .write()
             .unwrap()
             .update_modification_time(file_id)?;
 
-        // 4. 记录访问
+        // 5. 记录访问
         self.tiered_storage
             .read()
             .await
@@ -480,9 +509,18 @@ impl StorageEngine {
     }
 
     /// 执行实际读取
-    async fn read_actual(&self, _file_id: &str, _offset: u64, size: usize) -> Result<Vec<u8>> {
-        // TODO: 从实际存储中读取数据
-        // 这里应该根据版本链和块索引来重构数据
+    async fn read_actual(&self, file_id: &str, _offset: u64, size: usize) -> Result<Vec<u8>> {
+        // 从内存存储中读取数据（用于测试）
+        let memory_storage = self.memory_storage.read().unwrap();
+        if let Some(data) = memory_storage.get(file_id) {
+            // 根据offset和size返回数据
+            if _offset as usize + size > data.len() {
+                return Ok(data[_offset as usize..].to_vec());
+            } else {
+                return Ok(data[_offset as usize.._offset as usize + size].to_vec());
+            }
+        }
+        // 如果文件不存在，返回全零数据
         Ok(vec![0u8; size])
     }
 

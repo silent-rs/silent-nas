@@ -594,8 +594,17 @@ impl CompatibilityManager {
 
     /// 检查API兼容性
     pub fn check_api_compatibility(&self, api_version: &str) -> bool {
-        // 简化实现：v0.6.0及之后版本都兼容
-        matches!(api_version.parse::<f32>(), Ok(v) if v >= 0.6)
+        // 解析版本号，只取主版本和次版本（例如 0.6.0 -> 0.6）
+        let version_str = api_version.trim();
+        if let Some(dot_pos) = version_str.rfind('.') {
+            let major_minor = &version_str[..dot_pos];
+            if let Ok(v) = major_minor.parse::<f32>() {
+                return v >= 0.6;
+            }
+        }
+
+        // 如果解析失败，默认不兼容
+        false
     }
 
     /// 获取当前存储版本

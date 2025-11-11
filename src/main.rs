@@ -78,7 +78,10 @@ async fn main() -> Result<()> {
 
     // 初始化搜索引擎
     let index_path = std::path::PathBuf::from(&config.storage.root_path).join("index");
-    let search_engine = Arc::new(crate::search::SearchEngine::new(index_path)?);
+    let search_engine = Arc::new(crate::search::SearchEngine::new(
+        index_path,
+        config.storage.root_path.clone(),
+    )?);
     info!("搜索引擎已初始化");
 
     // 计算对外 HTTP 基址（优先 ADVERTISE_HOST，否则容器 HOSTNAME），用于事件携带源地址
@@ -274,6 +277,7 @@ async fn main() -> Result<()> {
             sync_webdav,
             source_http_for_webdav,
             version_webdav,
+            search_engine.clone(),
         )
         .await
         {
@@ -512,6 +516,7 @@ async fn start_webdav_server(
     sync_manager: Arc<SyncManager>,
     source_http_addr: String,
     version_manager: Arc<VersionManager>,
+    search_engine: Arc<search::SearchEngine>,
 ) -> Result<()> {
     let storage = Arc::new(storage);
     let notifier = notifier.map(Arc::new);
@@ -522,6 +527,7 @@ async fn start_webdav_server(
         sync_manager,
         source_http_addr,
         version_manager,
+        search_engine.clone(),
     );
 
     info!("WebDAV 服务器启动: {}", addr);

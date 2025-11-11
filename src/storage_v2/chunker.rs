@@ -302,7 +302,7 @@ mod tests {
 
         assert_eq!(chunks.len(), 2);
         assert_eq!(chunks[0].size, 8);
-        assert_eq!(chunks[1].size, 7);
+        assert_eq!(chunks[1].size, 5); // 13字节数据，8+5分块
     }
 
     #[test]

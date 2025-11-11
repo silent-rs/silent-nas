@@ -1,4 +1,5 @@
 use crate::notify::EventNotifier;
+use crate::search::SearchEngine;
 use crate::storage::StorageManager;
 use crate::sync::crdt::SyncManager;
 use async_trait::async_trait;
@@ -38,6 +39,7 @@ pub struct WebDavHandler {
     pub source_http_addr: String,
     #[allow(dead_code)]
     pub version_manager: Arc<crate::version::VersionManager>,
+    pub search_engine: Arc<SearchEngine>,
     pub(super) locks: Arc<tokio::sync::RwLock<std::collections::HashMap<String, Vec<DavLock>>>>,
     pub(super) props: Arc<
         tokio::sync::RwLock<
@@ -54,6 +56,7 @@ impl WebDavHandler {
         base_path: String,
         source_http_addr: String,
         version_manager: Arc<crate::version::VersionManager>,
+        search_engine: Arc<SearchEngine>,
     ) -> Self {
         let handler = Self {
             storage,
@@ -62,6 +65,7 @@ impl WebDavHandler {
             base_path,
             source_http_addr,
             version_manager,
+            search_engine,
             locks: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
             props: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         };
@@ -851,6 +855,7 @@ impl Handler for WebDavHandler {
             "UNLOCK" => self.handle_unlock(&relative_path, &req).await,
             "VERSION-CONTROL" => self.handle_version_control(&relative_path).await,
             "REPORT" => self.handle_report(&relative_path, &mut req).await,
+            "SEARCH" => self.handle_search(&mut req).await,
             _ => Err(SilentError::business_error(
                 StatusCode::METHOD_NOT_ALLOWED,
                 "不支持的方法",
@@ -891,6 +896,13 @@ mod tests {
             Default::default(),
             dir.path().to_str().unwrap(),
         );
+        let search_engine = Arc::new(
+            crate::search::SearchEngine::new(
+                dir.path().join("search_index"),
+                dir.path().to_path_buf(),
+            )
+            .unwrap(),
+        );
         let handler = WebDavHandler::new(
             storage,
             None,
@@ -898,6 +910,7 @@ mod tests {
             "".into(),
             "http://127.0.0.1:8080".into(),
             ver,
+            search_engine,
         );
         assert_eq!(handler.build_full_href("/"), "/");
         assert_eq!(handler.build_full_href("/a/b"), "/a/b");

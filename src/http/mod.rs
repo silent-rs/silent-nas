@@ -379,8 +379,13 @@ mod tests {
             version_config,
             temp_dir.path().to_str().unwrap(),
         );
-        let search_engine =
-            Arc::new(SearchEngine::new(temp_dir.path().join("search_index")).unwrap());
+        let search_engine = Arc::new(
+            SearchEngine::new(
+                temp_dir.path().join("search_index"),
+                temp_dir.path().to_path_buf(),
+            )
+            .unwrap(),
+        );
         let inc_sync_handler = Arc::new(IncrementalSyncHandler::new(storage.clone(), 64 * 1024));
         let source_http_addr = Arc::new("http://localhost:8080".to_string());
 
@@ -429,6 +434,7 @@ mod tests {
             q: String::new(),
             limit: 20,
             offset: 0,
+            ..Default::default()
         };
 
         assert_eq!(query.q, "");
@@ -444,6 +450,7 @@ mod tests {
             q: "test query".to_string(),
             limit: 50,
             offset: 10,
+            ..Default::default()
         };
 
         assert_eq!(query.q, "test query");

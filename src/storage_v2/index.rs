@@ -36,7 +36,6 @@ pub struct BlockIndexEntry {
 /// 块索引管理器
 pub struct BlockIndex {
     /// 索引配置
-    #[allow(dead_code)]
     config: BlockIndexConfig,
     /// 内存热索引（常驻内存）
     hot_index: Arc<RwLock<HashMap<String, BlockIndexEntry>>>,
@@ -104,8 +103,10 @@ impl BlockIndex {
             entry
         };
 
-        // 持久化索引
-        self.save_index().await?;
+        // 持久化索引（如果启用）
+        if self.config.auto_save {
+            self.save_index().await?;
+        }
 
         info!("添加块到索引: {}, ref_count: {}", chunk_id, entry.ref_count);
         Ok(entry)
@@ -137,7 +138,9 @@ impl BlockIndex {
         if let Some(entry) = index.get_mut(chunk_id) {
             entry.ref_count += 1;
             entry.last_accessed = chrono::Local::now().naive_local();
-            self.save_index().await?;
+            if self.config.auto_save {
+                self.save_index().await?;
+            }
             return Ok(entry.ref_count);
         }
 
@@ -159,7 +162,9 @@ impl BlockIndex {
                 info!("块引用计数为0: {}", chunk_id);
             }
 
-            self.save_index().await?;
+            if self.config.auto_save {
+                self.save_index().await?;
+            }
             return Ok(entry.ref_count);
         }
 
@@ -175,7 +180,9 @@ impl BlockIndex {
 
         if let Some(_entry) = index.remove(chunk_id) {
             // 实际删除文件由调用者处理
-            self.save_index().await?;
+            if self.config.auto_save {
+                self.save_index().await?;
+            }
             info!("从索引中移除块: {}", chunk_id);
         }
 
@@ -222,7 +229,7 @@ impl BlockIndex {
             index.remove(chunk_id);
         }
 
-        if !unreferenced.is_empty() {
+        if !unreferenced.is_empty() && self.config.auto_save {
             self.save_index().await?;
             info!("清理了 {} 个未引用的块", unreferenced.len());
         }
@@ -308,6 +315,8 @@ pub struct BlockIndexConfig {
     pub save_interval_secs: u64,
     /// GC间隔（秒）
     pub gc_interval_secs: u64,
+    /// 启用自动保存（测试时可禁用以提高速度）
+    pub auto_save: bool,
 }
 
 impl Default for BlockIndexConfig {
@@ -317,6 +326,7 @@ impl Default for BlockIndexConfig {
             hot_data_ratio: 0.2,
             save_interval_secs: 300,
             gc_interval_secs: 3600,
+            auto_save: true,
         }
     }
 }
@@ -337,7 +347,10 @@ mod tests {
 
     async fn create_test_index() -> (BlockIndex, TempDir) {
         let temp_dir = TempDir::new().unwrap();
-        let config = BlockIndexConfig::default();
+        let config = BlockIndexConfig {
+            auto_save: false, // 禁用自动保存以提高测试速度
+            ..Default::default()
+        };
         let index = BlockIndex::new(config, temp_dir.path().to_str().unwrap());
         (index, temp_dir)
     }

@@ -1,8 +1,23 @@
+//! 搜索模块
+//!
+//! 提供全文搜索功能，包括：
+//! - 文件内容提取与索引
+//! - 基于Tantivy的全文搜索
+//! - 增量索引更新
+//! - 高级搜索过滤
+//! - 搜索结果排序与分页
+
+pub mod content_extractor;
+pub mod incremental_indexer;
+
 use crate::error::{NasError, Result};
 use crate::models::FileMetadata;
+use content_extractor::{ContentExtractor, FileType};
+use incremental_indexer::{IncrementalIndexer, IncrementalIndexerConfig};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 use tantivy::schema::*;
 use tantivy::{Index, IndexReader, IndexWriter, ReloadPolicy, TantivyDocument, doc};
 use tokio::sync::RwLock;
@@ -35,6 +50,12 @@ pub struct SearchEngine {
     writer: Arc<RwLock<IndexWriter>>,
     /// Schema 字段
     schema_fields: SchemaFields,
+    /// 内容提取器
+    content_extractor: ContentExtractor,
+    /// 存储根路径
+    storage_root: PathBuf,
+    /// 增量索引管理器
+    incremental_indexer: Arc<IncrementalIndexer>,
 }
 
 /// Schema 字段定义
@@ -45,16 +66,19 @@ struct SchemaFields {
     name: Field,
     size: Field,
     modified_at: Field,
-    #[allow(dead_code)]
+    file_type: Field,
     content: Field,
 }
 
 impl SearchEngine {
     /// 创建新的搜索引擎
-    pub fn new(index_path: PathBuf) -> Result<Self> {
+    pub fn new(index_path: PathBuf, storage_root: PathBuf) -> Result<Self> {
         // 创建索引目录
         std::fs::create_dir_all(&index_path)
             .map_err(|e| NasError::Storage(format!("创建索引目录失败: {}", e)))?;
+
+        // 创建内容提取器
+        let content_extractor = ContentExtractor::new();
 
         // 定义 Schema
         let mut schema_builder = Schema::builder();
@@ -64,6 +88,7 @@ impl SearchEngine {
         let name = schema_builder.add_text_field("name", TEXT | STORED);
         let size = schema_builder.add_u64_field("size", INDEXED | STORED);
         let modified_at = schema_builder.add_i64_field("modified_at", INDEXED | STORED);
+        let file_type = schema_builder.add_text_field("file_type", STRING | STORED);
         let content = schema_builder.add_text_field("content", TEXT);
 
         let schema = schema_builder.build();
@@ -108,6 +133,10 @@ impl SearchEngine {
             .try_into()
             .map_err(|e| NasError::Storage(format!("创建索引读取器失败: {}", e)))?;
 
+        // 创建增量索引管理器
+        let incremental_indexer =
+            Arc::new(IncrementalIndexer::new(IncrementalIndexerConfig::default()));
+
         info!("搜索引擎已初始化: {:?}", index_path);
 
         Ok(Self {
@@ -120,8 +149,12 @@ impl SearchEngine {
                 name,
                 size,
                 modified_at,
+                file_type,
                 content,
             },
+            content_extractor,
+            storage_root,
+            incremental_indexer,
         })
     }
 
@@ -129,12 +162,50 @@ impl SearchEngine {
     pub async fn index_file(&self, file_meta: &FileMetadata) -> Result<()> {
         let fields = &self.schema_fields;
 
+        // 提取文件内容
+        let file_path = self.storage_root.join(&file_meta.path);
+        let mut content = String::new();
+        #[allow(unused_assignments)]
+        let mut file_type_str = String::new();
+
+        if file_path.exists() && file_path.is_file() {
+            // 尝试提取文件内容
+            match self.content_extractor.extract_content(&file_path) {
+                Ok(extraction_result) => {
+                    content = extraction_result.content;
+                    file_type_str = match extraction_result.file_type {
+                        FileType::Text => "text".to_string(),
+                        FileType::Html => "html".to_string(),
+                        FileType::Markdown => "markdown".to_string(),
+                        FileType::Pdf => "pdf".to_string(),
+                        FileType::Code => "code".to_string(),
+                        FileType::Log => "log".to_string(),
+                        FileType::Binary => "binary".to_string(),
+                        FileType::Unknown => "unknown".to_string(),
+                    };
+                }
+                Err(e) => {
+                    warn!("提取文件内容失败 {}: {}", file_path.display(), e);
+                    // 即使内容提取失败，也继续索引元数据
+                    file_type_str = "unknown".to_string();
+                }
+            }
+        } else {
+            debug!(
+                "文件不存在或不是文件，跳过内容提取: {}",
+                file_path.display()
+            );
+            file_type_str = "unknown".to_string();
+        }
+
         let doc = doc!(
             fields.file_id => file_meta.id.clone(),
             fields.path => file_meta.path.clone(),
             fields.name => file_meta.name.clone(),
             fields.size => file_meta.size,
             fields.modified_at => file_meta.modified_at.and_utc().timestamp(),
+            fields.file_type => file_type_str,
+            fields.content => content.clone(),
         );
 
         {
@@ -144,7 +215,12 @@ impl SearchEngine {
                 .map_err(|e| NasError::Storage(format!("添加文档到索引失败: {}", e)))?;
         } // 释放锁
 
-        debug!("文件已索引: {} ({})", file_meta.name, file_meta.id);
+        debug!(
+            "文件已索引: {} ({}) - 内容长度: {} 字节",
+            file_meta.name,
+            file_meta.id,
+            content.len()
+        );
         Ok(())
     }
 
@@ -156,12 +232,44 @@ impl SearchEngine {
             let writer = self.writer.write().await;
 
             for file_meta in files {
+                // 提取文件内容
+                let file_path = self.storage_root.join(&file_meta.path);
+                let mut content = String::new();
+                #[allow(unused_assignments)]
+                let mut file_type_str = String::new();
+
+                if file_path.exists() && file_path.is_file() {
+                    match self.content_extractor.extract_content(&file_path) {
+                        Ok(extraction_result) => {
+                            content = extraction_result.content;
+                            file_type_str = match extraction_result.file_type {
+                                FileType::Text => "text".to_string(),
+                                FileType::Html => "html".to_string(),
+                                FileType::Markdown => "markdown".to_string(),
+                                FileType::Pdf => "pdf".to_string(),
+                                FileType::Code => "code".to_string(),
+                                FileType::Log => "log".to_string(),
+                                FileType::Binary => "binary".to_string(),
+                                FileType::Unknown => "unknown".to_string(),
+                            };
+                        }
+                        Err(e) => {
+                            warn!("提取文件内容失败 {}: {}", file_path.display(), e);
+                            file_type_str = "unknown".to_string();
+                        }
+                    }
+                } else {
+                    file_type_str = "unknown".to_string();
+                }
+
                 let doc = doc!(
                     fields.file_id => file_meta.id.clone(),
                     fields.path => file_meta.path.clone(),
                     fields.name => file_meta.name.clone(),
                     fields.size => file_meta.size,
                     fields.modified_at => file_meta.modified_at.and_utc().timestamp(),
+                    fields.file_type => file_type_str,
+                    fields.content => content.clone(),
                 );
 
                 writer
@@ -221,8 +329,9 @@ impl SearchEngine {
         let searcher = self.reader.searcher();
         let fields = &self.schema_fields;
 
-        // 创建查询解析器，搜索 path 和 name 字段
-        let query_parser = QueryParser::for_index(&self.index, vec![fields.path, fields.name]);
+        // 创建查询解析器，搜索 path、name 和 content 字段
+        let query_parser =
+            QueryParser::for_index(&self.index, vec![fields.path, fields.name, fields.content]);
 
         let query = query_parser
             .parse_query(query_str)
@@ -321,6 +430,82 @@ impl SearchEngine {
             index_size: 0, // TODO: 计算索引大小
         }
     }
+
+    /// 增量更新索引
+    #[allow(dead_code)]
+    pub async fn incremental_update(&self, root_path: &Path) -> Result<Vec<SearchResult>> {
+        info!("开始增量索引更新: {:?}", root_path);
+
+        // 1. 扫描变化
+        let changes = self.incremental_indexer.scan_changes(root_path).await?;
+
+        if changes.is_empty() {
+            debug!("没有发现文件变化");
+            return Ok(Vec::new());
+        }
+
+        // 2. 处理变化
+        let mut updated_files = Vec::new();
+        for change in changes.iter() {
+            match change.change_type {
+                incremental_indexer::FileChangeType::Added
+                | incremental_indexer::FileChangeType::Modified => {
+                    if let Some(metadata) = &change.metadata {
+                        self.index_file(metadata).await?;
+                        if let Some(meta) = &change.metadata {
+                            updated_files.push(meta.clone());
+                        }
+                    }
+                }
+                incremental_indexer::FileChangeType::Deleted => {
+                    // 提取文件ID（假设路径包含ID）
+                    let file_id = change.path.to_string_lossy().to_string();
+                    self.delete_file(&file_id).await?;
+                }
+            }
+        }
+
+        // 3. 提交更改
+        self.commit().await?;
+
+        // 4. 提交增量索引器缓存更新
+        self.incremental_indexer.commit_changes(changes).await?;
+
+        info!("增量更新完成，处理了 {} 个文件", updated_files.len());
+        Ok(Vec::new())
+    }
+
+    /// 启动自动增量更新（后台任务）
+    #[allow(dead_code)]
+    pub fn start_auto_update(self: &Arc<Self>, root_path: PathBuf) {
+        if !IncrementalIndexerConfig::default().enable_auto_update {
+            return;
+        }
+
+        let search_engine = Arc::clone(self);
+        let root_path_clone = root_path.clone();
+
+        let config = IncrementalIndexerConfig::default();
+        let interval = Duration::from_millis(config.check_interval_ms);
+
+        tokio::spawn(async move {
+            let mut interval_timer = tokio::time::interval(interval);
+
+            loop {
+                interval_timer.tick().await;
+                if let Err(e) = search_engine.incremental_update(&root_path_clone).await {
+                    warn!("增量更新失败: {}", e);
+                }
+            }
+        });
+
+        info!("自动增量更新已启动，间隔: {}ms", interval.as_millis());
+    }
+
+    /// 获取增量索引统计
+    pub async fn get_incremental_stats(&self) -> incremental_indexer::UpdateStats {
+        self.incremental_indexer.get_stats().await
+    }
 }
 
 /// 索引统计信息
@@ -352,8 +537,9 @@ mod tests {
     async fn test_search_engine_creation() {
         let temp_dir = TempDir::new().unwrap();
         let index_path = temp_dir.path().join("index");
+        let storage_root = temp_dir.path().to_path_buf();
 
-        let engine = SearchEngine::new(index_path).unwrap();
+        let engine = SearchEngine::new(index_path, storage_root).unwrap();
         assert!(engine.get_stats().total_documents == 0);
     }
 
@@ -361,8 +547,9 @@ mod tests {
     async fn test_index_and_search() {
         let temp_dir = TempDir::new().unwrap();
         let index_path = temp_dir.path().join("index");
+        let storage_root = temp_dir.path().to_path_buf();
 
-        let engine = SearchEngine::new(index_path).unwrap();
+        let engine = SearchEngine::new(index_path, storage_root).unwrap();
 
         // 索引测试文件
         let file1 = create_test_metadata("1", "test.txt", "/files/test.txt");
@@ -382,8 +569,9 @@ mod tests {
     async fn test_delete_file() {
         let temp_dir = TempDir::new().unwrap();
         let index_path = temp_dir.path().join("index");
+        let storage_root = temp_dir.path().to_path_buf();
 
-        let engine = SearchEngine::new(index_path).unwrap();
+        let engine = SearchEngine::new(index_path, storage_root).unwrap();
 
         let file = create_test_metadata("1", "test.txt", "/files/test.txt");
         engine.index_file(&file).await.unwrap();
@@ -402,8 +590,9 @@ mod tests {
     async fn test_batch_indexing() {
         let temp_dir = TempDir::new().unwrap();
         let index_path = temp_dir.path().join("index");
+        let storage_root = temp_dir.path().to_path_buf();
 
-        let engine = SearchEngine::new(index_path).unwrap();
+        let engine = SearchEngine::new(index_path, storage_root).unwrap();
 
         // 创建多个文件
         let files = vec![
@@ -439,8 +628,9 @@ mod tests {
     async fn test_search_pagination() {
         let temp_dir = TempDir::new().unwrap();
         let index_path = temp_dir.path().join("index");
+        let storage_root = temp_dir.path().to_path_buf();
 
-        let engine = SearchEngine::new(index_path).unwrap();
+        let engine = SearchEngine::new(index_path, storage_root).unwrap();
 
         // 创建多个文件，使用共同的词 "testfile"
         for i in 1..=10 {
@@ -477,8 +667,9 @@ mod tests {
     async fn test_rebuild_index() {
         let temp_dir = TempDir::new().unwrap();
         let index_path = temp_dir.path().join("index");
+        let storage_root = temp_dir.path().to_path_buf();
 
-        let engine = SearchEngine::new(index_path).unwrap();
+        let engine = SearchEngine::new(index_path, storage_root).unwrap();
 
         // 初始索引
         let file1 = create_test_metadata("1", "old.txt", "/files/old.txt");
@@ -510,8 +701,9 @@ mod tests {
     async fn test_search_by_name() {
         let temp_dir = TempDir::new().unwrap();
         let index_path = temp_dir.path().join("index");
+        let storage_root = temp_dir.path().to_path_buf();
 
-        let engine = SearchEngine::new(index_path).unwrap();
+        let engine = SearchEngine::new(index_path, storage_root).unwrap();
 
         let file = create_test_metadata("1", "important.txt", "/files/important.txt");
         engine.index_file(&file).await.unwrap();
@@ -526,8 +718,9 @@ mod tests {
     async fn test_search_special_characters() {
         let temp_dir = TempDir::new().unwrap();
         let index_path = temp_dir.path().join("index");
+        let storage_root = temp_dir.path().to_path_buf();
 
-        let engine = SearchEngine::new(index_path).unwrap();
+        let engine = SearchEngine::new(index_path, storage_root).unwrap();
 
         let file = create_test_metadata("1", "文档.txt", "/文件夹/文档.txt");
         engine.index_file(&file).await.unwrap();
@@ -542,8 +735,9 @@ mod tests {
     async fn test_empty_search_query() {
         let temp_dir = TempDir::new().unwrap();
         let index_path = temp_dir.path().join("index");
+        let storage_root = temp_dir.path().to_path_buf();
 
-        let engine = SearchEngine::new(index_path).unwrap();
+        let engine = SearchEngine::new(index_path, storage_root).unwrap();
 
         let file = create_test_metadata("1", "test.txt", "/files/test.txt");
         engine.index_file(&file).await.unwrap();
@@ -558,8 +752,9 @@ mod tests {
     async fn test_index_stats() {
         let temp_dir = TempDir::new().unwrap();
         let index_path = temp_dir.path().join("index");
+        let storage_root = temp_dir.path().to_path_buf();
 
-        let engine = SearchEngine::new(index_path).unwrap();
+        let engine = SearchEngine::new(index_path, storage_root).unwrap();
 
         // 初始统计
         let stats = engine.get_stats();

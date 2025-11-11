@@ -29,6 +29,201 @@ impl WebDavHandler {
         Ok(resp)
     }
 
+    /// 处理 WebDAV SEARCH 请求（RFC 5323）
+    pub(super) async fn handle_search(&self, req: &mut Request) -> silent::Result<Response> {
+        tracing::debug!("处理 WebDAV SEARCH 请求");
+
+        // 读取请求体
+        let mut body = req.take_body();
+        let body_bytes = if let Some(Ok(frame)) = body.frame().await {
+            frame.into_data().unwrap_or_default()
+        } else {
+            bytes::Bytes::new()
+        };
+        let body_bytes = body_bytes.to_vec();
+
+        // 解析搜索条件
+        let search_query = if !body_bytes.is_empty() {
+            self.parse_search_request(&body_bytes)?
+        } else {
+            // 如果没有请求体，返回所有资源
+            "".to_string()
+        };
+
+        tracing::debug!("搜索查询: {}", search_query);
+
+        // 执行搜索
+        let results = self
+            .search_engine
+            .search(&search_query, 100, 0)
+            .await
+            .map_err(|e| {
+                SilentError::business_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("搜索失败: {}", e),
+                )
+            })?;
+
+        // 构建 WebDAV multistatus 响应
+        let multistatus = self.build_search_multistatus(&results)?;
+
+        // 返回响应
+        let mut response = Response::empty();
+        response.headers_mut().insert(
+            http::header::CONTENT_TYPE,
+            http::HeaderValue::from_static(CONTENT_TYPE_XML),
+        );
+        response.set_body(full(multistatus.into_bytes()));
+        Ok(response)
+    }
+
+    /// 解析 WebDAV SEARCH 请求体
+    fn parse_search_request(&self, body: &[u8]) -> silent::Result<String> {
+        // 简化的解析：提取 <D:searchrequest> 中的文本内容
+        let body_str = String::from_utf8_lossy(body);
+
+        // 查找 <D:searchrequest> 标签
+        if let Some(start) = body_str.find("<D:searchrequest") {
+            let remaining = &body_str[start..];
+            if let Some(end_tag_pos) = remaining.find('>') {
+                let content_start = start + end_tag_pos + 1;
+                if let Some(end_pos) = body_str[content_start..].find("</D:searchrequest>") {
+                    let search_content = &body_str[content_start..content_start + end_pos];
+                    // 提取文本内容（简化实现）
+                    let text = search_content
+                        .replace("<D:select>", "")
+                        .replace("</D:select>", "")
+                        .replace("<D:where>", "")
+                        .replace("</D:where>", "")
+                        .replace("<D:and>", "")
+                        .replace("</D:and>", "")
+                        .replace("<D:or>", "")
+                        .replace("</D:or>", "")
+                        .replace("<D:not>", "")
+                        .replace("</D:not>", "")
+                        .replace("<D:like>", "")
+                        .replace("</D:like>", "")
+                        .replace("<D:prop>", "")
+                        .replace("</D:prop>", "")
+                        .replace("<D:literal>", "")
+                        .replace("</D:literal>", "")
+                        .replace("<D:caseless>", "")
+                        .replace("</D:caseless>", "")
+                        .replace("<D:text>", "")
+                        .replace("</D:text>", "")
+                        .replace("<D:collation> i;octet </D:collation>", "")
+                        .replace("<D:propname>", "")
+                        .replace("</D:propname>", "")
+                        .replace("<D:allprop>", "")
+                        .replace("</D:allprop>", "")
+                        .replace("<D:getcontenttype>", "")
+                        .replace("</D:getcontenttype>", "")
+                        .replace("<D:getcontentlength>", "")
+                        .replace("</D:getcontentlength>", "")
+                        .replace("<D:displayname>", "")
+                        .replace("</D:displayname>", "")
+                        .replace("<D:creationdate>", "")
+                        .replace("</D:creationdate>", "")
+                        .replace("<D:getlastmodified>", "")
+                        .replace("</D:getlastmodified>", "")
+                        .replace("<D:resourcetype>", "")
+                        .replace("</D:resourcetype>", "")
+                        .replace("<D:collection/>", "")
+                        .replace("<D:href>", "")
+                        .replace("</D:href>", "")
+                        .replace("\n", " ")
+                        .replace("\r", " ")
+                        .replace("\t", " ")
+                        .trim()
+                        .to_string();
+
+                    return Ok(text);
+                }
+            }
+        }
+
+        // 如果解析失败，返回空字符串
+        Ok("".to_string())
+    }
+
+    /// 构建搜索结果的 multistatus 响应
+    fn build_search_multistatus(
+        &self,
+        results: &[crate::search::SearchResult],
+    ) -> silent::Result<String> {
+        let mut xml = String::new();
+        xml.push_str(XML_HEADER);
+        xml.push('\n');
+        xml.push_str(XML_NS_DAV);
+        xml.push('\n');
+
+        for result in results {
+            xml.push_str("  <D:response>\n");
+
+            // href - 资源URL
+            let href = format!("/api/files/{}", result.file_id);
+            xml.push_str(&format!(
+                "    <D:href>{}</D:href>\n",
+                Self::escape_xml(&href)
+            ));
+
+            // status
+            xml.push_str("    <D:status>HTTP/1.1 200 OK</D:status>\n");
+
+            // propstat
+            xml.push_str("    <D:propstat>\n");
+            xml.push_str("      <D:prop>\n");
+
+            // displayname
+            if !result.name.is_empty() {
+                xml.push_str(&format!(
+                    "        <D:displayname>{}</D:displayname>\n",
+                    Self::escape_xml(&result.name)
+                ));
+            }
+
+            // getcontentlength
+            if result.size > 0 {
+                xml.push_str(&format!(
+                    "        <D:getcontentlength>{}</D:getcontentlength>\n",
+                    result.size
+                ));
+            }
+
+            // getlastmodified
+            if result.modified_at > 0 {
+                let dt =
+                    chrono::DateTime::from_timestamp(result.modified_at, 0).unwrap_or_default();
+                xml.push_str(&format!(
+                    "        <D:getlastmodified>{}</D:getlastmodified>\n",
+                    dt.to_rfc2822()
+                ));
+            }
+
+            // resourcetype
+            xml.push_str("        <D:resourcetype><D:collection/></D:resourcetype>\n");
+
+            xml.push_str("      </D:prop>\n");
+            xml.push_str("      <D:status>HTTP/1.1 200 OK</D:status>\n");
+            xml.push_str("    </D:propstat>\n");
+
+            xml.push_str("  </D:response>\n");
+        }
+
+        xml.push_str(XML_MULTISTATUS_END);
+
+        Ok(xml)
+    }
+
+    /// XML转义
+    fn escape_xml(s: &str) -> String {
+        s.replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+            .replace('"', "&quot;")
+            .replace('\'', "&apos;")
+    }
+
     pub(super) async fn handle_propfind(
         &self,
         path: &str,
@@ -966,6 +1161,13 @@ mod tests {
             Default::default(),
             dir.path().to_str().unwrap(),
         );
+        let search_engine = Arc::new(
+            crate::search::SearchEngine::new(
+                dir.path().join("search_index"),
+                dir.path().to_path_buf(),
+            )
+            .unwrap(),
+        );
         WebDavHandler::new(
             storage,
             None,
@@ -973,6 +1175,7 @@ mod tests {
             "".into(),
             "http://127.0.0.1:8080".into(),
             ver,
+            search_engine,
         )
     }
 

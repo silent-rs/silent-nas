@@ -10,12 +10,12 @@ pub mod notify;
 pub mod s3;
 pub mod s3_search;
 pub mod search;
+pub mod storage; // 导出 storage 模块以支持 V2 测试
 pub mod unified_search;
 pub mod version;
 
 // Re-export core types and storage
 pub use silent_nas_core as models;
-pub use silent_storage_v1 as storage;
 pub use silent_storage_v2 as storage_v2;
 
 // 注意：sync、transfer、webdav、event_listener 模块包含复杂的依赖，

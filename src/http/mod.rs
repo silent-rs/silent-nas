@@ -21,7 +21,6 @@ pub use state::AppState;
 use crate::error::Result;
 use crate::notify::EventNotifier;
 use crate::search::SearchEngine;
-use crate::storage::StorageManager;
 use crate::version::VersionManager;
 use silent::Server;
 use silent::prelude::*;
@@ -43,17 +42,14 @@ use crate::sync::incremental::IncrementalSyncHandler;
 /// 启动 HTTP 服务器
 pub async fn start_http_server(
     addr: &str,
-    storage: StorageManager,
     notifier: Option<EventNotifier>,
     sync_manager: Arc<SyncManager>,
     version_manager: Arc<VersionManager>,
     search_engine: Arc<SearchEngine>,
     config: crate::config::Config,
 ) -> Result<()> {
-    let storage = Arc::new(storage);
-
     // 创建增量同步处理器
-    let inc_sync_handler = Arc::new(IncrementalSyncHandler::new(storage.clone(), 64 * 1024));
+    let inc_sync_handler = Arc::new(IncrementalSyncHandler::new(64 * 1024));
 
     // 创建审计日志管理器（可选，通过环境变量启用）
     let audit_logger = if std::env::var("ENABLE_AUDIT").is_ok() {
@@ -102,7 +98,6 @@ pub async fn start_http_server(
 
     // 创建应用状态
     let app_state = AppState {
-        storage,
         notifier: notifier.map(Arc::new),
         sync_manager,
         version_manager,
@@ -370,12 +365,16 @@ mod tests {
 
     pub(crate) async fn create_test_app_state() -> (AppState, TempDir) {
         let (storage, temp_dir) = create_test_storage().await;
-        let storage = Arc::new(storage);
 
-        let sync_manager = SyncManager::new("test-node".to_string(), storage.clone(), None);
+        // 初始化全局 storage（测试环境）
+        let _ = crate::storage::init_global_storage(storage.clone());
+
+        let storage_arc = Arc::new(storage);
+
+        let sync_manager = SyncManager::new("test-node".to_string(), None);
         let version_config = crate::version::VersionConfig::default();
         let version_manager = VersionManager::new(
-            storage.clone(),
+            storage_arc.clone(),
             version_config,
             temp_dir.path().to_str().unwrap(),
         );
@@ -386,11 +385,10 @@ mod tests {
             )
             .unwrap(),
         );
-        let inc_sync_handler = Arc::new(IncrementalSyncHandler::new(storage.clone(), 64 * 1024));
+        let inc_sync_handler = Arc::new(IncrementalSyncHandler::new(64 * 1024));
         let source_http_addr = Arc::new("http://localhost:8080".to_string());
 
         let app_state = AppState {
-            storage,
             notifier: None,
             sync_manager,
             version_manager,
@@ -417,12 +415,12 @@ mod tests {
 
         // 验证克隆后的状态指向相同的资源
         assert_eq!(
-            Arc::as_ptr(&app_state.storage),
-            Arc::as_ptr(&cloned.storage)
-        );
-        assert_eq!(
             Arc::as_ptr(&app_state.sync_manager),
             Arc::as_ptr(&cloned.sync_manager)
+        );
+        assert_eq!(
+            Arc::as_ptr(&app_state.search_engine),
+            Arc::as_ptr(&cloned.search_engine)
         );
     }
 
@@ -474,8 +472,8 @@ mod tests {
 
         // 验证状态注入器可以正确创建
         assert_eq!(
-            Arc::as_ptr(&injector.state.storage),
-            Arc::as_ptr(&app_state.storage)
+            Arc::as_ptr(&injector.state.sync_manager),
+            Arc::as_ptr(&app_state.sync_manager)
         );
     }
 
@@ -486,8 +484,8 @@ mod tests {
 
         // 验证状态注入器的基本属性
         assert_eq!(
-            Arc::as_ptr(&injector.state.storage),
-            Arc::as_ptr(&app_state.storage)
+            Arc::as_ptr(&injector.state.sync_manager),
+            Arc::as_ptr(&app_state.sync_manager)
         );
 
         // 验证状态注入器实现了正确的trait
@@ -500,8 +498,8 @@ mod tests {
         let injector = state_injector(app_state.clone());
 
         assert_eq!(
-            Arc::as_ptr(&injector.state.storage),
-            Arc::as_ptr(&app_state.storage)
+            Arc::as_ptr(&injector.state.sync_manager),
+            Arc::as_ptr(&app_state.sync_manager)
         );
     }
 

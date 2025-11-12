@@ -2,7 +2,7 @@
 // 负责协调增量同步流程
 
 use crate::error::{NasError, Result};
-use crate::storage::StorageManager;
+use crate::storage;
 use crate::sync::incremental::{DeltaChunk, FileSignature, IncrementalSyncManager, SyncDelta};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -35,8 +35,6 @@ pub struct IncrementalSyncResponse {
 
 /// 增量同步处理器
 pub struct IncrementalSyncHandler {
-    /// 存储管理器
-    storage: Arc<StorageManager>,
     /// 增量同步管理器
     sync_manager: Arc<IncrementalSyncManager>,
     /// HTTP客户端
@@ -45,9 +43,8 @@ pub struct IncrementalSyncHandler {
 
 impl IncrementalSyncHandler {
     /// 创建新的处理器
-    pub fn new(storage: Arc<StorageManager>, chunk_size: usize) -> Self {
+    pub fn new(chunk_size: usize) -> Self {
         Self {
-            storage,
             sync_manager: Arc::new(IncrementalSyncManager::new(chunk_size)),
             http_client: Client::new(),
         }
@@ -60,8 +57,10 @@ impl IncrementalSyncHandler {
             file_id, source_http_addr
         );
 
+        let storage = storage::storage();
+
         // 1. 尝试读取本地文件和计算签名
-        let local_signature = match self.storage.read_file(file_id).await {
+        let local_signature = match storage.read_file(file_id).await {
             Ok(local_data) => {
                 debug!("本地文件存在，计算签名: file_id={}", file_id);
                 Some(
@@ -110,7 +109,10 @@ impl IncrementalSyncHandler {
         // 4. 如果哈希相同，无需同步
         if local_sig.file_hash == remote_signature.file_hash {
             info!("文件哈希相同，无需同步: file_id={}", file_id);
-            return self.storage.read_file(file_id).await.map_err(Into::into);
+            return storage::storage()
+                .read_file(file_id)
+                .await
+                .map_err(Into::into);
         }
 
         // 5. 计算差异
@@ -121,7 +123,10 @@ impl IncrementalSyncHandler {
             Some(d) => d,
             None => {
                 info!("无差异，无需同步: file_id={}", file_id);
-                return self.storage.read_file(file_id).await.map_err(Into::into);
+                return storage::storage()
+                    .read_file(file_id)
+                    .await
+                    .map_err(Into::into);
             }
         };
 
@@ -168,7 +173,7 @@ impl IncrementalSyncHandler {
         };
 
         // 8. 应用差异块
-        let local_data = self.storage.read_file(file_id).await?;
+        let local_data = storage::storage().read_file(file_id).await?;
         let updated_data = self.sync_manager.apply_delta(&local_data, &delta_chunks)?;
 
         // 9. 验证哈希
@@ -226,7 +231,7 @@ impl IncrementalSyncHandler {
 
     /// 计算本地文件签名
     pub async fn calculate_local_signature(&self, file_id: &str) -> Result<FileSignature> {
-        let data = self.storage.read_file(file_id).await?;
+        let data = storage::storage().read_file(file_id).await?;
         self.sync_manager.calculate_signature(file_id, &data)
     }
 
@@ -237,7 +242,7 @@ impl IncrementalSyncHandler {
         target_signature: &FileSignature,
     ) -> Result<Vec<DeltaChunk>> {
         // 读取源文件
-        let data = self.storage.read_file(file_id).await?;
+        let data = storage::storage().read_file(file_id).await?;
 
         // 计算源签名
         let source_sig = self.sync_manager.calculate_signature(file_id, &data)?;
@@ -260,37 +265,38 @@ impl IncrementalSyncHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::StorageManager;
     use std::path::PathBuf;
     use tempfile::TempDir;
 
     #[tokio::test]
     async fn test_handler_creation() {
         let temp_dir = TempDir::new().unwrap();
-        let storage = Arc::new(StorageManager::new(
-            PathBuf::from(temp_dir.path()),
-            64 * 1024,
-        ));
+        let storage = StorageManager::new(PathBuf::from(temp_dir.path()), 64 * 1024);
         storage.init().await.unwrap();
 
-        let handler = IncrementalSyncHandler::new(storage, 64 * 1024);
+        // 初始化全局storage
+        let _ = crate::storage::init_global_storage(storage);
+
+        let handler = IncrementalSyncHandler::new(64 * 1024);
         assert!(Arc::strong_count(&handler.sync_manager) >= 1);
     }
 
     #[tokio::test]
     async fn test_calculate_local_signature() {
         let temp_dir = TempDir::new().unwrap();
-        let storage = Arc::new(StorageManager::new(
-            PathBuf::from(temp_dir.path()),
-            64 * 1024,
-        ));
+        let storage = StorageManager::new(PathBuf::from(temp_dir.path()), 64 * 1024);
         storage.init().await.unwrap();
+
+        // 初始化全局storage
+        let _ = crate::storage::init_global_storage(storage.clone());
 
         // 创建测试文件
         let file_id = "test_file";
         let data = b"Test content for signature calculation";
         storage.save_file(file_id, data).await.unwrap();
 
-        let handler = IncrementalSyncHandler::new(storage, 64 * 1024);
+        let handler = IncrementalSyncHandler::new(64 * 1024);
         let signature = handler.calculate_local_signature(file_id).await.unwrap();
 
         assert_eq!(signature.file_id, file_id);
@@ -312,7 +318,7 @@ mod tests {
         let data = b"Source content with modifications";
         storage.save_file(file_id, data).await.unwrap();
 
-        let handler = IncrementalSyncHandler::new(storage, 64 * 1024);
+        let handler = IncrementalSyncHandler::new(64 * 1024);
 
         // 创建一个假的目标签名（空文件）
         let target_sig = FileSignature {
@@ -346,7 +352,7 @@ mod tests {
         let data = b"Identical content";
         storage.save_file(file_id, data).await.unwrap();
 
-        let handler = IncrementalSyncHandler::new(storage.clone(), 64 * 1024);
+        let handler = IncrementalSyncHandler::new(64 * 1024);
 
         // 使用相同的内容创建目标签名
         let target_sig = handler.calculate_local_signature(file_id).await.unwrap();
@@ -369,7 +375,7 @@ mod tests {
         ));
         storage.init().await.unwrap();
 
-        let handler = IncrementalSyncHandler::new(storage, 64 * 1024);
+        let handler = IncrementalSyncHandler::new(64 * 1024);
 
         // 尝试计算不存在文件的签名
         let result = handler.calculate_local_signature("nonexistent").await;
@@ -393,7 +399,7 @@ mod tests {
         }
         storage.save_file(file_id, &data).await.unwrap();
 
-        let handler = IncrementalSyncHandler::new(storage, 1024); // 使用小块大小
+        let handler = IncrementalSyncHandler::new(1024); // 使用小块大小
 
         // 计算签名
         let signature = handler.calculate_local_signature(file_id).await.unwrap();
@@ -434,7 +440,7 @@ mod tests {
         let data = b"";
         storage.save_file(file_id, data).await.unwrap();
 
-        let handler = IncrementalSyncHandler::new(storage, 64 * 1024);
+        let handler = IncrementalSyncHandler::new(64 * 1024);
         let signature = handler.calculate_local_signature(file_id).await.unwrap();
 
         assert_eq!(signature.file_id, file_id);
@@ -458,7 +464,7 @@ mod tests {
 
         // 测试不同的块大小
         for chunk_size in [512, 1024, 4096, 64 * 1024] {
-            let handler = IncrementalSyncHandler::new(storage.clone(), chunk_size);
+            let handler = IncrementalSyncHandler::new(chunk_size);
             let signature = handler.calculate_local_signature(file_id).await.unwrap();
 
             assert_eq!(signature.chunk_size, chunk_size);

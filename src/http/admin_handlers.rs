@@ -102,14 +102,20 @@ pub async fn trigger_push_sync(
 
             // 读取文件内容（优先路径）
             let content_res = if let Some(meta) = file_sync.metadata.value.as_ref() {
-                let full = state.storage.get_full_path(&meta.path);
+                let full = crate::storage::storage().get_full_path(&meta.path);
                 fs::read(full).await.map_err(|e| {
                     SilentError::business_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
                 })
             } else {
-                state.storage.read_file(file_id).await.map_err(|e| {
-                    SilentError::business_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
-                })
+                crate::storage::storage()
+                    .read_file(file_id)
+                    .await
+                    .map_err(|e| {
+                        SilentError::business_error(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            e.to_string(),
+                        )
+                    })
             };
 
             match content_res {

@@ -483,8 +483,7 @@ mod tests {
         ));
         storage.init().await.unwrap();
 
-        let sync_manager =
-            crate::sync::crdt::SyncManager::new("node-local".into(), storage.clone(), None);
+        let sync_manager = crate::sync::crdt::SyncManager::new("node-local".to_string(), None);
 
         let node_manager = crate::sync::node::manager::NodeManager::new(
             crate::sync::node::manager::NodeDiscoveryConfig::default(),

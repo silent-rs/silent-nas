@@ -1212,7 +1212,7 @@ mod tests {
             4 * 1024 * 1024,
         ));
         storage.init().await.unwrap();
-        let syncm = SyncManager::new("node-test".into(), storage.clone(), None);
+        let syncm = SyncManager::new("node-test".to_string(), None);
         let nm = NodeManager::new(NodeDiscoveryConfig::default(), syncm.clone());
         let coord = NodeSyncCoordinator::new(SyncConfig::default(), nm, syncm, storage);
         coord

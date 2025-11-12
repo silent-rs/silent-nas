@@ -65,7 +65,7 @@ pub async fn restore_version(
         })?;
 
     // 发送修改事件
-    if let Ok(metadata) = state.storage.get_metadata(&file_id).await {
+    if let Ok(metadata) = crate::storage::storage().get_metadata(&file_id).await {
         let event = FileEvent::new(EventType::Modified, file_id.clone(), Some(metadata));
         if let Some(ref n) = state.notifier {
             let _ = n.notify_modified(event).await;

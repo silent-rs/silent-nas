@@ -45,7 +45,7 @@ mod tests {
         let data = b"Test content for signature";
         storage.save_file(file_id, data).await.unwrap();
 
-        let handler = IncrementalSyncHandler::new(storage, 64 * 1024);
+        let handler = IncrementalSyncHandler::new(64 * 1024);
         let signature = handle_get_signature(&handler, file_id).await.unwrap();
 
         assert_eq!(signature.file_id, file_id);
@@ -66,7 +66,7 @@ mod tests {
         let data = b"Modified content for delta test";
         storage.save_file(file_id, data).await.unwrap();
 
-        let handler = IncrementalSyncHandler::new(storage.clone(), 64 * 1024);
+        let handler = IncrementalSyncHandler::new(64 * 1024);
 
         // 创建一个假的目标签名（空文件）
         let target_sig = incremental_sync::FileSignature {

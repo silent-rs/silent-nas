@@ -3,6 +3,11 @@
 //! 这个模块定义了整个项目使用的存储实现。
 //! 支持运行时通过配置文件选择不同的存储引擎。
 //!
+//! ## 全局存储
+//!
+//! 项目使用全局单例模式管理存储实例，避免在各个模块中传递 `Arc<StorageManager>`。
+//! 使用 `init_global_storage()` 初始化，使用 `storage()` 访问。
+//!
 //! ## 配置说明
 //!
 //! 在 `config.toml` 中配置存储引擎版本：
@@ -57,6 +62,10 @@
 //!
 //! **警告**：切换存储引擎需要数据迁移，请提前备份数据！
 
+mod global;
+
+pub use global::{init_global_storage, storage};
+
 use crate::config::StorageConfig;
 use crate::error::{NasError, Result};
 use std::sync::Arc;
@@ -69,19 +78,18 @@ pub use silent_nas_core::StorageManager as StorageManagerTrait;
 
 // 导出具体的存储实现
 pub use silent_storage_v1::StorageManager as StorageV1;
-// V2 适配器已完成，但暂时作为实验性功能，未完全集成
-#[allow(unused_imports)]
+// V2 适配器已完成，生产环境测试中
 pub use silent_storage_v2::StorageV2Adapter;
 
 // 导出错误类型
 #[allow(unused_imports)]
 pub use silent_storage_v1::StorageError;
 
-/// 存储管理器（支持 V1 和 V2）
+/// 存储管理器（当前使用 V1）
 ///
 /// 这是主项目使用的存储管理器类型。
-/// - V1: 简单文件存储，生产就绪
-/// - V2: 高级增量存储（通过 StorageV2Adapter 适配），实验性
+/// - V1: 简单文件存储，生产就绪（默认）
+/// - V2: 高级增量存储，通过 create_storage_v2 创建用于测试
 pub type StorageManager = StorageV1;
 
 /// 根据配置创建存储管理器
@@ -90,10 +98,10 @@ pub type StorageManager = StorageV1;
 /// * `config` - 存储配置
 ///
 /// # 返回
-/// 返回配置的存储管理器实例
+/// 返回配置的存储管理器实例（当前仅支持 V1）
 ///
 /// # 错误
-/// 如果配置的存储版本不受支持，返回错误
+/// 如果配置的存储版本不受支持或初始化失败，返回错误
 pub async fn create_storage(config: &StorageConfig) -> Result<Arc<StorageManager>> {
     match config.version.as_str() {
         "v1" => {
@@ -104,27 +112,61 @@ pub async fn create_storage(config: &StorageConfig) -> Result<Arc<StorageManager
                 .map_err(|e| NasError::Config(format!("V1 存储初始化失败: {}", e)))?;
             Ok(Arc::new(storage))
         }
-        "v2" => {
-            // V2 适配器已完成实现，但目前作为实验性功能
-            // 未来会完全替换 V1
-            Err(NasError::Config(
-                "V2 存储引擎当前处于实验阶段，尚未完全集成到主项目。\n\
-                 当前进展：\n\
-                 ✅ V2 核心功能完成（增量存储、去重、压缩）\n\
-                 ✅ 架构重构完成（core/services 分层）\n\
-                 ✅ StorageV2Adapter 适配器实现完成\n\
-                 ✅ 所有测试通过（47个）\n\
-                 ⏳ 等待生产环境验证\n\
-                 \n\
-                 如需测试 V2，请参考 silent-storage-v2/ 模块。"
-                    .to_string(),
-            ))
-        }
+        "v2" => Err(NasError::Config(
+            "V2 存储引擎正在生产环境测试中，暂不支持通过配置文件启用。\n\
+             如需测试 V2，请使用 create_storage_v2() 函数创建实例。"
+                .to_string(),
+        )),
         version => Err(NasError::Config(format!(
-            "不支持的存储版本: {}。当前支持: v1（v2 实验中）",
+            "不支持的存储版本: {}。当前支持: v1",
             version
         ))),
     }
+}
+
+/// 创建 V2 存储引擎用于测试
+///
+/// # 参数
+/// * `config` - 存储配置
+///
+/// # 返回
+/// 返回 V2 存储适配器实例
+///
+/// # 错误
+/// 如果初始化失败，返回错误
+#[allow(dead_code)]
+pub async fn create_storage_v2(config: &StorageConfig) -> Result<Arc<StorageV2Adapter>> {
+    use silent_storage_v2::{IncrementalConfig, IncrementalStorage};
+
+    tracing::info!("初始化 V2 存储引擎（测试模式）");
+
+    // 创建 V1 作为底层存储
+    let v1_storage = Arc::new(StorageV1::new(config.root_path.clone(), config.chunk_size));
+
+    // 初始化 V1
+    v1_storage
+        .init()
+        .await
+        .map_err(|e| NasError::Config(format!("V1 底层存储初始化失败: {}", e)))?;
+
+    // 创建 V2 配置
+    let v2_config = IncrementalConfig::default();
+
+    // 创建 V2 增量存储（包装 V1）
+    let v2_root = config.root_path.join("v2").to_string_lossy().to_string();
+    let v2_storage = Arc::new(IncrementalStorage::new(v1_storage, v2_config, &v2_root));
+
+    // 初始化 V2
+    v2_storage
+        .init()
+        .await
+        .map_err(|e| NasError::Config(format!("V2 存储初始化失败: {}", e)))?;
+
+    // 创建适配器
+    let adapter = StorageV2Adapter::new(v2_storage);
+
+    tracing::info!("✅ V2 存储引擎初始化完成");
+    Ok(Arc::new(adapter))
 }
 
 #[cfg(test)]

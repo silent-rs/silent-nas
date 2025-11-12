@@ -4,7 +4,6 @@ use crate::audit::AuditLogger;
 use crate::auth::AuthManager;
 use crate::notify::EventNotifier;
 use crate::search::SearchEngine;
-use crate::storage::StorageManager;
 #[cfg(not(test))]
 use crate::sync::crdt::SyncManager;
 #[cfg(not(test))]
@@ -22,7 +21,6 @@ use crate::sync::incremental::IncrementalSyncHandler;
 /// 应用共享状态
 #[derive(Clone)]
 pub struct AppState {
-    pub storage: Arc<StorageManager>,
     pub notifier: Option<Arc<EventNotifier>>,
     pub sync_manager: Arc<SyncManager>,
     pub version_manager: Arc<VersionManager>,

@@ -1155,7 +1155,7 @@ mod tests {
             4 * 1024 * 1024,
         ));
         storage.init().await.unwrap();
-        let syncm = crate::sync::crdt::SyncManager::new("node-test".into(), storage.clone(), None);
+        let syncm = crate::sync::crdt::SyncManager::new("node-test".to_string(), None);
         let ver = crate::version::VersionManager::new(
             storage.clone(),
             Default::default(),

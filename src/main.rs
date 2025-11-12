@@ -44,10 +44,14 @@ async fn main() -> Result<()> {
     let config = Config::load();
     info!("配置加载完成: {:?}", config);
 
-    // 初始化存储管理器（根据配置选择版本）
+    // 初始化全局存储管理器（根据配置选择版本）
     let storage = storage::create_storage(&config.storage).await?;
     info!("存储引擎版本: {}", config.storage.version);
-    storage.init().await?;
+
+    // 将存储设置为全局实例
+    let storage_for_global = storage.as_ref().clone();
+    storage::init_global_storage(storage_for_global)?;
+    info!("✅ 全局存储已初始化");
 
     // 尝试连接 NATS（可选，单节点模式下可不连接）
     let notifier =
@@ -60,11 +64,7 @@ async fn main() -> Result<()> {
 
     // 初始化同步管理器
     let node_id = scru128::new_string();
-    let sync_manager = SyncManager::new(
-        node_id.clone(),
-        storage.clone(),
-        notifier.clone().map(Arc::new),
-    );
+    let sync_manager = SyncManager::new(node_id.clone(), notifier.clone().map(Arc::new));
     info!("同步管理器已初始化: node_id={}", node_id);
 
     // 初始化版本管理器
@@ -104,7 +104,6 @@ async fn main() -> Result<()> {
             sync_manager.clone(),
             nats_notifier.get_client(),
             config.nats.topic_prefix.clone(),
-            storage.as_ref().clone(),
             config.storage.chunk_size,
             config.sync.http_connect_timeout,
             config.sync.http_request_timeout,
@@ -133,7 +132,6 @@ async fn main() -> Result<()> {
     // 启动 HTTP 服务器（使用 Silent 框架）
     let http_addr = format!("{}:{}", config.server.host, config.server.http_port);
     let http_addr_clone = http_addr.clone();
-    let storage_clone = storage.clone();
     let notifier_clone = notifier.clone();
     let sync_clone = sync_manager.clone();
     let version_clone = version_manager.clone();
@@ -144,7 +142,6 @@ async fn main() -> Result<()> {
     let http_handle = tokio::spawn(async move {
         if let Err(e) = http::start_http_server(
             &http_addr_clone,
-            storage_clone.as_ref().clone(),
             notifier_clone,
             sync_clone,
             version_clone,

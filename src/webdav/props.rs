@@ -276,14 +276,13 @@ mod tests {
 
     async fn build_handler() -> WebDavHandler {
         let dir = tempfile::tempdir().unwrap();
-        let storage = Arc::new(crate::storage::StorageManager::new(
-            dir.path().to_path_buf(),
-            4 * 1024 * 1024,
-        ));
+        let storage =
+            crate::storage::StorageManager::new(dir.path().to_path_buf(), 4 * 1024 * 1024);
+        let _ = crate::storage::init_global_storage(storage.clone());
         storage.init().await.unwrap();
         let syncm = crate::sync::crdt::SyncManager::new("node-test".to_string(), None);
         let ver = crate::version::VersionManager::new(
-            storage.clone(),
+            std::sync::Arc::new(storage.clone()),
             Default::default(),
             dir.path().to_str().unwrap(),
         );
@@ -295,7 +294,6 @@ mod tests {
             .unwrap(),
         );
         WebDavHandler::new(
-            storage,
             None,
             syncm,
             "".into(),

@@ -261,7 +261,6 @@ async fn main() -> Result<()> {
     // 启动 WebDAV 服务器
     let webdav_addr = format!("{}:{}", config.server.host, config.server.webdav_port);
     let webdav_addr_clone = webdav_addr.clone();
-    let storage_webdav = storage.clone();
     let notifier_webdav = notifier.clone();
     let sync_webdav = sync_manager.clone();
     let version_webdav = version_manager.clone();
@@ -270,7 +269,6 @@ async fn main() -> Result<()> {
     let webdav_handle = tokio::spawn(async move {
         if let Err(e) = start_webdav_server(
             &webdav_addr_clone,
-            storage_webdav,
             notifier_webdav,
             sync_webdav,
             source_http_for_webdav,
@@ -506,7 +504,6 @@ async fn start_grpc_server(
 /// 启动 WebDAV 服务器
 async fn start_webdav_server(
     addr: &str,
-    storage: Arc<StorageManager>,
     notifier: Option<EventNotifier>,
     sync_manager: Arc<SyncManager>,
     source_http_addr: String,
@@ -516,7 +513,6 @@ async fn start_webdav_server(
     let notifier = notifier.map(Arc::new);
 
     let route = webdav::create_webdav_routes(
-        storage,
         notifier,
         sync_manager,
         source_http_addr,

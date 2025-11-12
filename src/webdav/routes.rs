@@ -32,7 +32,6 @@ fn register_webdav_methods(route: Route, handler: Arc<WebDavHandler>) -> Route {
 }
 
 pub fn create_webdav_routes(
-    storage: Arc<crate::storage::StorageManager>,
     notifier: Option<Arc<crate::notify::EventNotifier>>,
     sync_manager: Arc<crate::sync::crdt::SyncManager>,
     source_http_addr: String,
@@ -40,7 +39,6 @@ pub fn create_webdav_routes(
     search_engine: Arc<crate::search::SearchEngine>,
 ) -> Route {
     let handler = Arc::new(WebDavHandler::new(
-        storage,
         notifier,
         sync_manager,
         "".to_string(),

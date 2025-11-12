@@ -1,6 +1,5 @@
 use crate::notify::EventNotifier;
 use crate::search::SearchEngine;
-use crate::storage::StorageManager;
 use crate::sync::crdt::SyncManager;
 use async_trait::async_trait;
 use silent::prelude::*;
@@ -31,7 +30,7 @@ pub(super) struct ChangeEntry {
 
 #[derive(Clone)]
 pub struct WebDavHandler {
-    pub storage: Arc<StorageManager>,
+    // pub storage: Arc<StorageManager>,
     pub notifier: Option<Arc<EventNotifier>>,
     #[allow(dead_code)]
     pub sync_manager: Arc<SyncManager>,
@@ -50,7 +49,6 @@ pub struct WebDavHandler {
 
 impl WebDavHandler {
     pub fn new(
-        storage: Arc<StorageManager>,
         notifier: Option<Arc<EventNotifier>>,
         sync_manager: Arc<SyncManager>,
         base_path: String,
@@ -59,7 +57,7 @@ impl WebDavHandler {
         search_engine: Arc<SearchEngine>,
     ) -> Self {
         let handler = Self {
-            storage,
+            // storage,
             notifier,
             sync_manager,
             base_path,
@@ -78,7 +76,7 @@ impl WebDavHandler {
     }
 
     pub(super) fn meta_dir(&self) -> std::path::PathBuf {
-        self.storage.root_dir().join(".webdav")
+        crate::storage::storage().root_dir().join(".webdav")
     }
     pub(super) fn locks_file(&self) -> std::path::PathBuf {
         self.meta_dir().join("locks.json")
@@ -569,7 +567,7 @@ impl WebDavHandler {
     // 辅助类型定义移动到模块级（impl 内不支持定义）
 
     fn current_etag(&self, path: &str) -> Option<String> {
-        let full = self.storage.get_full_path(path);
+        let full = crate::storage::storage().get_full_path(path);
         if let Ok(meta) = std::fs::metadata(full) {
             let len = meta.len();
             let ts = meta
@@ -885,14 +883,13 @@ mod tests {
     #[tokio::test]
     async fn test_build_full_href_rules() {
         let dir = tempfile::tempdir().unwrap();
-        let storage = Arc::new(StorageManager::new(
-            dir.path().to_path_buf(),
-            4 * 1024 * 1024,
-        ));
+        let storage =
+            crate::storage::StorageManager::new(dir.path().to_path_buf(), 4 * 1024 * 1024);
+        let _ = crate::storage::init_global_storage(storage.clone());
         storage.init().await.unwrap();
         let syncm = SyncManager::new("node-test".to_string(), None);
         let ver = crate::version::VersionManager::new(
-            storage.clone(),
+            std::sync::Arc::new(storage.clone()),
             Default::default(),
             dir.path().to_str().unwrap(),
         );
@@ -904,7 +901,6 @@ mod tests {
             .unwrap(),
         );
         let handler = WebDavHandler::new(
-            storage,
             None,
             syncm,
             "".into(),

@@ -265,7 +265,7 @@ impl WebDavHandler {
             WebDavHandler::parse_prop_filter_and_nsmap(&xml_bytes)
         };
 
-        let storage_path = self.storage.get_full_path(&path);
+        let storage_path = crate::storage::storage().get_full_path(&path);
         let metadata = fs::metadata(&storage_path).await.map_err(|e| {
             // macOS 系统文件和元数据文件不存在是正常的，只记录 debug 日志
             let is_macos_metadata = path.starts_with("/._.")
@@ -641,7 +641,7 @@ impl WebDavHandler {
 
     pub(super) async fn handle_head(&self, path: &str, req: &Request) -> silent::Result<Response> {
         let path = Self::decode_path(path)?;
-        let storage_path = self.storage.get_full_path(&path);
+        let storage_path = crate::storage::storage().get_full_path(&path);
         let metadata = fs::metadata(&storage_path)
             .await
             .map_err(|_| SilentError::business_error(StatusCode::NOT_FOUND, "文件不存在"))?;
@@ -710,7 +710,7 @@ impl WebDavHandler {
 
     pub(super) async fn handle_get(&self, path: &str, req: &Request) -> silent::Result<Response> {
         let path = Self::decode_path(path)?;
-        let storage_path = self.storage.get_full_path(&path);
+        let storage_path = crate::storage::storage().get_full_path(&path);
         let metadata = fs::metadata(&storage_path)
             .await
             .map_err(|_| SilentError::business_error(StatusCode::NOT_FOUND, "文件不存在"))?;
@@ -809,7 +809,7 @@ impl WebDavHandler {
         self.ensure_lock_ok(&path, req).await?;
 
         // 检查文件是否已存在，用于确定返回状态码
-        let storage_path = self.storage.get_full_path(&path);
+        let storage_path = crate::storage::storage().get_full_path(&path);
         let file_exists = storage_path.exists();
 
         tracing::debug!(
@@ -850,8 +850,7 @@ impl WebDavHandler {
             })?;
         }
 
-        let metadata = self
-            .storage
+        let metadata = crate::storage::storage()
             .save_at_path(&path, &body_data)
             .await
             .map_err(|e| {
@@ -925,7 +924,7 @@ impl WebDavHandler {
             "N/A"
         );
 
-        let storage_path = self.storage.get_full_path(&path);
+        let storage_path = crate::storage::storage().get_full_path(&path);
         let metadata = fs::metadata(&storage_path).await.map_err(|e| {
             tracing::warn!(
                 "DELETE 文件不存在: {} -> {:?}, error: {}",
@@ -978,7 +977,7 @@ impl WebDavHandler {
 
     pub(super) async fn handle_mkcol(&self, path: &str) -> silent::Result<Response> {
         let path = Self::decode_path(path)?;
-        let storage_path = self.storage.get_full_path(&path);
+        let storage_path = crate::storage::storage().get_full_path(&path);
         if storage_path.exists() {
             return Err(SilentError::business_error(
                 StatusCode::METHOD_NOT_ALLOWED,
@@ -1009,8 +1008,8 @@ impl WebDavHandler {
                 SilentError::business_error(StatusCode::BAD_REQUEST, "缺少 Destination 头")
             })?;
         let dest_path = self.extract_path_from_url(dest)?;
-        let storage_path = self.storage.get_full_path(&path);
-        let dest_storage_path = self.storage.get_full_path(&dest_path);
+        let storage_path = crate::storage::storage().get_full_path(&path);
+        let dest_storage_path = crate::storage::storage().get_full_path(&dest_path);
         if let Some(parent) = dest_storage_path.parent() {
             fs::create_dir_all(parent).await.map_err(|e| {
                 SilentError::business_error(
@@ -1061,8 +1060,8 @@ impl WebDavHandler {
                 SilentError::business_error(StatusCode::BAD_REQUEST, "缺少 Destination 头")
             })?;
         let dest_path = self.extract_path_from_url(dest)?;
-        let src_storage_path = self.storage.get_full_path(&path);
-        let dest_storage_path = self.storage.get_full_path(&dest_path);
+        let src_storage_path = crate::storage::storage().get_full_path(&path);
+        let dest_storage_path = crate::storage::storage().get_full_path(&dest_path);
         let metadata = fs::metadata(&src_storage_path)
             .await
             .map_err(|_| SilentError::business_error(StatusCode::NOT_FOUND, "源路径不存在"))?;
@@ -1150,14 +1149,13 @@ mod tests {
 
     async fn build_handler() -> WebDavHandler {
         let dir = tempfile::tempdir().unwrap();
-        let storage = Arc::new(crate::storage::StorageManager::new(
-            dir.path().to_path_buf(),
-            4 * 1024 * 1024,
-        ));
+        let storage =
+            crate::storage::StorageManager::new(dir.path().to_path_buf(), 4 * 1024 * 1024);
+        let _ = crate::storage::init_global_storage(storage.clone());
         storage.init().await.unwrap();
         let syncm = crate::sync::crdt::SyncManager::new("node-test".to_string(), None);
         let ver = crate::version::VersionManager::new(
-            storage.clone(),
+            std::sync::Arc::new(storage.clone()),
             Default::default(),
             dir.path().to_str().unwrap(),
         );
@@ -1169,7 +1167,6 @@ mod tests {
             .unwrap(),
         );
         WebDavHandler::new(
-            storage,
             None,
             syncm,
             "".into(),
@@ -1201,12 +1198,12 @@ mod tests {
         let handler = build_handler().await;
 
         // 准备目录与文件
-        let root = handler.storage.root_dir().to_path_buf();
+        let root = crate::storage::storage().root_dir().to_path_buf();
         let data_root = root.join("data");
         tokio::fs::create_dir_all(data_root.join("dir/sub"))
             .await
             .unwrap();
-        let fpath = handler.storage.get_full_path("/dir/sub/a.txt");
+        let fpath = crate::storage::storage().get_full_path("/dir/sub/a.txt");
         tokio::fs::write(&fpath, b"hello").await.unwrap();
 
         // PROPFIND Depth: infinity
@@ -1254,12 +1251,15 @@ mod tests {
         // MKCOL 创建目录
         let mk = handler.handle_mkcol("/mk/a").await.unwrap();
         assert_eq!(mk.status(), StatusCode::CREATED);
-        assert!(handler.storage.get_full_path("/mk/a").exists());
+        assert!(crate::storage::storage().get_full_path("/mk/a").exists());
 
         // 创建源文件
-        tokio::fs::write(handler.storage.get_full_path("/mk/a/x.txt"), b"data")
-            .await
-            .unwrap();
+        tokio::fs::write(
+            crate::storage::storage().get_full_path("/mk/a/x.txt"),
+            b"data",
+        )
+        .await
+        .unwrap();
 
         // MOVE 到新路径
         let http_req = http::Request::builder()
@@ -1272,8 +1272,16 @@ mod tests {
         let req = Request::from_parts(parts, ReqBody::Empty);
         let mv = handler.handle_move("/mk/a/x.txt", &req).await.unwrap();
         assert_eq!(mv.status(), StatusCode::CREATED);
-        assert!(handler.storage.get_full_path("/mk/b/y.txt").exists());
-        assert!(!handler.storage.get_full_path("/mk/a/x.txt").exists());
+        assert!(
+            crate::storage::storage()
+                .get_full_path("/mk/b/y.txt")
+                .exists()
+        );
+        assert!(
+            !crate::storage::storage()
+                .get_full_path("/mk/a/x.txt")
+                .exists()
+        );
 
         // COPY 复制文件
         let http_req2 = http::Request::builder()
@@ -1286,8 +1294,16 @@ mod tests {
         let req2 = Request::from_parts(parts2, ReqBody::Empty);
         let cp = handler.handle_copy("/mk/b/y.txt", &req2).await.unwrap();
         assert_eq!(cp.status(), StatusCode::CREATED);
-        assert!(handler.storage.get_full_path("/mk/c/z.txt").exists());
-        assert!(handler.storage.get_full_path("/mk/b/y.txt").exists());
+        assert!(
+            crate::storage::storage()
+                .get_full_path("/mk/c/z.txt")
+                .exists()
+        );
+        assert!(
+            crate::storage::storage()
+                .get_full_path("/mk/b/y.txt")
+                .exists()
+        );
     }
 
     #[tokio::test]
@@ -1295,10 +1311,10 @@ mod tests {
         let handler = build_handler().await;
 
         // 创建文件与目录
-        tokio::fs::create_dir_all(handler.storage.get_full_path("/p0"))
+        tokio::fs::create_dir_all(crate::storage::storage().get_full_path("/p0"))
             .await
             .unwrap();
-        let f = handler.storage.get_full_path("/p0/a.txt");
+        let f = crate::storage::storage().get_full_path("/p0/a.txt");
         tokio::fs::write(&f, b"x").await.unwrap();
 
         // Depth: 0 针对文件

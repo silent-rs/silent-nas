@@ -45,7 +45,7 @@ async fn main() -> Result<()> {
     info!("配置加载完成: {:?}", config);
 
     // 初始化存储管理器（根据配置选择版本）
-    let storage = storage::create_storage(&config.storage)?;
+    let storage = storage::create_storage(&config.storage).await?;
     info!("存储引擎版本: {}", config.storage.version);
     storage.init().await?;
 

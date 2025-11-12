@@ -421,6 +421,11 @@ impl IncrementalStorage {
         hasher.update(data);
         hex::encode(hasher.finalize())
     }
+
+    /// 获取版本根目录（公开方法，供适配器使用）
+    pub fn version_root(&self) -> &Path {
+        &self.version_root
+    }
 }
 
 /// 存储统计信息

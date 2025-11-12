@@ -13,27 +13,31 @@
 //!
 //! ```
 //! silent-storage-v2/
-//! ├── core/           # 核心存储引擎（无状态）
-//! │   ├── chunker     # 分块算法
-//! │   ├── compression # 压缩算法
-//! │   ├── delta       # 差异计算
-//! │   └── engine      # 引擎组合
-//! ├── services/       # 有状态服务
-//! │   ├── dedup       # 去重服务
-//! │   ├── index       # 索引服务
-//! │   ├── tiering     # 分层存储
-//! │   └── lifecycle   # 生命周期
-//! └── storage         # 顶层 API
+//! |-- core/           # 核心存储引擎（无状态）
+//! |   |-- chunker     # 分块算法
+//! |   |-- compression # 压缩算法
+//! |   |-- delta       # 差异计算
+//! |   |-- engine      # 引擎组合
+//! |-- services/       # 有状态服务
+//! |   |-- dedup       # 去重服务
+//! |   |-- index       # 索引服务
+//! |   |-- tiering     # 分层存储
+//! |   |-- lifecycle   # 生命周期
+//! |-- storage         # 顶层 API
 //! ```
 
 mod error;
 
+pub mod adapter;
 pub mod bench;
 pub mod core;
 pub mod services;
 pub mod storage;
 
 pub use error::{Result, StorageError};
+
+// 重新导出适配器
+pub use adapter::StorageV2Adapter;
 
 // 重新导出核心模块
 pub use core::chunker::*;

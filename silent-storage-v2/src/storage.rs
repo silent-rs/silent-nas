@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
+use tokio::sync::RwLock;
 use tracing::info;
 
 /// 增量存储管理器
@@ -26,10 +27,10 @@ pub struct IncrementalStorage {
     version_root: PathBuf,
     /// 块存储根目录
     chunk_root: PathBuf,
-    /// 版本索引缓存
-    version_index: HashMap<String, VersionInfo>,
-    /// 块索引缓存
-    block_index: HashMap<String, PathBuf>,
+    /// 版本索引缓存（使用内部可变性）
+    version_index: Arc<RwLock<HashMap<String, VersionInfo>>>,
+    /// 块索引缓存（使用内部可变性）
+    block_index: Arc<RwLock<HashMap<String, PathBuf>>>,
 }
 
 impl IncrementalStorage {
@@ -42,13 +43,13 @@ impl IncrementalStorage {
             config,
             version_root,
             chunk_root,
-            version_index: HashMap::new(),
-            block_index: HashMap::new(),
+            version_index: Arc::new(RwLock::new(HashMap::new())),
+            block_index: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
     /// 初始化增量存储
-    pub async fn init(&mut self) -> Result<()> {
+    pub async fn init(&self) -> Result<()> {
         // 创建版本目录
         fs::create_dir_all(&self.version_root).await?;
         fs::create_dir_all(&self.chunk_root).await?;
@@ -63,7 +64,7 @@ impl IncrementalStorage {
 
     /// 保存文件版本（使用增量存储）
     pub async fn save_version(
-        &mut self,
+        &self,
         file_id: &str,
         data: &[u8],
         parent_version_id: Option<&str>,
@@ -78,7 +79,7 @@ impl IncrementalStorage {
             Vec::new()
         };
 
-        let mut generator = crate::delta::DeltaGenerator::new(self.config.clone());
+        let mut generator = crate::core::delta::DeltaGenerator::new(self.config.clone());
         let mut delta =
             generator.generate_delta(&base_data, data, file_id, parent_version_id.unwrap_or(""))?;
         // 使用相同的version_id
@@ -151,7 +152,7 @@ impl IncrementalStorage {
 
     /// 获取版本信息
     pub async fn get_version_info(&self, version_id: &str) -> Result<VersionInfo> {
-        if let Some(info) = self.version_index.get(version_id) {
+        if let Some(info) = self.version_index.read().await.get(version_id) {
             return Ok(info.clone());
         }
 
@@ -167,8 +168,9 @@ impl IncrementalStorage {
     /// 列出文件的所有版本
     pub async fn list_file_versions(&self, file_id: &str) -> Result<Vec<VersionInfo>> {
         let mut versions = Vec::new();
+        let index = self.version_index.read().await;
 
-        for version in self.version_index.values() {
+        for version in index.values() {
             if version.file_id == file_id {
                 versions.push(version.clone());
             }
@@ -187,20 +189,24 @@ impl IncrementalStorage {
         let mut total_size = 0u64;
         let mut unique_chunks = 0;
 
-        for version in self.version_index.values() {
+        let version_index = self.version_index.read().await;
+        for version in version_index.values() {
             total_versions += 1;
             total_size += version.storage_size;
             total_chunks += version.chunk_count;
         }
+        drop(version_index);
 
         // 计算唯一块数量
         let mut chunk_sizes: HashMap<String, u64> = HashMap::new();
-        for (chunk_id, chunk_path) in &self.block_index {
+        let block_index = self.block_index.read().await;
+        for (chunk_id, chunk_path) in block_index.iter() {
             if let Ok(metadata) = fs::metadata(chunk_path).await {
                 chunk_sizes.insert(chunk_id.clone(), metadata.len());
                 unique_chunks += 1;
             }
         }
+        drop(block_index);
 
         let total_chunk_size: u64 = chunk_sizes.values().sum();
 
@@ -224,7 +230,7 @@ impl IncrementalStorage {
     }
 
     /// 保存块数据
-    async fn save_chunk(&mut self, chunk: &ChunkInfo, file_data: &[u8]) -> Result<()> {
+    async fn save_chunk(&self, chunk: &ChunkInfo, file_data: &[u8]) -> Result<()> {
         let chunk_data = &file_data[chunk.offset..chunk.offset + chunk.size];
         let chunk_path = self.get_chunk_path(&chunk.chunk_id);
 
@@ -239,7 +245,10 @@ impl IncrementalStorage {
         file.flush().await?;
 
         // 更新块索引
-        self.block_index.insert(chunk.chunk_id.clone(), chunk_path);
+        self.block_index
+            .write()
+            .await
+            .insert(chunk.chunk_id.clone(), chunk_path);
 
         Ok(())
     }
@@ -252,7 +261,7 @@ impl IncrementalStorage {
 
     /// 保存版本信息
     async fn save_version_info(
-        &mut self,
+        &self,
         file_id: &str,
         delta: &FileDelta,
         parent_version_id: Option<&str>,
@@ -285,6 +294,8 @@ impl IncrementalStorage {
 
         // 更新索引
         self.version_index
+            .write()
+            .await
             .insert(version_info.version_id.clone(), version_info.clone());
 
         Ok(version_info)
@@ -301,7 +312,7 @@ impl IncrementalStorage {
     }
 
     /// 加载版本索引
-    async fn load_version_index(&mut self) -> Result<()> {
+    async fn load_version_index(&self) -> Result<()> {
         let versions_dir = self.version_root.join("versions");
 
         if !versions_dir.exists() {
@@ -323,16 +334,19 @@ impl IncrementalStorage {
                 let version_info: VersionInfo = serde_json::from_slice(&data)
                     .map_err(|e| StorageError::Storage(format!("加载版本信息失败: {}", e)))?;
                 self.version_index
+                    .write()
+                    .await
                     .insert(version_id.to_string(), version_info);
             }
         }
 
-        info!("加载了 {} 个版本信息", self.version_index.len());
+        let index_len = self.version_index.read().await.len();
+        info!("加载了 {} 个版本信息", index_len);
         Ok(())
     }
 
     /// 加载块索引
-    async fn load_block_index(&mut self) -> Result<()> {
+    async fn load_block_index(&self) -> Result<()> {
         let chunks_dir = self.chunk_root.join("data");
 
         if !chunks_dir.exists() {
@@ -346,11 +360,15 @@ impl IncrementalStorage {
             if path.is_file()
                 && let Some(file_name) = path.file_name().and_then(|s| s.to_str())
             {
-                self.block_index.insert(file_name.to_string(), path);
+                self.block_index
+                    .write()
+                    .await
+                    .insert(file_name.to_string(), path);
             }
         }
 
-        info!("加载了 {} 个块索引", self.block_index.len());
+        let index_len = self.block_index.read().await.len();
+        info!("加载了 {} 个块索引", index_len);
         Ok(())
     }
 

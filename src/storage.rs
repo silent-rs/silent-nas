@@ -69,15 +69,17 @@ pub use silent_nas_core::StorageManager as StorageManagerTrait;
 
 // 导出具体的存储实现
 pub use silent_storage_v1::StorageManager as StorageV1;
+// V2 已重构完成，API 使用 &self + 内部可变性，但需要额外适配层才能完全兼容 V1 的 trait
+// pub use silent_storage_v2::IncrementalStorage as StorageV2;
 
 // 导出错误类型
 #[allow(unused_imports)]
 pub use silent_storage_v1::StorageError;
 
-/// 存储管理器（当前仅支持 V1）
+/// 存储管理器（当前使用 V1）
 ///
 /// 这是主项目使用的存储管理器类型。
-/// 当前实现仅支持 V1，V2 支持将在未来版本中添加。
+/// V2 已完成架构重构，使用 &self 和内部可变性，但仍需要适配层。
 pub type StorageManager = StorageV1;
 
 /// 根据配置创建存储管理器
@@ -97,15 +99,29 @@ pub fn create_storage(config: &StorageConfig) -> Result<Arc<StorageManager>> {
             Ok(Arc::new(storage))
         }
         "v2" => {
-            // V2 当前不支持，因为它的 API 与 V1 不兼容
+            // V2 已完成重构：
+            // - 删除了迁移模块（compatibility.rs）
+            // - 重组为 core/ 和 services/ 架构
+            // - 所有方法使用 &self + Arc<RwLock<>> 内部可变性
+            //
+            // 但 V2 的 API 与 V1 的 StorageManager trait 不完全兼容，
+            // 需要创建适配层才能无缝集成。
+            //
+            // 当前状态：V2 可独立使用，但需要额外的适配代码。
             Err(NasError::Config(
-                "V2 存储引擎当前不支持。V2 的 API 需要 &mut self，与当前的 Arc<Storage> 模式不兼容。\
-                 如需使用 V2，请参考 silent-storage-v2 crate 的文档单独集成。"
+                "V2 存储引擎已重构完成（&self API），但仍需适配层集成。\n\
+                 当前进展：\n\
+                 ✅ 删除迁移模块\n\
+                 ✅ 重组为 core/services 架构\n\
+                 ✅ 所有方法使用 &self\n\
+                 ⏳ 需要实现 StorageManager trait 适配层\n\
+                 \n\
+                 如需立即使用 V2，请参考 silent-storage-v2/src/storage.rs 直接调用 IncrementalStorage API。"
                     .to_string(),
             ))
         }
         version => Err(NasError::Config(format!(
-            "不支持的存储版本: {}。当前支持: v1",
+            "不支持的存储版本: {}。当前支持: v1（v2 重构中）",
             version
         ))),
     }

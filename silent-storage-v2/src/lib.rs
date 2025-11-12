@@ -8,43 +8,47 @@
 //! - 自动压缩与冷热分离
 //! - 数据生命周期管理
 //! - 跨文件块级去重
+//!
+//! ## 架构设计
+//!
+//! ```
+//! silent-storage-v2/
+//! ├── core/           # 核心存储引擎（无状态）
+//! │   ├── chunker     # 分块算法
+//! │   ├── compression # 压缩算法
+//! │   ├── delta       # 差异计算
+//! │   └── engine      # 引擎组合
+//! ├── services/       # 有状态服务
+//! │   ├── dedup       # 去重服务
+//! │   ├── index       # 索引服务
+//! │   ├── tiering     # 分层存储
+//! │   └── lifecycle   # 生命周期
+//! └── storage         # 顶层 API
+//! ```
 
 mod error;
 
 pub mod bench;
-pub mod chunker;
-pub mod compatibility;
-pub mod compression;
-pub mod dedup;
-pub mod delta;
-pub mod engine;
-pub mod index;
-pub mod lifecycle;
+pub mod core;
+pub mod services;
 pub mod storage;
-pub mod tiering;
 
 pub use error::{Result, StorageError};
 
-#[allow(ambiguous_glob_reexports)]
-pub use chunker::*;
-#[allow(ambiguous_glob_reexports)]
-pub use compatibility::*;
-#[allow(ambiguous_glob_reexports)]
-pub use compression::*;
-#[allow(ambiguous_glob_reexports)]
-pub use dedup::*;
-#[allow(ambiguous_glob_reexports)]
-pub use delta::*;
-#[allow(ambiguous_glob_reexports)]
-pub use engine::*;
-#[allow(ambiguous_glob_reexports)]
-pub use index::*;
-#[allow(ambiguous_glob_reexports)]
-pub use lifecycle::*;
-#[allow(ambiguous_glob_reexports)]
+// 重新导出核心模块
+pub use core::chunker::*;
+pub use core::compression::*;
+pub use core::delta::*;
+pub use core::engine::*;
+
+// 重新导出服务模块
+pub use services::dedup::*;
+pub use services::index::*;
+pub use services::lifecycle::*;
+pub use services::tiering::*;
+
+// 重新导出存储API
 pub use storage::*;
-#[allow(ambiguous_glob_reexports)]
-pub use tiering::*;
 
 use serde::{Deserialize, Serialize};
 

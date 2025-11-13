@@ -8,7 +8,6 @@ use async_trait::async_trait;
 use chrono::Local;
 use serde::{Deserialize, Serialize};
 use silent_nas_core::{FileMetadata, FileVersion, S3CompatibleStorageTrait, StorageManagerTrait};
-use silent_storage_v1::StorageManager;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -49,14 +48,19 @@ pub struct FileIndexEntry {
 ///
 /// 基于增量存储、块级去重和版本管理的高级存储系统
 pub struct Storage {
-    /// 基础存储管理器
-    storage: Arc<StorageManager>,
+    /// 存储根目录
+    root_path: PathBuf,
+    /// 用户数据根目录 (root_path/data)
+    data_root: PathBuf,
     /// 配置
     config: IncrementalConfig,
-    /// 版本根目录
+    /// 版本根目录 (root_path/v2/incremental)
     version_root: PathBuf,
     /// 块存储根目录
     chunk_root: PathBuf,
+    /// 块大小（预留字段，当前使用 IncrementalConfig 中的分块配置）
+    #[allow(dead_code)]
+    chunk_size: usize,
     /// 版本索引缓存（使用内部可变性）
     version_index: Arc<RwLock<HashMap<String, VersionInfo>>>,
     /// 块索引缓存（使用内部可变性）
@@ -68,15 +72,19 @@ pub struct Storage {
 }
 
 impl Storage {
-    pub fn new(storage: Arc<StorageManager>, config: IncrementalConfig, root_path: &str) -> Self {
-        let version_root = Path::new(root_path).join("incremental");
+    pub fn new(root_path: PathBuf, chunk_size: usize, config: IncrementalConfig) -> Self {
+        let data_root = root_path.join("data");
+        let v2_root = root_path.join("v2");
+        let version_root = v2_root.join("incremental");
         let chunk_root = version_root.join("chunks");
 
         Self {
-            storage,
+            root_path,
+            data_root,
             config,
             version_root,
             chunk_root,
+            chunk_size,
             version_index: Arc::new(RwLock::new(HashMap::new())),
             block_index: Arc::new(RwLock::new(HashMap::new())),
             chunk_ref_count: Arc::new(RwLock::new(HashMap::new())),
@@ -86,7 +94,9 @@ impl Storage {
 
     /// 初始化增量存储
     pub async fn init(&self) -> Result<()> {
-        // 创建版本目录
+        // 创建必要的目录
+        fs::create_dir_all(&self.root_path).await?;
+        fs::create_dir_all(&self.data_root).await?;
         fs::create_dir_all(&self.version_root).await?;
         fs::create_dir_all(&self.chunk_root).await?;
 
@@ -97,9 +107,8 @@ impl Storage {
         self.load_file_index().await?;
 
         info!(
-            "增量存储初始化完成: root={:?}, version_root={:?}",
-            self.storage.root_dir(),
-            self.version_root
+            "增量存储初始化完成: root={:?}, data={:?}, version_root={:?}",
+            self.root_path, self.data_root, self.version_root
         );
         Ok(())
     }
@@ -836,16 +845,11 @@ mod tests {
 
     async fn create_test_storage() -> (Storage, TempDir) {
         let temp_dir = TempDir::new().unwrap();
-        let storage = Arc::new(crate::storage::StorageManager::new(
-            temp_dir.path().to_path_buf(),
-            4 * 1024 * 1024,
-        ));
+        let config = IncrementalConfig::default();
+        let storage = Storage::new(temp_dir.path().to_path_buf(), 4 * 1024 * 1024, config);
         storage.init().await.unwrap();
 
-        let config = IncrementalConfig::default();
-        let incremental = Storage::new(storage, config, temp_dir.path().to_str().unwrap());
-
-        (incremental, temp_dir)
+        (storage, temp_dir)
     }
 
     #[tokio::test]
@@ -1045,12 +1049,10 @@ mod tests {
 /// 实现 StorageManagerTrait 以提供标准存储接口
 #[async_trait]
 impl StorageManagerTrait for Storage {
-    type Error = silent_storage_v1::StorageError;
+    type Error = StorageError;
 
     async fn init(&self) -> std::result::Result<(), Self::Error> {
-        Storage::init(self)
-            .await
-            .map_err(|e: StorageError| silent_storage_v1::StorageError::from(e))
+        Storage::init(self).await
     }
 
     async fn save_file(
@@ -1060,10 +1062,7 @@ impl StorageManagerTrait for Storage {
     ) -> std::result::Result<FileMetadata, Self::Error> {
         // V2 使用增量存储，这里我们保存第一个版本
         // parent_version_id 为 None 表示创建新文件
-        let (_delta, file_version) = self
-            .save_version(file_id, data, None)
-            .await
-            .map_err(|e: StorageError| silent_storage_v1::StorageError::from(e))?;
+        let (_delta, file_version) = self.save_version(file_id, data, None).await?;
 
         // 转换为 FileMetadata
         Ok(FileMetadata {
@@ -1089,13 +1088,10 @@ impl StorageManagerTrait for Storage {
     async fn read_file(&self, file_id: &str) -> std::result::Result<Vec<u8>, Self::Error> {
         // 读取文件的最新版本
         // 首先获取文件的版本列表
-        let versions = self
-            .list_file_versions(file_id)
-            .await
-            .map_err(|e: StorageError| silent_storage_v1::StorageError::from(e))?;
+        let versions = self.list_file_versions(file_id).await?;
 
         if versions.is_empty() {
-            return Err(silent_storage_v1::StorageError::Storage(format!(
+            return Err(StorageError::FileNotFound(format!(
                 "文件不存在: {}",
                 file_id
             )));
@@ -1105,16 +1101,12 @@ impl StorageManagerTrait for Storage {
         let latest_version = &versions[0];
 
         // 读取版本数据
-        self.read_version_data(&latest_version.version_id)
-            .await
-            .map_err(|e: StorageError| silent_storage_v1::StorageError::from(e))
+        self.read_version_data(&latest_version.version_id).await
     }
 
     async fn delete_file(&self, file_id: &str) -> std::result::Result<(), Self::Error> {
         // 删除文件及其所有版本
-        Storage::delete_file(self, file_id)
-            .await
-            .map_err(|e: StorageError| silent_storage_v1::StorageError::from(e))
+        Storage::delete_file(self, file_id).await
     }
 
     async fn file_exists(&self, file_id: &str) -> bool {
@@ -1126,13 +1118,10 @@ impl StorageManagerTrait for Storage {
     }
 
     async fn get_metadata(&self, file_id: &str) -> std::result::Result<FileMetadata, Self::Error> {
-        let versions = self
-            .list_file_versions(file_id)
-            .await
-            .map_err(|e: StorageError| silent_storage_v1::StorageError::from(e))?;
+        let versions = self.list_file_versions(file_id).await?;
 
         if versions.is_empty() {
-            return Err(silent_storage_v1::StorageError::Storage(format!(
+            return Err(StorageError::FileNotFound(format!(
                 "文件不存在: {}",
                 file_id
             )));
@@ -1153,9 +1142,7 @@ impl StorageManagerTrait for Storage {
 
     async fn list_files(&self) -> std::result::Result<Vec<FileMetadata>, Self::Error> {
         // 从文件索引获取所有文件列表
-        let file_ids = Storage::list_files(self)
-            .await
-            .map_err(|e: StorageError| silent_storage_v1::StorageError::from(e))?;
+        let file_ids = Storage::list_files(self).await?;
 
         let mut files = Vec::new();
         for file_id in file_ids {
@@ -1191,51 +1178,34 @@ impl StorageManagerTrait for Storage {
 
     /// 获取存储根目录
     ///
-    /// 返回用户文件存储的根目录（V1 的 data 目录）
+    /// 返回用户文件存储的根目录 (data 目录)
     fn root_dir(&self) -> &Path {
-        // V2 使用 V1 作为底层存储，用户文件存储在 V1 的 data 目录
-        // 由于 trait 返回 &Path，我们无法返回临时的 PathBuf
-        // 所以这里返回 V1 的 root_path，但在 get_full_path 中会正确处理
-        let path = self.storage.root_dir();
-        tracing::warn!("V2::root_dir() 被调用，返回: {:?}", path);
-        path
+        &self.data_root
     }
 
     fn get_full_path(&self, relative_path: &str) -> std::path::PathBuf {
         // 移除开头的 / 以确保是相对路径
         // PathBuf::join() 对绝对路径会直接返回绝对路径，忽略 root
         let cleaned_path = relative_path.trim_start_matches('/');
-        // 委托给 V1 的 get_full_path，它会正确使用 data_root
-        let full = self.storage.get_full_path(cleaned_path);
-        tracing::warn!(
-            "V2::get_full_path({:?}): cleaned={:?}, result={:?}",
-            relative_path,
-            cleaned_path,
-            full
-        );
-        full
+        self.data_root.join(cleaned_path)
     }
 }
 
 /// 实现 S3CompatibleStorageTrait 以提供 S3 API 支持
 #[async_trait]
 impl S3CompatibleStorageTrait for Storage {
-    type Error = silent_storage_v1::StorageError;
+    type Error = StorageError;
 
     async fn create_bucket(&self, bucket_name: &str) -> std::result::Result<(), Self::Error> {
         // V2 中 bucket 可以映射为目录
         let bucket_path = self.root_dir().join(bucket_name);
-        tokio::fs::create_dir_all(&bucket_path)
-            .await
-            .map_err(silent_storage_v1::StorageError::Io)?;
+        tokio::fs::create_dir_all(&bucket_path).await?;
         Ok(())
     }
 
     async fn delete_bucket(&self, bucket_name: &str) -> std::result::Result<(), Self::Error> {
         let bucket_path = self.root_dir().join(bucket_name);
-        tokio::fs::remove_dir_all(&bucket_path)
-            .await
-            .map_err(silent_storage_v1::StorageError::Io)?;
+        tokio::fs::remove_dir_all(&bucket_path).await?;
         Ok(())
     }
 
@@ -1246,21 +1216,10 @@ impl S3CompatibleStorageTrait for Storage {
 
     async fn list_buckets(&self) -> std::result::Result<Vec<String>, Self::Error> {
         let mut buckets = Vec::new();
-        let mut entries = tokio::fs::read_dir(self.root_dir())
-            .await
-            .map_err(silent_storage_v1::StorageError::Io)?;
+        let mut entries = tokio::fs::read_dir(self.root_dir()).await?;
 
-        while let Some(entry) = entries
-            .next_entry()
-            .await
-            .map_err(silent_storage_v1::StorageError::Io)?
-        {
-            if entry
-                .file_type()
-                .await
-                .map_err(silent_storage_v1::StorageError::Io)?
-                .is_dir()
-            {
+        while let Some(entry) = entries.next_entry().await? {
+            if entry.file_type().await?.is_dir() {
                 if let Some(name) = entry.file_name().to_str() {
                     buckets.push(name.to_string());
                 }
@@ -1306,8 +1265,7 @@ impl S3CompatibleStorageTrait for Storage {
             Ok(())
         }
 
-        collect_files(&bucket_path, &bucket_path, prefix, &mut objects)
-            .map_err(silent_storage_v1::StorageError::Io)?;
+        collect_files(&bucket_path, &bucket_path, prefix, &mut objects)?;
 
         Ok(objects)
     }

@@ -105,6 +105,23 @@ impl StorageBackend {
     }
 }
 
+/// V2 错误转换为 V1 错误的辅助函数
+fn convert_v2_error(err: silent_storage_v2::StorageError) -> StorageError {
+    use silent_storage_v2::StorageError as V2Error;
+    match err {
+        V2Error::FileNotFound(msg) => StorageError::FileNotFound(msg),
+        V2Error::Storage(msg) => StorageError::Storage(msg),
+        V2Error::Dedup(msg) => StorageError::Storage(format!("去重错误: {}", msg)),
+        V2Error::Compression(msg) => StorageError::Storage(format!("压缩错误: {}", msg)),
+        V2Error::Index(msg) => StorageError::Storage(format!("索引错误: {}", msg)),
+        V2Error::Tiering(msg) => StorageError::Storage(format!("分层存储错误: {}", msg)),
+        V2Error::Lifecycle(msg) => StorageError::Storage(format!("生命周期管理错误: {}", msg)),
+        V2Error::Delta(msg) => StorageError::Storage(format!("Delta生成错误: {}", msg)),
+        V2Error::Io(e) => StorageError::Io(e),
+        V2Error::Serialization(e) => StorageError::Storage(format!("序列化错误: {}", e)),
+    }
+}
+
 // 为 StorageBackend 实现 StorageManagerTrait
 #[async_trait]
 impl StorageManagerTrait for StorageBackend {
@@ -113,7 +130,9 @@ impl StorageManagerTrait for StorageBackend {
     async fn init(&self) -> std::result::Result<(), Self::Error> {
         match self {
             StorageBackend::V1(storage) => storage.init().await,
-            StorageBackend::V2(storage) => <StorageV2 as StorageManagerTrait>::init(storage).await,
+            StorageBackend::V2(storage) => <StorageV2 as StorageManagerTrait>::init(storage)
+                .await
+                .map_err(convert_v2_error),
         }
     }
 
@@ -125,7 +144,9 @@ impl StorageManagerTrait for StorageBackend {
         match self {
             StorageBackend::V1(storage) => storage.save_file(id, data).await,
             StorageBackend::V2(storage) => {
-                <StorageV2 as StorageManagerTrait>::save_file(storage, id, data).await
+                <StorageV2 as StorageManagerTrait>::save_file(storage, id, data)
+                    .await
+                    .map_err(convert_v2_error)
             }
         }
     }
@@ -138,7 +159,9 @@ impl StorageManagerTrait for StorageBackend {
         match self {
             StorageBackend::V1(storage) => storage.save_at_path(relative_path, data).await,
             StorageBackend::V2(storage) => {
-                <StorageV2 as StorageManagerTrait>::save_at_path(storage, relative_path, data).await
+                <StorageV2 as StorageManagerTrait>::save_at_path(storage, relative_path, data)
+                    .await
+                    .map_err(convert_v2_error)
             }
         }
     }
@@ -147,7 +170,9 @@ impl StorageManagerTrait for StorageBackend {
         match self {
             StorageBackend::V1(storage) => storage.read_file(id).await,
             StorageBackend::V2(storage) => {
-                <StorageV2 as StorageManagerTrait>::read_file(storage, id).await
+                <StorageV2 as StorageManagerTrait>::read_file(storage, id)
+                    .await
+                    .map_err(convert_v2_error)
             }
         }
     }
@@ -156,7 +181,9 @@ impl StorageManagerTrait for StorageBackend {
         match self {
             StorageBackend::V1(storage) => storage.delete_file(id).await,
             StorageBackend::V2(storage) => {
-                <StorageV2 as StorageManagerTrait>::delete_file(storage, id).await
+                <StorageV2 as StorageManagerTrait>::delete_file(storage, id)
+                    .await
+                    .map_err(convert_v2_error)
             }
         }
     }
@@ -174,7 +201,9 @@ impl StorageManagerTrait for StorageBackend {
         match self {
             StorageBackend::V1(storage) => storage.get_metadata(id).await,
             StorageBackend::V2(storage) => {
-                <StorageV2 as StorageManagerTrait>::get_metadata(storage, id).await
+                <StorageV2 as StorageManagerTrait>::get_metadata(storage, id)
+                    .await
+                    .map_err(convert_v2_error)
             }
         }
     }
@@ -182,9 +211,9 @@ impl StorageManagerTrait for StorageBackend {
     async fn list_files(&self) -> std::result::Result<Vec<FileMetadata>, Self::Error> {
         match self {
             StorageBackend::V1(storage) => storage.list_files().await,
-            StorageBackend::V2(storage) => {
-                <StorageV2 as StorageManagerTrait>::list_files(storage).await
-            }
+            StorageBackend::V2(storage) => <StorageV2 as StorageManagerTrait>::list_files(storage)
+                .await
+                .map_err(convert_v2_error),
         }
     }
 
@@ -198,6 +227,7 @@ impl StorageManagerTrait for StorageBackend {
             StorageBackend::V2(storage) => {
                 <StorageV2 as StorageManagerTrait>::verify_hash(storage, file_id, expected_hash)
                     .await
+                    .map_err(convert_v2_error)
             }
         }
     }
@@ -228,7 +258,9 @@ impl S3CompatibleStorageTraitTrait for StorageBackend {
         match self {
             StorageBackend::V1(storage) => storage.create_bucket(bucket_name).await,
             StorageBackend::V2(storage) => {
-                <StorageV2 as S3CompatibleStorageTrait>::create_bucket(storage, bucket_name).await
+                <StorageV2 as S3CompatibleStorageTrait>::create_bucket(storage, bucket_name)
+                    .await
+                    .map_err(convert_v2_error)
             }
         }
     }
@@ -237,7 +269,9 @@ impl S3CompatibleStorageTraitTrait for StorageBackend {
         match self {
             StorageBackend::V1(storage) => storage.delete_bucket(bucket_name).await,
             StorageBackend::V2(storage) => {
-                <StorageV2 as S3CompatibleStorageTrait>::delete_bucket(storage, bucket_name).await
+                <StorageV2 as S3CompatibleStorageTrait>::delete_bucket(storage, bucket_name)
+                    .await
+                    .map_err(convert_v2_error)
             }
         }
     }
@@ -255,7 +289,9 @@ impl S3CompatibleStorageTraitTrait for StorageBackend {
         match self {
             StorageBackend::V1(storage) => storage.list_buckets().await,
             StorageBackend::V2(storage) => {
-                <StorageV2 as S3CompatibleStorageTrait>::list_buckets(storage).await
+                <StorageV2 as S3CompatibleStorageTrait>::list_buckets(storage)
+                    .await
+                    .map_err(convert_v2_error)
             }
         }
     }
@@ -274,6 +310,7 @@ impl S3CompatibleStorageTraitTrait for StorageBackend {
                     prefix,
                 )
                 .await
+                .map_err(convert_v2_error)
             }
         }
     }
@@ -313,21 +350,15 @@ pub async fn create_storage(config: &StorageConfig) -> Result<Arc<StorageManager
 
             tracing::info!("🔧 初始化 V2 增量存储引擎");
 
-            // 创建 V1 作为底层存储
-            let v1_storage = Arc::new(StorageV1::new(config.root_path.clone(), config.chunk_size));
-
-            // 初始化 V1
-            v1_storage
-                .init()
-                .await
-                .map_err(|e| NasError::Config(format!("V1 底层存储初始化失败: {}", e)))?;
-
             // 创建 V2 配置
             let v2_config = IncrementalConfig::default();
 
-            // 创建 V2 存储（包装 V1）
-            let v2_root = config.root_path.join("v2").to_string_lossy().to_string();
-            let v2_storage = Arc::new(V2Storage::new(v1_storage, v2_config, &v2_root));
+            // 创建 V2 存储（独立实现，不依赖 V1）
+            let v2_storage = Arc::new(V2Storage::new(
+                config.root_path.clone(),
+                config.chunk_size,
+                v2_config,
+            ));
 
             // 初始化 V2
             v2_storage
@@ -362,21 +393,15 @@ pub async fn create_storage_v2(config: &StorageConfig) -> Result<Arc<StorageV2>>
 
     tracing::info!("初始化 V2 存储引擎");
 
-    // 创建 V1 作为底层存储
-    let v1_storage = Arc::new(StorageV1::new(config.root_path.clone(), config.chunk_size));
-
-    // 初始化 V1
-    v1_storage
-        .init()
-        .await
-        .map_err(|e| NasError::Config(format!("V1 底层存储初始化失败: {}", e)))?;
-
     // 创建 V2 配置
     let v2_config = IncrementalConfig::default();
 
-    // 创建 V2 存储（包装 V1）
-    let v2_root = config.root_path.join("v2").to_string_lossy().to_string();
-    let v2_storage = Arc::new(V2Storage::new(v1_storage, v2_config, &v2_root));
+    // 创建 V2 存储（独立实现）
+    let v2_storage = Arc::new(V2Storage::new(
+        config.root_path.clone(),
+        config.chunk_size,
+        v2_config,
+    ));
 
     // 初始化 V2
     v2_storage

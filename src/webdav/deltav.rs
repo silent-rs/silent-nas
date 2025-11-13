@@ -3,7 +3,7 @@ use http_body_util::BodyExt;
 use quick_xml::Reader;
 use quick_xml::events::Event;
 use silent::prelude::*;
-use silent_nas_core::StorageManager as StorageManagerTrait;
+use silent_nas_core::StorageManagerTrait;
 use tokio::fs;
 
 impl WebDavHandler {

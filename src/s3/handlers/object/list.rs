@@ -2,7 +2,7 @@ use crate::s3::models::S3Object;
 use crate::s3::service::S3Service;
 use http::StatusCode;
 use silent::prelude::*;
-use silent_nas_core::{S3CompatibleStorage, StorageManager as StorageManagerTrait};
+use silent_nas_core::{S3CompatibleStorageTrait, StorageManagerTrait};
 use tracing::debug;
 
 impl S3Service {

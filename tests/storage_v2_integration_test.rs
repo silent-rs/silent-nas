@@ -1,15 +1,15 @@
 //! V2 存储引擎集成测试
 //!
-//! 测试 V2 存储适配器在实际场景中的功能和性能
+//! 测试 V2 存储在实际场景中的功能和性能
 
 use silent_nas::config::StorageConfig;
-use silent_nas::storage::{StorageV2Adapter, create_storage_v2};
-use silent_nas_core::{S3CompatibleStorage, StorageManager};
+use silent_nas::storage::{StorageV2, create_storage_v2};
+use silent_nas_core::{S3CompatibleStorageTrait, StorageManagerTrait};
 use std::sync::Arc;
 use tempfile::TempDir;
 
 /// 创建测试用的 V2 存储实例
-async fn create_test_v2_storage() -> (Arc<StorageV2Adapter>, TempDir) {
+async fn create_test_v2_storage() -> (Arc<StorageV2>, TempDir) {
     let temp_dir = TempDir::new().unwrap();
     let config = StorageConfig {
         root_path: temp_dir.path().to_path_buf(),

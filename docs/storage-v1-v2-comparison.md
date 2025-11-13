@@ -65,7 +65,7 @@
 ```rust
 // 实现了完整的 trait
 impl silent_nas_core::StorageManager for StorageManager
-impl silent_nas_core::S3CompatibleStorage for StorageManager
+impl silent_nas_core::S3CompatibleStorageTrait for StorageManager
 ```
 
 ### 4. 其他特性
@@ -271,7 +271,7 @@ silent-storage-v2/
 - ✅ `list_files` - 列出所有文件 ✨ **新增**
 - ✅ `verify_hash` - 验证哈希值
 
-**S3CompatibleStorage trait：**
+**S3CompatibleStorageTrait trait：**
 - ✅ `create_bucket` - 创建bucket
 - ✅ `delete_bucket` - 删除bucket
 - ✅ `bucket_exists` - 检查bucket存在

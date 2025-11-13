@@ -71,13 +71,14 @@ use crate::error::{NasError, Result};
 use std::sync::Arc;
 
 // 重新导出 StorageManager trait，让代码可以使用 trait 约束
-pub use silent_nas_core::S3CompatibleStorage as S3CompatibleStorageTrait;
-pub use silent_nas_core::StorageManager as StorageManagerTrait;
+pub use silent_nas_core::S3CompatibleStorageTrait as S3CompatibleStorageTraitTrait;
+use silent_nas_core::S3CompatibleStorageTrait;
+pub use silent_nas_core::StorageManagerTrait; // 用于 trait 方法调用
 
 // 导出具体的存储实现
 pub use silent_storage_v1::StorageManager as StorageV1;
-// V2 适配器已完成，生产环境测试中
-pub use silent_storage_v2::StorageV2Adapter;
+// V2 存储（直接实现了 trait）
+pub use silent_storage_v2::Storage as StorageV2;
 
 // 导出错误类型
 pub use silent_storage_v1::StorageError;
@@ -93,7 +94,7 @@ pub enum StorageBackend {
     /// V1 简单文件存储
     V1(StorageV1),
     /// V2 增量存储
-    V2(StorageV2Adapter),
+    V2(Arc<StorageV2>),
 }
 
 impl StorageBackend {
@@ -112,7 +113,7 @@ impl StorageManagerTrait for StorageBackend {
     async fn init(&self) -> std::result::Result<(), Self::Error> {
         match self {
             StorageBackend::V1(storage) => storage.init().await,
-            StorageBackend::V2(storage) => storage.init().await,
+            StorageBackend::V2(storage) => <StorageV2 as StorageManagerTrait>::init(storage).await,
         }
     }
 
@@ -123,7 +124,9 @@ impl StorageManagerTrait for StorageBackend {
     ) -> std::result::Result<FileMetadata, Self::Error> {
         match self {
             StorageBackend::V1(storage) => storage.save_file(id, data).await,
-            StorageBackend::V2(storage) => storage.save_file(id, data).await,
+            StorageBackend::V2(storage) => {
+                <StorageV2 as StorageManagerTrait>::save_file(storage, id, data).await
+            }
         }
     }
 
@@ -134,42 +137,54 @@ impl StorageManagerTrait for StorageBackend {
     ) -> std::result::Result<FileMetadata, Self::Error> {
         match self {
             StorageBackend::V1(storage) => storage.save_at_path(relative_path, data).await,
-            StorageBackend::V2(storage) => storage.save_at_path(relative_path, data).await,
+            StorageBackend::V2(storage) => {
+                <StorageV2 as StorageManagerTrait>::save_at_path(storage, relative_path, data).await
+            }
         }
     }
 
     async fn read_file(&self, id: &str) -> std::result::Result<Vec<u8>, Self::Error> {
         match self {
             StorageBackend::V1(storage) => storage.read_file(id).await,
-            StorageBackend::V2(storage) => storage.read_file(id).await,
+            StorageBackend::V2(storage) => {
+                <StorageV2 as StorageManagerTrait>::read_file(storage, id).await
+            }
         }
     }
 
     async fn delete_file(&self, id: &str) -> std::result::Result<(), Self::Error> {
         match self {
             StorageBackend::V1(storage) => storage.delete_file(id).await,
-            StorageBackend::V2(storage) => storage.delete_file(id).await,
+            StorageBackend::V2(storage) => {
+                <StorageV2 as StorageManagerTrait>::delete_file(storage, id).await
+            }
         }
     }
 
     async fn file_exists(&self, id: &str) -> bool {
         match self {
             StorageBackend::V1(storage) => storage.file_exists(id).await,
-            StorageBackend::V2(storage) => storage.file_exists(id).await,
+            StorageBackend::V2(storage) => {
+                <StorageV2 as StorageManagerTrait>::file_exists(storage, id).await
+            }
         }
     }
 
     async fn get_metadata(&self, id: &str) -> std::result::Result<FileMetadata, Self::Error> {
         match self {
             StorageBackend::V1(storage) => storage.get_metadata(id).await,
-            StorageBackend::V2(storage) => storage.get_metadata(id).await,
+            StorageBackend::V2(storage) => {
+                <StorageV2 as StorageManagerTrait>::get_metadata(storage, id).await
+            }
         }
     }
 
     async fn list_files(&self) -> std::result::Result<Vec<FileMetadata>, Self::Error> {
         match self {
             StorageBackend::V1(storage) => storage.list_files().await,
-            StorageBackend::V2(storage) => storage.list_files().await,
+            StorageBackend::V2(storage) => {
+                <StorageV2 as StorageManagerTrait>::list_files(storage).await
+            }
         }
     }
 
@@ -180,55 +195,68 @@ impl StorageManagerTrait for StorageBackend {
     ) -> std::result::Result<bool, Self::Error> {
         match self {
             StorageBackend::V1(storage) => storage.verify_hash(file_id, expected_hash).await,
-            StorageBackend::V2(storage) => storage.verify_hash(file_id, expected_hash).await,
+            StorageBackend::V2(storage) => {
+                <StorageV2 as StorageManagerTrait>::verify_hash(storage, file_id, expected_hash)
+                    .await
+            }
         }
     }
 
     fn root_dir(&self) -> &std::path::Path {
         match self {
             StorageBackend::V1(storage) => storage.root_dir(),
-            StorageBackend::V2(storage) => storage.root_dir(),
+            StorageBackend::V2(storage) => <StorageV2 as StorageManagerTrait>::root_dir(storage),
         }
     }
 
     fn get_full_path(&self, relative_path: &str) -> std::path::PathBuf {
         match self {
             StorageBackend::V1(storage) => storage.get_full_path(relative_path),
-            StorageBackend::V2(storage) => storage.get_full_path(relative_path),
+            StorageBackend::V2(storage) => {
+                <StorageV2 as StorageManagerTrait>::get_full_path(storage, relative_path)
+            }
         }
     }
 }
 
-// 为 StorageBackend 实现 S3CompatibleStorageTrait
+// 为 StorageBackend 实现 S3CompatibleStorageTraitTrait
 #[async_trait]
-impl S3CompatibleStorageTrait for StorageBackend {
+impl S3CompatibleStorageTraitTrait for StorageBackend {
     type Error = StorageError;
 
     async fn create_bucket(&self, bucket_name: &str) -> std::result::Result<(), Self::Error> {
         match self {
             StorageBackend::V1(storage) => storage.create_bucket(bucket_name).await,
-            StorageBackend::V2(storage) => storage.create_bucket(bucket_name).await,
+            StorageBackend::V2(storage) => {
+                <StorageV2 as S3CompatibleStorageTrait>::create_bucket(storage, bucket_name).await
+            }
         }
     }
 
     async fn delete_bucket(&self, bucket_name: &str) -> std::result::Result<(), Self::Error> {
         match self {
             StorageBackend::V1(storage) => storage.delete_bucket(bucket_name).await,
-            StorageBackend::V2(storage) => storage.delete_bucket(bucket_name).await,
+            StorageBackend::V2(storage) => {
+                <StorageV2 as S3CompatibleStorageTrait>::delete_bucket(storage, bucket_name).await
+            }
         }
     }
 
     async fn bucket_exists(&self, bucket_name: &str) -> bool {
         match self {
             StorageBackend::V1(storage) => storage.bucket_exists(bucket_name).await,
-            StorageBackend::V2(storage) => storage.bucket_exists(bucket_name).await,
+            StorageBackend::V2(storage) => {
+                <StorageV2 as S3CompatibleStorageTrait>::bucket_exists(storage, bucket_name).await
+            }
         }
     }
 
     async fn list_buckets(&self) -> std::result::Result<Vec<String>, Self::Error> {
         match self {
             StorageBackend::V1(storage) => storage.list_buckets().await,
-            StorageBackend::V2(storage) => storage.list_buckets().await,
+            StorageBackend::V2(storage) => {
+                <StorageV2 as S3CompatibleStorageTrait>::list_buckets(storage).await
+            }
         }
     }
 
@@ -239,7 +267,14 @@ impl S3CompatibleStorageTrait for StorageBackend {
     ) -> std::result::Result<Vec<String>, Self::Error> {
         match self {
             StorageBackend::V1(storage) => storage.list_bucket_objects(bucket_name, prefix).await,
-            StorageBackend::V2(storage) => storage.list_bucket_objects(bucket_name, prefix).await,
+            StorageBackend::V2(storage) => {
+                <StorageV2 as S3CompatibleStorageTrait>::list_bucket_objects(
+                    storage,
+                    bucket_name,
+                    prefix,
+                )
+                .await
+            }
         }
     }
 }
@@ -274,7 +309,7 @@ pub async fn create_storage(config: &StorageConfig) -> Result<Arc<StorageManager
             Ok(Arc::new(StorageBackend::V1(storage)))
         }
         "v2" => {
-            use silent_storage_v2::{IncrementalConfig, IncrementalStorage};
+            use silent_storage_v2::{IncrementalConfig, Storage as V2Storage};
 
             tracing::info!("🔧 初始化 V2 增量存储引擎");
 
@@ -290,9 +325,9 @@ pub async fn create_storage(config: &StorageConfig) -> Result<Arc<StorageManager
             // 创建 V2 配置
             let v2_config = IncrementalConfig::default();
 
-            // 创建 V2 增量存储（包装 V1）
+            // 创建 V2 存储（包装 V1）
             let v2_root = config.root_path.join("v2").to_string_lossy().to_string();
-            let v2_storage = Arc::new(IncrementalStorage::new(v1_storage, v2_config, &v2_root));
+            let v2_storage = Arc::new(V2Storage::new(v1_storage, v2_config, &v2_root));
 
             // 初始化 V2
             v2_storage
@@ -300,12 +335,9 @@ pub async fn create_storage(config: &StorageConfig) -> Result<Arc<StorageManager
                 .await
                 .map_err(|e| NasError::Config(format!("V2 存储初始化失败: {}", e)))?;
 
-            // 创建适配器
-            let adapter = StorageV2Adapter::new(v2_storage);
-
             tracing::info!("✅ V2 增量存储引擎初始化完成");
             tracing::info!("💡 V2 特性：文件去重、增量同步、版本管理");
-            Ok(Arc::new(StorageBackend::V2(adapter)))
+            Ok(Arc::new(StorageBackend::V2(v2_storage)))
         }
         version => Err(NasError::Config(format!(
             "不支持的存储版本: {}。当前支持: v1, v2",
@@ -325,10 +357,10 @@ pub async fn create_storage(config: &StorageConfig) -> Result<Arc<StorageManager
 /// # 错误
 /// 如果初始化失败，返回错误
 #[allow(dead_code)]
-pub async fn create_storage_v2(config: &StorageConfig) -> Result<Arc<StorageV2Adapter>> {
-    use silent_storage_v2::{IncrementalConfig, IncrementalStorage};
+pub async fn create_storage_v2(config: &StorageConfig) -> Result<Arc<StorageV2>> {
+    use silent_storage_v2::{IncrementalConfig, Storage as V2Storage};
 
-    tracing::info!("初始化 V2 存储引擎（测试模式）");
+    tracing::info!("初始化 V2 存储引擎");
 
     // 创建 V1 作为底层存储
     let v1_storage = Arc::new(StorageV1::new(config.root_path.clone(), config.chunk_size));
@@ -342,9 +374,9 @@ pub async fn create_storage_v2(config: &StorageConfig) -> Result<Arc<StorageV2Ad
     // 创建 V2 配置
     let v2_config = IncrementalConfig::default();
 
-    // 创建 V2 增量存储（包装 V1）
+    // 创建 V2 存储（包装 V1）
     let v2_root = config.root_path.join("v2").to_string_lossy().to_string();
-    let v2_storage = Arc::new(IncrementalStorage::new(v1_storage, v2_config, &v2_root));
+    let v2_storage = Arc::new(V2Storage::new(v1_storage, v2_config, &v2_root));
 
     // 初始化 V2
     v2_storage
@@ -352,11 +384,8 @@ pub async fn create_storage_v2(config: &StorageConfig) -> Result<Arc<StorageV2Ad
         .await
         .map_err(|e| NasError::Config(format!("V2 存储初始化失败: {}", e)))?;
 
-    // 创建适配器
-    let adapter = StorageV2Adapter::new(v2_storage);
-
     tracing::info!("✅ V2 存储引擎初始化完成");
-    Ok(Arc::new(adapter))
+    Ok(v2_storage)
 }
 
 #[cfg(test)]
@@ -372,8 +401,8 @@ mod tests {
         // 验证实现了 StorageManagerTrait
         let _trait_obj: &dyn StorageManagerTrait<Error = StorageError> = &storage;
 
-        // 验证实现了 S3CompatibleStorageTrait
-        let _s3_trait_obj: &dyn S3CompatibleStorageTrait<Error = StorageError> = &storage;
+        // 验证实现了 S3CompatibleStorageTraitTrait
+        let _s3_trait_obj: &dyn S3CompatibleStorageTraitTrait<Error = StorageError> = &storage;
     }
 
     #[tokio::test]

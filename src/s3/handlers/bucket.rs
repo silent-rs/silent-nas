@@ -1,7 +1,7 @@
 use crate::s3::service::S3Service;
 use http::StatusCode;
 use silent::prelude::*;
-use silent_nas_core::S3CompatibleStorage;
+use silent_nas_core::S3CompatibleStorageTrait;
 use tracing::debug;
 
 impl S3Service {

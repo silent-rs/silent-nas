@@ -28,7 +28,6 @@
 
 mod error;
 
-pub mod adapter;
 pub mod bench;
 pub mod core;
 pub mod services;
@@ -36,11 +35,8 @@ pub mod storage;
 
 pub use error::{Result, StorageError};
 
-// 重新导出适配器
-pub use adapter::StorageV2Adapter;
-
 // 重新导出 storage 模块的公共类型
-pub use storage::{FileIndexEntry, GarbageCollectResult, IncrementalStorage, StorageStats};
+pub use storage::{FileIndexEntry, GarbageCollectResult, Storage, StorageStats};
 
 // 重新导出核心模块
 pub use core::chunker::*;

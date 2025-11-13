@@ -4,7 +4,7 @@ use crate::sync::crdt::{FileSync, SyncManager};
 use crate::sync::incremental::IncrementalSyncHandler;
 use futures_util::StreamExt;
 use sha2::{Digest, Sha256};
-use silent_nas_core::StorageManager as StorageManagerTrait;
+use silent_nas_core::StorageManagerTrait;
 use std::sync::Arc;
 use tokio::time::{Duration, sleep};
 use tracing::{debug, error, info, warn};

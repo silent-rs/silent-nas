@@ -3,7 +3,7 @@
 
 #[cfg(test)]
 mod tests {
-    use crate::{IncrementalConfig, IncrementalStorage};
+    use crate::{IncrementalConfig, Storage};
     use silent_storage_v1::StorageManager;
     use std::sync::Arc;
     use tempfile::TempDir;
@@ -47,8 +47,7 @@ mod tests {
         storage.init().await.unwrap();
 
         let config = IncrementalConfig::default();
-        let mut incremental =
-            IncrementalStorage::new(storage, config, temp_dir.path().to_str().unwrap());
+        let mut incremental = Storage::new(storage, config, temp_dir.path().to_str().unwrap());
         incremental.init().await.unwrap();
 
         // 测试场景1：保存新文件

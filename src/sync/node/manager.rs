@@ -6,7 +6,7 @@ use crate::sync::crdt::SyncManager;
 use chrono::{Local, NaiveDateTime};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
-use silent_nas_core::StorageManager as StorageManagerTrait;
+use silent_nas_core::StorageManagerTrait;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use tokio::sync::RwLock;

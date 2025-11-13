@@ -3,7 +3,7 @@
 use super::state::AppState;
 use silent::extractor::Configs as CfgExtractor;
 use silent::prelude::*;
-use silent_nas_core::StorageManager as StorageManagerTrait;
+use silent_nas_core::StorageManagerTrait;
 
 /// 健康检查 - 简单存活检查
 pub async fn health(_req: Request) -> silent::Result<&'static str> {

@@ -2,7 +2,7 @@ use super::{WebDavHandler, constants::*};
 use crate::models::{EventType, FileEvent};
 use http_body_util::BodyExt;
 use silent::prelude::*;
-use silent_nas_core::StorageManager as StorageManagerTrait;
+use silent_nas_core::StorageManagerTrait;
 use std::path::Path;
 use tokio::fs;
 

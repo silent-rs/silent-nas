@@ -390,9 +390,9 @@ impl StorageManager {
     }
 }
 
-/// 为 StorageManager 实现 silent_nas_core::StorageManager trait
+/// 为 StorageManager 实现 silent_nas_core::StorageManagerTrait trait
 #[async_trait]
-impl silent_nas_core::StorageManager for StorageManager {
+impl silent_nas_core::StorageManagerTrait for StorageManager {
     type Error = StorageError;
 
     async fn init(&self) -> std::result::Result<(), Self::Error> {
@@ -452,9 +452,9 @@ impl silent_nas_core::StorageManager for StorageManager {
     }
 }
 
-/// 为 StorageManager 实现 S3CompatibleStorage trait
+/// 为 StorageManager 实现 S3CompatibleStorageTrait trait
 #[async_trait]
-impl silent_nas_core::S3CompatibleStorage for StorageManager {
+impl silent_nas_core::S3CompatibleStorageTrait for StorageManager {
     type Error = StorageError;
 
     async fn create_bucket(&self, bucket_name: &str) -> std::result::Result<(), Self::Error> {

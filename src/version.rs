@@ -3,7 +3,7 @@ use crate::error::{NasError, Result};
 use crate::models::FileVersion;
 use crate::storage::StorageManager;
 use serde::{Deserialize, Serialize};
-use silent_nas_core::StorageManager as StorageManagerTrait;
+use silent_nas_core::StorageManagerTrait;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

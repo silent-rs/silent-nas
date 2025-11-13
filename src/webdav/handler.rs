@@ -3,7 +3,7 @@ use crate::search::SearchEngine;
 use crate::sync::crdt::SyncManager;
 use async_trait::async_trait;
 use silent::prelude::*;
-use silent_nas_core::StorageManager as StorageManagerTrait;
+use silent_nas_core::StorageManagerTrait;
 use std::sync::Arc;
 
 #[allow(unused_imports)]

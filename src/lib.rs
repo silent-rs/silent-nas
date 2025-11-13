@@ -19,7 +19,7 @@ pub use silent_nas_core as models;
 pub use silent_storage_v2 as storage_v2;
 
 // Re-export storage traits for easier access
-pub use silent_nas_core::{S3CompatibleStorage, StorageManager as StorageManagerTrait};
+pub use silent_nas_core::{S3CompatibleStorageTrait, StorageManagerTrait};
 
 // 注意：sync、transfer、webdav、event_listener 模块包含复杂的依赖，
 // 暂不在lib中导出，避免编译问题

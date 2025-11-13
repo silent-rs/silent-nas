@@ -2,7 +2,7 @@
 // 负责协调增量同步流程
 
 use crate::error::{NasError, Result};
-use crate::storage;
+use crate::storage::{self, StorageManagerTrait};
 use crate::sync::incremental::{DeltaChunk, FileSignature, IncrementalSyncManager, SyncDelta};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};

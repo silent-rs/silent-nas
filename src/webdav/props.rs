@@ -272,6 +272,7 @@ impl WebDavHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::StorageManagerTrait;
     use std::sync::Arc;
 
     async fn build_handler() -> WebDavHandler {

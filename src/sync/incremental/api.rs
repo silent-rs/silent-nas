@@ -26,7 +26,7 @@ pub async fn handle_get_delta(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::StorageManager;
+    use crate::storage::{StorageManager, StorageManagerTrait};
     use std::path::PathBuf;
     use std::sync::Arc;
     use tempfile::TempDir;

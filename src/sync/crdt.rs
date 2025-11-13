@@ -4,7 +4,7 @@
 use crate::error::Result;
 use crate::models::{EventType, FileEvent, FileMetadata};
 use crate::notify::EventNotifier;
-use crate::storage;
+use crate::storage::{self, StorageManagerTrait};
 use chrono::NaiveDateTime;
 use serde::{Deserialize, Serialize};
 use silent_crdt::crdt::{LWWRegister, VectorClock};

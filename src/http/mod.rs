@@ -347,7 +347,7 @@ fn state_injector(state: AppState) -> StateInjector {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::StorageManager;
+    use crate::storage::{StorageManager, StorageManagerTrait};
     use crate::sync::crdt::SyncManager;
     use crate::version::VersionManager;
     use silent::extractor::Configs as CfgExtractor;

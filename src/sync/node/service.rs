@@ -1,7 +1,7 @@
 // NodeSyncService gRPC 服务端实现
 #![allow(dead_code)]
 
-use crate::storage::StorageManager;
+use crate::storage::{StorageManager, StorageManagerTrait};
 use crate::sync::crdt::SyncManager;
 use crate::sync::node::{NodeManager, NodeSyncCoordinator};
 use chrono::{DateTime, Utc};

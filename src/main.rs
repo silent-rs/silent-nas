@@ -24,6 +24,7 @@ use notify::EventNotifier;
 use rpc::FileServiceImpl;
 use sha2::Digest;
 use silent::prelude::*;
+use silent_nas_core::StorageManager as StorageManagerTrait;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use storage::StorageManager;

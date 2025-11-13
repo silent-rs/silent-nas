@@ -1,6 +1,6 @@
 use crate::models::{EventType, FileEvent};
 use crate::notify::EventNotifier;
-use crate::storage::StorageManager;
+use crate::storage::{StorageManager, StorageManagerTrait};
 use tonic::{Request, Response, Status};
 
 // 引入生成的 protobuf 代码

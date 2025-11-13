@@ -7,6 +7,7 @@ use http_body_util::BodyExt;
 use silent::SilentError;
 use silent::extractor::{Configs as CfgExtractor, Path};
 use silent::prelude::*;
+use silent_nas_core::StorageManager as StorageManagerTrait;
 
 /// 上传文件
 pub async fn upload_file(

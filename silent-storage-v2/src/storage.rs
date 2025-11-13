@@ -127,14 +127,14 @@ impl IncrementalStorage {
 
             // 更新块引用计数
             let mut ref_count = self.chunk_ref_count.write().await;
-            let entry = ref_count.entry(chunk.chunk_id.clone()).or_insert_with(|| {
-                ChunkRefCount {
+            let entry = ref_count
+                .entry(chunk.chunk_id.clone())
+                .or_insert_with(|| ChunkRefCount {
                     chunk_id: chunk.chunk_id.clone(),
                     ref_count: 0,
                     size: chunk.size as u64,
                     path: self.get_chunk_path(&chunk.chunk_id),
-                }
-            });
+                });
             entry.ref_count += 1;
             drop(ref_count);
         }
@@ -150,15 +150,15 @@ impl IncrementalStorage {
         // 更新文件索引
         let now = Local::now().naive_local();
         let mut file_index = self.file_index.write().await;
-        let file_entry = file_index.entry(file_id.to_string()).or_insert_with(|| {
-            FileIndexEntry {
+        let file_entry = file_index
+            .entry(file_id.to_string())
+            .or_insert_with(|| FileIndexEntry {
                 file_id: file_id.to_string(),
                 latest_version_id: version_id.clone(),
                 version_count: 0,
                 created_at: now,
                 modified_at: now,
-            }
-        });
+            });
         file_entry.latest_version_id = version_id.clone();
         file_entry.version_count += 1;
         file_entry.modified_at = now;
@@ -530,7 +530,9 @@ impl IncrementalStorage {
         let data = serde_json::to_vec_pretty(&*ref_counts)
             .map_err(|e| StorageError::Storage(format!("序列化块引用计数失败: {}", e)))?;
 
-        fs::write(&ref_count_path, &data).await.map_err(StorageError::Io)?;
+        fs::write(&ref_count_path, &data)
+            .await
+            .map_err(StorageError::Io)?;
         Ok(())
     }
 
@@ -543,16 +545,20 @@ impl IncrementalStorage {
         let version_index = self.version_index.read().await;
         for version_info in version_index.values() {
             // 读取该版本的 delta
-            if let Ok(delta) = self.read_delta(&version_info.file_id, &version_info.version_id).await {
+            if let Ok(delta) = self
+                .read_delta(&version_info.file_id, &version_info.version_id)
+                .await
+            {
                 for chunk in &delta.chunks {
-                    let entry = ref_counts.entry(chunk.chunk_id.clone()).or_insert_with(|| {
-                        ChunkRefCount {
-                            chunk_id: chunk.chunk_id.clone(),
-                            ref_count: 0,
-                            size: chunk.size as u64,
-                            path: self.get_chunk_path(&chunk.chunk_id),
-                        }
-                    });
+                    let entry =
+                        ref_counts
+                            .entry(chunk.chunk_id.clone())
+                            .or_insert_with(|| ChunkRefCount {
+                                chunk_id: chunk.chunk_id.clone(),
+                                ref_count: 0,
+                                size: chunk.size as u64,
+                                path: self.get_chunk_path(&chunk.chunk_id),
+                            });
                     entry.ref_count += 1;
                 }
             }
@@ -597,7 +603,9 @@ impl IncrementalStorage {
         let data = serde_json::to_vec_pretty(&*file_index)
             .map_err(|e| StorageError::Storage(format!("序列化文件索引失败: {}", e)))?;
 
-        fs::write(&file_index_path, &data).await.map_err(StorageError::Io)?;
+        fs::write(&file_index_path, &data)
+            .await
+            .map_err(StorageError::Io)?;
         Ok(())
     }
 
@@ -609,15 +617,15 @@ impl IncrementalStorage {
         // 遍历所有版本，构建文件索引
         let version_index = self.version_index.read().await;
         for version_info in version_index.values() {
-            let entry = file_index.entry(version_info.file_id.clone()).or_insert_with(|| {
-                FileIndexEntry {
+            let entry = file_index
+                .entry(version_info.file_id.clone())
+                .or_insert_with(|| FileIndexEntry {
                     file_id: version_info.file_id.clone(),
                     latest_version_id: version_info.version_id.clone(),
                     version_count: 0,
                     created_at: version_info.created_at,
                     modified_at: version_info.created_at,
-                }
-            });
+                });
 
             entry.version_count += 1;
             // 更新最新版本（假设版本ID可比较，或使用时间戳）
@@ -671,13 +679,17 @@ impl IncrementalStorage {
             // 删除版本信息文件
             let version_path = self.get_version_path(&version.version_id);
             if version_path.exists() {
-                fs::remove_file(&version_path).await.map_err(StorageError::Io)?;
+                fs::remove_file(&version_path)
+                    .await
+                    .map_err(StorageError::Io)?;
             }
 
             // 删除 delta 文件
             let delta_path = self.get_delta_path(file_id, &version.version_id);
             if delta_path.exists() {
-                fs::remove_file(&delta_path).await.map_err(StorageError::Io)?;
+                fs::remove_file(&delta_path)
+                    .await
+                    .map_err(StorageError::Io)?;
             }
 
             // 从版本索引中移除
@@ -699,7 +711,9 @@ impl IncrementalStorage {
         // 5. 删除文件的 delta 目录
         let file_delta_dir = self.version_root.join("deltas").join(file_id);
         if file_delta_dir.exists() {
-            fs::remove_dir_all(&file_delta_dir).await.map_err(StorageError::Io)?;
+            fs::remove_dir_all(&file_delta_dir)
+                .await
+                .map_err(StorageError::Io)?;
         }
 
         // 6. 保存更新后的索引
@@ -894,9 +908,18 @@ mod tests {
         storage.init().await.unwrap();
 
         // 保存多个文件
-        storage.save_version("file1", b"Data 1", None).await.unwrap();
-        storage.save_version("file2", b"Data 2", None).await.unwrap();
-        storage.save_version("file3", b"Data 3", None).await.unwrap();
+        storage
+            .save_version("file1", b"Data 1", None)
+            .await
+            .unwrap();
+        storage
+            .save_version("file2", b"Data 2", None)
+            .await
+            .unwrap();
+        storage
+            .save_version("file3", b"Data 3", None)
+            .await
+            .unwrap();
 
         // 列出所有文件
         let files = storage.list_files().await.unwrap();
@@ -912,7 +935,10 @@ mod tests {
         storage.init().await.unwrap();
 
         // 保存文件和版本
-        let (_delta1, version1) = storage.save_version("test_file", b"Version 1", None).await.unwrap();
+        let (_delta1, version1) = storage
+            .save_version("test_file", b"Version 1", None)
+            .await
+            .unwrap();
         let (_delta2, _version2) = storage
             .save_version("test_file", b"Version 2", Some(&version1.version_id))
             .await
@@ -940,8 +966,14 @@ mod tests {
         storage.init().await.unwrap();
 
         // 保存文件
-        storage.save_version("file1", b"Some data", None).await.unwrap();
-        storage.save_version("file2", b"More data", None).await.unwrap();
+        storage
+            .save_version("file1", b"Some data", None)
+            .await
+            .unwrap();
+        storage
+            .save_version("file2", b"More data", None)
+            .await
+            .unwrap();
 
         // 删除一个文件
         storage.delete_file("file1").await.unwrap();
@@ -950,7 +982,9 @@ mod tests {
         let result = storage.garbage_collect().await.unwrap();
 
         // 应该有一些孤立块被清理
-        assert!(result.orphaned_chunks > 0 || result.reclaimed_space > 0 || result.errors.is_empty());
+        assert!(
+            result.orphaned_chunks > 0 || result.reclaimed_space > 0 || result.errors.is_empty()
+        );
     }
 
     #[tokio::test]
@@ -959,7 +993,10 @@ mod tests {
         storage.init().await.unwrap();
 
         // 保存文件
-        storage.save_version("test_file", b"Data", None).await.unwrap();
+        storage
+            .save_version("test_file", b"Data", None)
+            .await
+            .unwrap();
 
         // 获取文件信息
         let file_info = storage.get_file_info("test_file").await.unwrap();

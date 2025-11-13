@@ -6,6 +6,7 @@ use http::StatusCode;
 use silent::SilentError;
 use silent::extractor::{Configs as CfgExtractor, Path};
 use silent::prelude::*;
+use silent_nas_core::StorageManager as StorageManagerTrait;
 
 /// 列出文件版本
 pub async fn list_versions(

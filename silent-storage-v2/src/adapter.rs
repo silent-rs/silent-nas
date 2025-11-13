@@ -4,7 +4,7 @@
 //! 将 IncrementalStorage 的增量存储 API 适配为标准存储接口
 
 use crate::IncrementalStorage;
-use crate::error::{Result, StorageError};
+use crate::error::StorageError;
 use async_trait::async_trait;
 use silent_nas_core::{FileMetadata, S3CompatibleStorage, StorageManager};
 use std::path::Path;
@@ -13,6 +13,7 @@ use std::sync::Arc;
 /// V2 存储适配器
 ///
 /// 包装 IncrementalStorage，实现标准的 StorageManager trait
+#[derive(Clone)]
 pub struct StorageV2Adapter {
     /// 增量存储实例
     storage: Arc<IncrementalStorage>,
@@ -32,16 +33,27 @@ impl StorageV2Adapter {
 
 #[async_trait]
 impl StorageManager for StorageV2Adapter {
-    type Error = StorageError;
+    type Error = silent_storage_v1::StorageError;
 
-    async fn init(&self) -> Result<()> {
-        self.storage.init().await
+    async fn init(&self) -> std::result::Result<(), Self::Error> {
+        self.storage
+            .init()
+            .await
+            .map_err(|e: StorageError| silent_storage_v1::StorageError::from(e))
     }
 
-    async fn save_file(&self, file_id: &str, data: &[u8]) -> Result<FileMetadata> {
+    async fn save_file(
+        &self,
+        file_id: &str,
+        data: &[u8],
+    ) -> std::result::Result<FileMetadata, Self::Error> {
         // V2 使用增量存储，这里我们保存第一个版本
         // parent_version_id 为 None 表示创建新文件
-        let (_delta, file_version) = self.storage.save_version(file_id, data, None).await?;
+        let (_delta, file_version) = self
+            .storage
+            .save_version(file_id, data, None)
+            .await
+            .map_err(|e: StorageError| silent_storage_v1::StorageError::from(e))?;
 
         // 转换为 FileMetadata
         Ok(FileMetadata {
@@ -55,18 +67,29 @@ impl StorageManager for StorageV2Adapter {
         })
     }
 
-    async fn save_at_path(&self, relative_path: &str, data: &[u8]) -> Result<FileMetadata> {
+    async fn save_at_path(
+        &self,
+        relative_path: &str,
+        data: &[u8],
+    ) -> std::result::Result<FileMetadata, Self::Error> {
         // 使用路径作为 file_id
         self.save_file(relative_path, data).await
     }
 
-    async fn read_file(&self, file_id: &str) -> Result<Vec<u8>> {
+    async fn read_file(&self, file_id: &str) -> std::result::Result<Vec<u8>, Self::Error> {
         // 读取文件的最新版本
         // 首先获取文件的版本列表
-        let versions = self.storage.list_file_versions(file_id).await?;
+        let versions = self
+            .storage
+            .list_file_versions(file_id)
+            .await
+            .map_err(|e: StorageError| silent_storage_v1::StorageError::from(e))?;
 
         if versions.is_empty() {
-            return Err(StorageError::Storage(format!("文件不存在: {}", file_id)));
+            return Err(silent_storage_v1::StorageError::Storage(format!(
+                "文件不存在: {}",
+                file_id
+            )));
         }
 
         // 获取最新版本（list_file_versions 已按时间降序排列）
@@ -76,11 +99,15 @@ impl StorageManager for StorageV2Adapter {
         self.storage
             .read_version_data(&latest_version.version_id)
             .await
+            .map_err(|e: StorageError| silent_storage_v1::StorageError::from(e))
     }
 
-    async fn delete_file(&self, file_id: &str) -> Result<()> {
+    async fn delete_file(&self, file_id: &str) -> std::result::Result<(), Self::Error> {
         // 删除文件及其所有版本
-        self.storage.delete_file(file_id).await
+        self.storage
+            .delete_file(file_id)
+            .await
+            .map_err(|e: StorageError| silent_storage_v1::StorageError::from(e))
     }
 
     async fn file_exists(&self, file_id: &str) -> bool {
@@ -91,11 +118,18 @@ impl StorageManager for StorageV2Adapter {
         }
     }
 
-    async fn get_metadata(&self, file_id: &str) -> Result<FileMetadata> {
-        let versions = self.storage.list_file_versions(file_id).await?;
+    async fn get_metadata(&self, file_id: &str) -> std::result::Result<FileMetadata, Self::Error> {
+        let versions = self
+            .storage
+            .list_file_versions(file_id)
+            .await
+            .map_err(|e: StorageError| silent_storage_v1::StorageError::from(e))?;
 
         if versions.is_empty() {
-            return Err(StorageError::Storage(format!("文件不存在: {}", file_id)));
+            return Err(silent_storage_v1::StorageError::Storage(format!(
+                "文件不存在: {}",
+                file_id
+            )));
         }
 
         let latest_version = &versions[0];
@@ -111,16 +145,24 @@ impl StorageManager for StorageV2Adapter {
         })
     }
 
-    async fn list_files(&self) -> Result<Vec<FileMetadata>> {
+    async fn list_files(&self) -> std::result::Result<Vec<FileMetadata>, Self::Error> {
         // 从文件索引获取所有文件列表
-        let file_ids = self.storage.list_files().await?;
+        let file_ids = self
+            .storage
+            .list_files()
+            .await
+            .map_err(|e: StorageError| silent_storage_v1::StorageError::from(e))?;
 
         let mut files = Vec::new();
         for file_id in file_ids {
             // 获取文件信息
             if let Ok(file_info) = self.storage.get_file_info(&file_id).await {
                 // 获取最新版本的详细信息
-                if let Ok(version_info) = self.storage.get_version_info(&file_info.latest_version_id).await {
+                if let Ok(version_info) = self
+                    .storage
+                    .get_version_info(&file_info.latest_version_id)
+                    .await
+                {
                     files.push(FileMetadata {
                         id: file_id.clone(),
                         name: file_id,
@@ -137,7 +179,11 @@ impl StorageManager for StorageV2Adapter {
         Ok(files)
     }
 
-    async fn verify_hash(&self, file_id: &str, expected_hash: &str) -> Result<bool> {
+    async fn verify_hash(
+        &self,
+        file_id: &str,
+        expected_hash: &str,
+    ) -> std::result::Result<bool, Self::Error> {
         let metadata = self.get_metadata(file_id).await?;
         Ok(metadata.hash == expected_hash)
     }
@@ -153,22 +199,22 @@ impl StorageManager for StorageV2Adapter {
 
 #[async_trait]
 impl S3CompatibleStorage for StorageV2Adapter {
-    type Error = StorageError;
+    type Error = silent_storage_v1::StorageError;
 
-    async fn create_bucket(&self, bucket_name: &str) -> Result<()> {
+    async fn create_bucket(&self, bucket_name: &str) -> std::result::Result<(), Self::Error> {
         // V2 中 bucket 可以映射为目录
         let bucket_path = self.root_dir().join(bucket_name);
         tokio::fs::create_dir_all(&bucket_path)
             .await
-            .map_err(StorageError::Io)?;
+            .map_err(silent_storage_v1::StorageError::Io)?;
         Ok(())
     }
 
-    async fn delete_bucket(&self, bucket_name: &str) -> Result<()> {
+    async fn delete_bucket(&self, bucket_name: &str) -> std::result::Result<(), Self::Error> {
         let bucket_path = self.root_dir().join(bucket_name);
         tokio::fs::remove_dir_all(&bucket_path)
             .await
-            .map_err(StorageError::Io)?;
+            .map_err(silent_storage_v1::StorageError::Io)?;
         Ok(())
     }
 
@@ -177,14 +223,23 @@ impl S3CompatibleStorage for StorageV2Adapter {
         bucket_path.exists()
     }
 
-    async fn list_buckets(&self) -> Result<Vec<String>> {
+    async fn list_buckets(&self) -> std::result::Result<Vec<String>, Self::Error> {
         let mut buckets = Vec::new();
         let mut entries = tokio::fs::read_dir(self.root_dir())
             .await
-            .map_err(StorageError::Io)?;
+            .map_err(silent_storage_v1::StorageError::Io)?;
 
-        while let Some(entry) = entries.next_entry().await.map_err(StorageError::Io)? {
-            if entry.file_type().await.map_err(StorageError::Io)?.is_dir() {
+        while let Some(entry) = entries
+            .next_entry()
+            .await
+            .map_err(silent_storage_v1::StorageError::Io)?
+        {
+            if entry
+                .file_type()
+                .await
+                .map_err(silent_storage_v1::StorageError::Io)?
+                .is_dir()
+            {
                 if let Some(name) = entry.file_name().to_str() {
                     buckets.push(name.to_string());
                 }
@@ -194,7 +249,11 @@ impl S3CompatibleStorage for StorageV2Adapter {
         Ok(buckets)
     }
 
-    async fn list_bucket_objects(&self, bucket_name: &str, prefix: &str) -> Result<Vec<String>> {
+    async fn list_bucket_objects(
+        &self,
+        bucket_name: &str,
+        prefix: &str,
+    ) -> std::result::Result<Vec<String>, Self::Error> {
         let bucket_path = self.root_dir().join(bucket_name);
         let mut objects = Vec::new();
 
@@ -227,7 +286,7 @@ impl S3CompatibleStorage for StorageV2Adapter {
         }
 
         collect_files(&bucket_path, &bucket_path, prefix, &mut objects)
-            .map_err(StorageError::Io)?;
+            .map_err(silent_storage_v1::StorageError::Io)?;
 
         Ok(objects)
     }

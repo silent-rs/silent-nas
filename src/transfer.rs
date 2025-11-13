@@ -369,7 +369,7 @@ mod tests {
     #[tokio::test]
     #[ignore] // 需要NATS服务器运行，集成测试时再执行
     async fn test_quic_transfer_server_creation() {
-        use crate::storage::StorageManager;
+        use crate::storage::{StorageManager, StorageManagerTrait};
         use std::path::PathBuf;
         use tempfile::TempDir;
 

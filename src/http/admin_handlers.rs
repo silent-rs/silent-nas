@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use silent::SilentError;
 use silent::extractor::Configs as CfgExtractor;
 use silent::prelude::*;
+use silent_nas_core::StorageManager as StorageManagerTrait;
 use tracing::{info, warn};
 use validator::Validate;
 

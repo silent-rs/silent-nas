@@ -78,7 +78,7 @@ pub use silent_nas_core::StorageManagerTrait; // 用于 trait 方法调用
 // 导出具体的存储实现
 pub use silent_storage_v1::StorageManager as StorageV1;
 // V2 存储（直接实现了 trait）
-pub use silent_storage_v2::Storage as StorageV2;
+pub use silent_storage_v2::StorageManager as StorageV2;
 
 // 导出错误类型
 pub use silent_storage_v1::StorageError;
@@ -94,7 +94,7 @@ pub enum StorageBackend {
     /// V1 简单文件存储
     V1(StorageV1),
     /// V2 增量存储
-    V2(Arc<StorageV2>),
+    V2(StorageV2),
 }
 
 impl StorageBackend {
@@ -346,7 +346,7 @@ pub async fn create_storage(config: &StorageConfig) -> Result<Arc<StorageManager
             Ok(Arc::new(StorageBackend::V1(storage)))
         }
         "v2" => {
-            use silent_storage_v2::{IncrementalConfig, Storage as V2Storage};
+            use silent_storage_v2::IncrementalConfig;
 
             tracing::info!("🔧 初始化 V2 增量存储引擎");
 
@@ -354,11 +354,7 @@ pub async fn create_storage(config: &StorageConfig) -> Result<Arc<StorageManager
             let v2_config = IncrementalConfig::default();
 
             // 创建 V2 存储（独立实现，不依赖 V1）
-            let v2_storage = Arc::new(V2Storage::new(
-                config.root_path.clone(),
-                config.chunk_size,
-                v2_config,
-            ));
+            let v2_storage = StorageV2::new(config.root_path.clone(), config.chunk_size, v2_config);
 
             // 初始化 V2
             v2_storage
@@ -375,42 +371,6 @@ pub async fn create_storage(config: &StorageConfig) -> Result<Arc<StorageManager
             version
         ))),
     }
-}
-
-/// 创建 V2 存储引擎用于测试
-///
-/// # 参数
-/// * `config` - 存储配置
-///
-/// # 返回
-/// 返回 V2 存储适配器实例
-///
-/// # 错误
-/// 如果初始化失败，返回错误
-#[allow(dead_code)]
-pub async fn create_storage_v2(config: &StorageConfig) -> Result<Arc<StorageV2>> {
-    use silent_storage_v2::{IncrementalConfig, Storage as V2Storage};
-
-    tracing::info!("初始化 V2 存储引擎");
-
-    // 创建 V2 配置
-    let v2_config = IncrementalConfig::default();
-
-    // 创建 V2 存储（独立实现）
-    let v2_storage = Arc::new(V2Storage::new(
-        config.root_path.clone(),
-        config.chunk_size,
-        v2_config,
-    ));
-
-    // 初始化 V2
-    v2_storage
-        .init()
-        .await
-        .map_err(|e| NasError::Config(format!("V2 存储初始化失败: {}", e)))?;
-
-    tracing::info!("✅ V2 存储引擎初始化完成");
-    Ok(v2_storage)
 }
 
 #[cfg(test)]

@@ -47,7 +47,8 @@ pub struct FileIndexEntry {
 /// V2 存储管理器
 ///
 /// 基于增量存储、块级去重和版本管理的高级存储系统
-pub struct Storage {
+#[derive(Clone)]
+pub struct StorageManager {
     /// 存储根目录
     root_path: PathBuf,
     /// 用户数据根目录 (root_path/data)
@@ -71,7 +72,7 @@ pub struct Storage {
     file_index: Arc<RwLock<HashMap<String, FileIndexEntry>>>,
 }
 
-impl Storage {
+impl StorageManager {
     pub fn new(root_path: PathBuf, chunk_size: usize, config: IncrementalConfig) -> Self {
         let data_root = root_path.join("data");
         let v2_root = root_path.join("v2");
@@ -516,7 +517,7 @@ impl Storage {
     }
 }
 
-impl Storage {
+impl StorageManager {
     /// 加载块引用计数
     async fn load_chunk_ref_count(&self) -> Result<()> {
         let ref_count_path = self.chunk_root.join("ref_count.json");
@@ -1048,11 +1049,11 @@ mod tests {
 
 /// 实现 StorageManagerTrait 以提供标准存储接口
 #[async_trait]
-impl StorageManagerTrait for Storage {
+impl StorageManagerTrait for StorageManager {
     type Error = StorageError;
 
     async fn init(&self) -> std::result::Result<(), Self::Error> {
-        Storage::init(self).await
+        StorageManager::init(self).await
     }
 
     async fn save_file(
@@ -1106,7 +1107,7 @@ impl StorageManagerTrait for Storage {
 
     async fn delete_file(&self, file_id: &str) -> std::result::Result<(), Self::Error> {
         // 删除文件及其所有版本
-        Storage::delete_file(self, file_id).await
+        StorageManager::delete_file(self, file_id).await
     }
 
     async fn file_exists(&self, file_id: &str) -> bool {
@@ -1142,7 +1143,7 @@ impl StorageManagerTrait for Storage {
 
     async fn list_files(&self) -> std::result::Result<Vec<FileMetadata>, Self::Error> {
         // 从文件索引获取所有文件列表
-        let file_ids = Storage::list_files(self).await?;
+        let file_ids = StorageManager::list_files(self).await?;
 
         let mut files = Vec::new();
         for file_id in file_ids {
@@ -1193,7 +1194,7 @@ impl StorageManagerTrait for Storage {
 
 /// 实现 S3CompatibleStorageTrait 以提供 S3 API 支持
 #[async_trait]
-impl S3CompatibleStorageTrait for Storage {
+impl S3CompatibleStorageTrait for StorageManager {
     type Error = StorageError;
 
     async fn create_bucket(&self, bucket_name: &str) -> std::result::Result<(), Self::Error> {

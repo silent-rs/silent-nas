@@ -36,7 +36,7 @@ pub mod storage;
 pub use error::{Result, StorageError};
 
 // 重新导出 storage 模块的公共类型
-pub use storage::{FileIndexEntry, GarbageCollectResult, Storage, StorageStats};
+pub use storage::{FileIndexEntry, GarbageCollectResult, StorageManager, StorageStats};
 
 // 重新导出核心模块
 pub use core::chunker::*;

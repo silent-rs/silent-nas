@@ -50,7 +50,6 @@ pub struct FileIndexEntry {
 /// 基于增量存储、块级去重和版本管理的高级存储系统
 pub struct Storage {
     /// 基础存储管理器
-    #[allow(dead_code)]
     storage: Arc<StorageManager>,
     /// 配置
     config: IncrementalConfig,
@@ -97,7 +96,11 @@ impl Storage {
         self.load_chunk_ref_count().await?;
         self.load_file_index().await?;
 
-        info!("增量存储初始化完成: {:?}", self.version_root);
+        info!(
+            "增量存储初始化完成: root={:?}, version_root={:?}",
+            self.storage.root_dir(),
+            self.version_root
+        );
         Ok(())
     }
 
@@ -1186,12 +1189,31 @@ impl StorageManagerTrait for Storage {
         Ok(metadata.hash == expected_hash)
     }
 
+    /// 获取存储根目录
+    ///
+    /// 返回用户文件存储的根目录（V1 的 data 目录）
     fn root_dir(&self) -> &Path {
-        self.version_root()
+        // V2 使用 V1 作为底层存储，用户文件存储在 V1 的 data 目录
+        // 由于 trait 返回 &Path，我们无法返回临时的 PathBuf
+        // 所以这里返回 V1 的 root_path，但在 get_full_path 中会正确处理
+        let path = self.storage.root_dir();
+        tracing::warn!("V2::root_dir() 被调用，返回: {:?}", path);
+        path
     }
 
     fn get_full_path(&self, relative_path: &str) -> std::path::PathBuf {
-        self.root_dir().join(relative_path)
+        // 移除开头的 / 以确保是相对路径
+        // PathBuf::join() 对绝对路径会直接返回绝对路径，忽略 root
+        let cleaned_path = relative_path.trim_start_matches('/');
+        // 委托给 V1 的 get_full_path，它会正确使用 data_root
+        let full = self.storage.get_full_path(cleaned_path);
+        tracing::warn!(
+            "V2::get_full_path({:?}): cleaned={:?}, result={:?}",
+            relative_path,
+            cleaned_path,
+            full
+        );
+        full
     }
 }
 

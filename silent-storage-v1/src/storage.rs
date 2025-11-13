@@ -26,6 +26,10 @@ impl StorageManager {
     /// 获取根目录路径
     #[allow(dead_code)]
     pub fn root_dir(&self) -> &Path {
+        tracing::warn!(
+            "V1::root_dir() 被调用，self.root_path = {:?}",
+            self.root_path
+        );
         &self.root_path
     }
 

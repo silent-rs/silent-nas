@@ -43,7 +43,7 @@ chunk_size = 4194304
 # 2. 使用 API：通过 create_storage_v2() 函数创建实例
 #
 # 详细说明请参考 config.example.toml 和 tests/storage_v2_integration_test.rs
-version = "v1"
+version = "v2"
 
 # ==================== NATS 消息队列配置 ====================
 # 用于多节点文件同步，单节点模式可不配置或配置错误的地址

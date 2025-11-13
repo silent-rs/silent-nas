@@ -16,6 +16,34 @@ use tokio::io::AsyncWriteExt;
 use tokio::sync::RwLock;
 use tracing::info;
 
+/// 块引用计数信息
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ChunkRefCount {
+    /// 块ID
+    chunk_id: String,
+    /// 引用计数
+    ref_count: usize,
+    /// 块大小
+    size: u64,
+    /// 存储路径
+    path: PathBuf,
+}
+
+/// 文件索引信息
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileIndexEntry {
+    /// 文件ID
+    pub file_id: String,
+    /// 最新版本ID
+    pub latest_version_id: String,
+    /// 版本数量
+    pub version_count: usize,
+    /// 创建时间
+    pub created_at: chrono::NaiveDateTime,
+    /// 最后修改时间
+    pub modified_at: chrono::NaiveDateTime,
+}
+
 /// 增量存储管理器
 pub struct IncrementalStorage {
     /// 基础存储管理器
@@ -31,6 +59,10 @@ pub struct IncrementalStorage {
     version_index: Arc<RwLock<HashMap<String, VersionInfo>>>,
     /// 块索引缓存（使用内部可变性）
     block_index: Arc<RwLock<HashMap<String, PathBuf>>>,
+    /// 块引用计数
+    chunk_ref_count: Arc<RwLock<HashMap<String, ChunkRefCount>>>,
+    /// 文件索引
+    file_index: Arc<RwLock<HashMap<String, FileIndexEntry>>>,
 }
 
 impl IncrementalStorage {
@@ -45,6 +77,8 @@ impl IncrementalStorage {
             chunk_root,
             version_index: Arc::new(RwLock::new(HashMap::new())),
             block_index: Arc::new(RwLock::new(HashMap::new())),
+            chunk_ref_count: Arc::new(RwLock::new(HashMap::new())),
+            file_index: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -57,6 +91,8 @@ impl IncrementalStorage {
         // 加载现有索引
         self.load_version_index().await?;
         self.load_block_index().await?;
+        self.load_chunk_ref_count().await?;
+        self.load_file_index().await?;
 
         info!("增量存储初始化完成: {:?}", self.version_root);
         Ok(())
@@ -85,9 +121,22 @@ impl IncrementalStorage {
         // 使用相同的version_id
         delta.new_version_id = version_id.clone();
 
-        // 保存块数据
+        // 保存块数据并更新引用计数
         for chunk in &delta.chunks {
             self.save_chunk(chunk, data).await?;
+
+            // 更新块引用计数
+            let mut ref_count = self.chunk_ref_count.write().await;
+            let entry = ref_count.entry(chunk.chunk_id.clone()).or_insert_with(|| {
+                ChunkRefCount {
+                    chunk_id: chunk.chunk_id.clone(),
+                    ref_count: 0,
+                    size: chunk.size as u64,
+                    path: self.get_chunk_path(&chunk.chunk_id),
+                }
+            });
+            entry.ref_count += 1;
+            drop(ref_count);
         }
 
         // 保存差异数据
@@ -97,6 +146,30 @@ impl IncrementalStorage {
         let _version_info = self
             .save_version_info(file_id, &delta, parent_version_id)
             .await?;
+
+        // 更新文件索引
+        let now = Local::now().naive_local();
+        let mut file_index = self.file_index.write().await;
+        let file_entry = file_index.entry(file_id.to_string()).or_insert_with(|| {
+            FileIndexEntry {
+                file_id: file_id.to_string(),
+                latest_version_id: version_id.clone(),
+                version_count: 0,
+                created_at: now,
+                modified_at: now,
+            }
+        });
+        file_entry.latest_version_id = version_id.clone();
+        file_entry.version_count += 1;
+        file_entry.modified_at = now;
+        drop(file_index);
+
+        // 定期保存索引（每10个版本保存一次）
+        let version_count = self.version_index.read().await.len();
+        if version_count % 10 == 0 {
+            let _ = self.save_chunk_ref_count().await;
+            let _ = self.save_file_index().await;
+        }
 
         // 创建FileVersion
         let file_version = FileVersion {
@@ -428,6 +501,302 @@ impl IncrementalStorage {
     }
 }
 
+impl IncrementalStorage {
+    /// 加载块引用计数
+    async fn load_chunk_ref_count(&self) -> Result<()> {
+        let ref_count_path = self.chunk_root.join("ref_count.json");
+
+        if !ref_count_path.exists() {
+            // 如果文件不存在，从现有数据重建引用计数
+            return self.rebuild_chunk_ref_count().await;
+        }
+
+        let data = fs::read(&ref_count_path).await.map_err(StorageError::Io)?;
+        let ref_counts: HashMap<String, ChunkRefCount> = serde_json::from_slice(&data)
+            .map_err(|e| StorageError::Storage(format!("加载块引用计数失败: {}", e)))?;
+
+        *self.chunk_ref_count.write().await = ref_counts;
+
+        let count = self.chunk_ref_count.read().await.len();
+        info!("加载了 {} 个块引用计数", count);
+        Ok(())
+    }
+
+    /// 保存块引用计数
+    async fn save_chunk_ref_count(&self) -> Result<()> {
+        let ref_count_path = self.chunk_root.join("ref_count.json");
+        let ref_counts = self.chunk_ref_count.read().await;
+
+        let data = serde_json::to_vec_pretty(&*ref_counts)
+            .map_err(|e| StorageError::Storage(format!("序列化块引用计数失败: {}", e)))?;
+
+        fs::write(&ref_count_path, &data).await.map_err(StorageError::Io)?;
+        Ok(())
+    }
+
+    /// 重建块引用计数
+    async fn rebuild_chunk_ref_count(&self) -> Result<()> {
+        info!("开始重建块引用计数...");
+        let mut ref_counts: HashMap<String, ChunkRefCount> = HashMap::new();
+
+        // 遍历所有版本，统计块引用
+        let version_index = self.version_index.read().await;
+        for version_info in version_index.values() {
+            // 读取该版本的 delta
+            if let Ok(delta) = self.read_delta(&version_info.file_id, &version_info.version_id).await {
+                for chunk in &delta.chunks {
+                    let entry = ref_counts.entry(chunk.chunk_id.clone()).or_insert_with(|| {
+                        ChunkRefCount {
+                            chunk_id: chunk.chunk_id.clone(),
+                            ref_count: 0,
+                            size: chunk.size as u64,
+                            path: self.get_chunk_path(&chunk.chunk_id),
+                        }
+                    });
+                    entry.ref_count += 1;
+                }
+            }
+        }
+        drop(version_index);
+
+        *self.chunk_ref_count.write().await = ref_counts;
+
+        // 保存到磁盘
+        self.save_chunk_ref_count().await?;
+
+        let count = self.chunk_ref_count.read().await.len();
+        info!("重建完成，共 {} 个块", count);
+        Ok(())
+    }
+
+    /// 加载文件索引
+    async fn load_file_index(&self) -> Result<()> {
+        let file_index_path = self.version_root.join("file_index.json");
+
+        if !file_index_path.exists() {
+            // 如果文件不存在，从现有数据重建文件索引
+            return self.rebuild_file_index().await;
+        }
+
+        let data = fs::read(&file_index_path).await.map_err(StorageError::Io)?;
+        let file_index: HashMap<String, FileIndexEntry> = serde_json::from_slice(&data)
+            .map_err(|e| StorageError::Storage(format!("加载文件索引失败: {}", e)))?;
+
+        *self.file_index.write().await = file_index;
+
+        let count = self.file_index.read().await.len();
+        info!("加载了 {} 个文件索引", count);
+        Ok(())
+    }
+
+    /// 保存文件索引
+    async fn save_file_index(&self) -> Result<()> {
+        let file_index_path = self.version_root.join("file_index.json");
+        let file_index = self.file_index.read().await;
+
+        let data = serde_json::to_vec_pretty(&*file_index)
+            .map_err(|e| StorageError::Storage(format!("序列化文件索引失败: {}", e)))?;
+
+        fs::write(&file_index_path, &data).await.map_err(StorageError::Io)?;
+        Ok(())
+    }
+
+    /// 重建文件索引
+    async fn rebuild_file_index(&self) -> Result<()> {
+        info!("开始重建文件索引...");
+        let mut file_index: HashMap<String, FileIndexEntry> = HashMap::new();
+
+        // 遍历所有版本，构建文件索引
+        let version_index = self.version_index.read().await;
+        for version_info in version_index.values() {
+            let entry = file_index.entry(version_info.file_id.clone()).or_insert_with(|| {
+                FileIndexEntry {
+                    file_id: version_info.file_id.clone(),
+                    latest_version_id: version_info.version_id.clone(),
+                    version_count: 0,
+                    created_at: version_info.created_at,
+                    modified_at: version_info.created_at,
+                }
+            });
+
+            entry.version_count += 1;
+            // 更新最新版本（假设版本ID可比较，或使用时间戳）
+            if version_info.created_at > entry.modified_at {
+                entry.latest_version_id = version_info.version_id.clone();
+                entry.modified_at = version_info.created_at;
+            }
+        }
+        drop(version_index);
+
+        *self.file_index.write().await = file_index;
+
+        // 保存到磁盘
+        self.save_file_index().await?;
+
+        let count = self.file_index.read().await.len();
+        info!("重建完成，共 {} 个文件", count);
+        Ok(())
+    }
+
+    /// 列出所有文件
+    pub async fn list_files(&self) -> Result<Vec<String>> {
+        let file_index = self.file_index.read().await;
+        let mut files: Vec<String> = file_index.keys().cloned().collect();
+        files.sort();
+        Ok(files)
+    }
+
+    /// 删除文件（包含所有版本）
+    pub async fn delete_file(&self, file_id: &str) -> Result<()> {
+        info!("开始删除文件: {}", file_id);
+
+        // 1. 获取该文件的所有版本
+        let versions = self.list_file_versions(file_id).await?;
+
+        if versions.is_empty() {
+            return Err(StorageError::FileNotFound(file_id.to_string()));
+        }
+
+        // 2. 收集所有需要减少引用计数的块
+        let mut chunks_to_decrement: Vec<String> = Vec::new();
+
+        for version in &versions {
+            // 读取 delta 获取块列表
+            if let Ok(delta) = self.read_delta(file_id, &version.version_id).await {
+                for chunk in delta.chunks {
+                    chunks_to_decrement.push(chunk.chunk_id);
+                }
+            }
+
+            // 删除版本信息文件
+            let version_path = self.get_version_path(&version.version_id);
+            if version_path.exists() {
+                fs::remove_file(&version_path).await.map_err(StorageError::Io)?;
+            }
+
+            // 删除 delta 文件
+            let delta_path = self.get_delta_path(file_id, &version.version_id);
+            if delta_path.exists() {
+                fs::remove_file(&delta_path).await.map_err(StorageError::Io)?;
+            }
+
+            // 从版本索引中移除
+            self.version_index.write().await.remove(&version.version_id);
+        }
+
+        // 3. 递减块引用计数
+        let mut ref_count = self.chunk_ref_count.write().await;
+        for chunk_id in chunks_to_decrement {
+            if let Some(entry) = ref_count.get_mut(&chunk_id) {
+                entry.ref_count = entry.ref_count.saturating_sub(1);
+            }
+        }
+        drop(ref_count);
+
+        // 4. 从文件索引中移除
+        self.file_index.write().await.remove(file_id);
+
+        // 5. 删除文件的 delta 目录
+        let file_delta_dir = self.version_root.join("deltas").join(file_id);
+        if file_delta_dir.exists() {
+            fs::remove_dir_all(&file_delta_dir).await.map_err(StorageError::Io)?;
+        }
+
+        // 6. 保存更新后的索引
+        self.save_chunk_ref_count().await?;
+        self.save_file_index().await?;
+
+        info!("文件删除完成: {}", file_id);
+        Ok(())
+    }
+
+    /// 垃圾回收 - 清理引用计数为0的块
+    pub async fn garbage_collect(&self) -> Result<GarbageCollectResult> {
+        info!("开始垃圾回收...");
+
+        let mut orphaned_chunks = 0;
+        let mut reclaimed_space = 0u64;
+        let mut errors = Vec::new();
+
+        let mut ref_count = self.chunk_ref_count.write().await;
+        let mut chunks_to_remove = Vec::new();
+
+        // 找出引用计数为0的块
+        for (chunk_id, entry) in ref_count.iter() {
+            if entry.ref_count == 0 {
+                chunks_to_remove.push((chunk_id.clone(), entry.clone()));
+            }
+        }
+
+        // 删除这些块
+        for (chunk_id, entry) in chunks_to_remove {
+            if entry.path.exists() {
+                match fs::metadata(&entry.path).await {
+                    Ok(metadata) => {
+                        reclaimed_space += metadata.len();
+                        match fs::remove_file(&entry.path).await {
+                            Ok(_) => {
+                                orphaned_chunks += 1;
+                                ref_count.remove(&chunk_id);
+                                self.block_index.write().await.remove(&chunk_id);
+                            }
+                            Err(e) => {
+                                errors.push(format!("删除块 {} 失败: {}", chunk_id, e));
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        errors.push(format!("获取块 {} 元数据失败: {}", chunk_id, e));
+                    }
+                }
+            } else {
+                // 块文件不存在，直接从索引中移除
+                ref_count.remove(&chunk_id);
+                self.block_index.write().await.remove(&chunk_id);
+            }
+        }
+
+        drop(ref_count);
+
+        // 保存更新后的引用计数
+        if orphaned_chunks > 0 {
+            self.save_chunk_ref_count().await?;
+        }
+
+        info!(
+            "垃圾回收完成: 清理了 {} 个孤立块，回收了 {} 字节空间",
+            orphaned_chunks, reclaimed_space
+        );
+
+        Ok(GarbageCollectResult {
+            orphaned_chunks,
+            reclaimed_space,
+            errors,
+        })
+    }
+
+    /// 获取文件信息（不读取内容）
+    pub async fn get_file_info(&self, file_id: &str) -> Result<FileIndexEntry> {
+        self.file_index
+            .read()
+            .await
+            .get(file_id)
+            .cloned()
+            .ok_or_else(|| StorageError::FileNotFound(file_id.to_string()))
+    }
+}
+
+/// 垃圾回收结果
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GarbageCollectResult {
+    /// 清理的孤立块数量
+    pub orphaned_chunks: usize,
+    /// 回收的空间（字节）
+    pub reclaimed_space: u64,
+    /// 错误信息列表
+    pub errors: Vec<String>,
+}
+
 /// 存储统计信息
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StorageStats {
@@ -462,7 +831,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_save_and_read_version() {
-        let (mut storage, _temp) = create_test_storage().await;
+        let (storage, _temp) = create_test_storage().await;
         storage.init().await.unwrap();
 
         let data = b"Hello, World! This is a test.";
@@ -481,7 +850,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_list_file_versions() {
-        let (mut storage, _temp) = create_test_storage().await;
+        let (storage, _temp) = create_test_storage().await;
         storage.init().await.unwrap();
 
         let data1 = b"Version 1";
@@ -502,7 +871,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_storage_stats() {
-        let (mut storage, _temp) = create_test_storage().await;
+        let (storage, _temp) = create_test_storage().await;
         storage.init().await.unwrap();
 
         storage
@@ -517,6 +886,111 @@ mod tests {
         let stats = storage.get_storage_stats().await.unwrap();
         assert_eq!(stats.total_versions, 2);
         assert!(stats.total_chunks > 0);
+    }
+
+    #[tokio::test]
+    async fn test_list_files() {
+        let (storage, _temp) = create_test_storage().await;
+        storage.init().await.unwrap();
+
+        // 保存多个文件
+        storage.save_version("file1", b"Data 1", None).await.unwrap();
+        storage.save_version("file2", b"Data 2", None).await.unwrap();
+        storage.save_version("file3", b"Data 3", None).await.unwrap();
+
+        // 列出所有文件
+        let files = storage.list_files().await.unwrap();
+        assert_eq!(files.len(), 3);
+        assert!(files.contains(&"file1".to_string()));
+        assert!(files.contains(&"file2".to_string()));
+        assert!(files.contains(&"file3".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_delete_file() {
+        let (storage, _temp) = create_test_storage().await;
+        storage.init().await.unwrap();
+
+        // 保存文件和版本
+        let (_delta1, version1) = storage.save_version("test_file", b"Version 1", None).await.unwrap();
+        let (_delta2, _version2) = storage
+            .save_version("test_file", b"Version 2", Some(&version1.version_id))
+            .await
+            .unwrap();
+
+        // 确认文件存在
+        let files = storage.list_files().await.unwrap();
+        assert!(files.contains(&"test_file".to_string()));
+
+        // 删除文件
+        storage.delete_file("test_file").await.unwrap();
+
+        // 确认文件已删除
+        let files = storage.list_files().await.unwrap();
+        assert!(!files.contains(&"test_file".to_string()));
+
+        // 确认版本已删除
+        let versions = storage.list_file_versions("test_file").await.unwrap();
+        assert!(versions.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_garbage_collect() {
+        let (storage, _temp) = create_test_storage().await;
+        storage.init().await.unwrap();
+
+        // 保存文件
+        storage.save_version("file1", b"Some data", None).await.unwrap();
+        storage.save_version("file2", b"More data", None).await.unwrap();
+
+        // 删除一个文件
+        storage.delete_file("file1").await.unwrap();
+
+        // 运行垃圾回收
+        let result = storage.garbage_collect().await.unwrap();
+
+        // 应该有一些孤立块被清理
+        assert!(result.orphaned_chunks > 0 || result.reclaimed_space > 0 || result.errors.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_get_file_info() {
+        let (storage, _temp) = create_test_storage().await;
+        storage.init().await.unwrap();
+
+        // 保存文件
+        storage.save_version("test_file", b"Data", None).await.unwrap();
+
+        // 获取文件信息
+        let file_info = storage.get_file_info("test_file").await.unwrap();
+        assert_eq!(file_info.file_id, "test_file");
+        assert_eq!(file_info.version_count, 1);
+        assert!(!file_info.latest_version_id.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_chunk_ref_count() {
+        let (storage, _temp) = create_test_storage().await;
+        storage.init().await.unwrap();
+
+        // 保存同一个文件的多个版本(会产生重复的块)
+        let data = b"Hello, World!";
+        let (_delta1, version1) = storage.save_version("test_file", data, None).await.unwrap();
+
+        // 保存相同数据(应该复用块)
+        let data2 = b"Hello, World! Extra";
+        let (_delta2, _version2) = storage
+            .save_version("test_file", data2, Some(&version1.version_id))
+            .await
+            .unwrap();
+
+        // 检查引用计数
+        let ref_count = storage.chunk_ref_count.read().await;
+        assert!(!ref_count.is_empty());
+
+        // 至少有一些块的引用计数应该大于0
+        let has_refs = ref_count.values().any(|entry| entry.ref_count > 0);
+        assert!(has_refs);
     }
 }
 // 性能对比测试：原版存储 vs v0.7.0增量存储

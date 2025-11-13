@@ -78,12 +78,9 @@ impl StorageManager for StorageV2Adapter {
             .await
     }
 
-    async fn delete_file(&self, _file_id: &str) -> Result<()> {
-        // V2 当前不支持删除（需要实现删除版本链）
-        // 这里可以标记为删除或者实现软删除
-        Err(StorageError::Storage(
-            "V2 存储暂不支持删除操作（需要实现版本链清理）".to_string(),
-        ))
+    async fn delete_file(&self, file_id: &str) -> Result<()> {
+        // 删除文件及其所有版本
+        self.storage.delete_file(file_id).await
     }
 
     async fn file_exists(&self, file_id: &str) -> bool {
@@ -115,10 +112,29 @@ impl StorageManager for StorageV2Adapter {
     }
 
     async fn list_files(&self) -> Result<Vec<FileMetadata>> {
-        // V2 当前没有维护文件列表索引
-        // 需要扫描所有版本信息来构建文件列表
-        // 这里返回空列表，实际使用时可能需要实现文件索引
-        Ok(Vec::new())
+        // 从文件索引获取所有文件列表
+        let file_ids = self.storage.list_files().await?;
+
+        let mut files = Vec::new();
+        for file_id in file_ids {
+            // 获取文件信息
+            if let Ok(file_info) = self.storage.get_file_info(&file_id).await {
+                // 获取最新版本的详细信息
+                if let Ok(version_info) = self.storage.get_version_info(&file_info.latest_version_id).await {
+                    files.push(FileMetadata {
+                        id: file_id.clone(),
+                        name: file_id,
+                        path: file_info.latest_version_id.clone(),
+                        size: version_info.file_size,
+                        hash: version_info.version_id,
+                        created_at: file_info.created_at,
+                        modified_at: file_info.modified_at,
+                    });
+                }
+            }
+        }
+
+        Ok(files)
     }
 
     async fn verify_hash(&self, file_id: &str, expected_hash: &str) -> Result<bool> {

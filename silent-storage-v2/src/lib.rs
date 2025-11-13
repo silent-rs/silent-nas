@@ -1,8 +1,8 @@
 //! Storage V2: Advanced storage system with deduplication, incremental storage, and tiering
 //!
 //! 该模块提供基于块差异的文件版本存储功能，包括：
-//! - 滚动哈希算法（Rabin-Karp）
-//! - 内容定义分块（Content-Defined Chunking）
+//! - 滚动哈希算法(Rabin-Karp)
+//! - 内容定义分块(Content-Defined Chunking)
 //! - 版本链式存储
 //! - 增量更新与读取
 //! - 自动压缩与冷热分离
@@ -11,9 +11,9 @@
 //!
 //! ## 架构设计
 //!
-//! ```
+//! ```text
 //! silent-storage-v2/
-//! |-- core/           # 核心存储引擎（无状态）
+//! |-- core/           # 核心存储引擎
 //! |   |-- chunker     # 分块算法
 //! |   |-- compression # 压缩算法
 //! |   |-- delta       # 差异计算
@@ -39,6 +39,9 @@ pub use error::{Result, StorageError};
 // 重新导出适配器
 pub use adapter::StorageV2Adapter;
 
+// 重新导出 storage 模块的公共类型
+pub use storage::{FileIndexEntry, GarbageCollectResult, IncrementalStorage, StorageStats};
+
 // 重新导出核心模块
 pub use core::chunker::*;
 pub use core::compression::*;
@@ -50,9 +53,6 @@ pub use services::dedup::*;
 pub use services::index::*;
 pub use services::lifecycle::*;
 pub use services::tiering::*;
-
-// 重新导出存储API
-pub use storage::*;
 
 use serde::{Deserialize, Serialize};
 

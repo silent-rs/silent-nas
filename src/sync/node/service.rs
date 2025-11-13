@@ -477,11 +477,14 @@ mod tests {
     async fn build_service() -> NodeSyncServiceImpl {
         // 构建最小依赖：Storage、SyncManager、NodeManager、Coordinator
         let dir = tempfile::tempdir().unwrap();
-        let storage = Arc::new(crate::storage::StorageManager::new(
-            dir.path().to_path_buf(),
-            4 * 1024 * 1024,
-        ));
+        let storage =
+            crate::storage::StorageManager::new(dir.path().to_path_buf(), 4 * 1024 * 1024);
         storage.init().await.unwrap();
+
+        // 初始化全局存储
+        let _ = crate::storage::init_global_storage(storage.clone());
+
+        let storage = Arc::new(storage);
 
         let sync_manager = crate::sync::crdt::SyncManager::new("node-local".to_string(), None);
 

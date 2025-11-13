@@ -307,11 +307,11 @@ mod tests {
     #[tokio::test]
     async fn test_generate_delta_chunks() {
         let temp_dir = TempDir::new().unwrap();
-        let storage = Arc::new(StorageManager::new(
-            PathBuf::from(temp_dir.path()),
-            64 * 1024,
-        ));
+        let storage = StorageManager::new(PathBuf::from(temp_dir.path()), 64 * 1024);
         storage.init().await.unwrap();
+
+        // 初始化全局存储
+        let _ = crate::storage::init_global_storage(storage.clone());
 
         // 创建源文件
         let file_id = "test_file";
@@ -341,11 +341,11 @@ mod tests {
     #[tokio::test]
     async fn test_generate_delta_chunks_identical() {
         let temp_dir = TempDir::new().unwrap();
-        let storage = Arc::new(StorageManager::new(
-            PathBuf::from(temp_dir.path()),
-            64 * 1024,
-        ));
+        let storage = StorageManager::new(PathBuf::from(temp_dir.path()), 64 * 1024);
         storage.init().await.unwrap();
+
+        // 初始化全局存储
+        let _ = crate::storage::init_global_storage(storage.clone());
 
         // 创建文件
         let file_id = "test_file";
@@ -369,11 +369,11 @@ mod tests {
     #[tokio::test]
     async fn test_calculate_signature_file_not_found() {
         let temp_dir = TempDir::new().unwrap();
-        let storage = Arc::new(StorageManager::new(
-            PathBuf::from(temp_dir.path()),
-            64 * 1024,
-        ));
+        let storage = StorageManager::new(PathBuf::from(temp_dir.path()), 64 * 1024);
         storage.init().await.unwrap();
+
+        // 初始化全局存储
+        let _ = crate::storage::init_global_storage(storage);
 
         let handler = IncrementalSyncHandler::new(64 * 1024);
 
@@ -385,11 +385,11 @@ mod tests {
     #[tokio::test]
     async fn test_generate_delta_chunks_large_file() {
         let temp_dir = TempDir::new().unwrap();
-        let storage = Arc::new(StorageManager::new(
-            PathBuf::from(temp_dir.path()),
-            64 * 1024,
-        ));
+        let storage = StorageManager::new(PathBuf::from(temp_dir.path()), 64 * 1024);
         storage.init().await.unwrap();
+
+        // 初始化全局存储
+        let _ = crate::storage::init_global_storage(storage.clone());
 
         // 创建一个大文件（超过一个块的大小）
         let file_id = "large_file";
@@ -429,11 +429,11 @@ mod tests {
     #[tokio::test]
     async fn test_calculate_local_signature_empty_file() {
         let temp_dir = TempDir::new().unwrap();
-        let storage = Arc::new(StorageManager::new(
-            PathBuf::from(temp_dir.path()),
-            64 * 1024,
-        ));
+        let storage = StorageManager::new(PathBuf::from(temp_dir.path()), 64 * 1024);
         storage.init().await.unwrap();
+
+        // 初始化全局存储
+        let _ = crate::storage::init_global_storage(storage.clone());
 
         // 创建空文件
         let file_id = "empty_file";
@@ -452,11 +452,11 @@ mod tests {
     #[tokio::test]
     async fn test_handler_with_different_chunk_sizes() {
         let temp_dir = TempDir::new().unwrap();
-        let storage = Arc::new(StorageManager::new(
-            PathBuf::from(temp_dir.path()),
-            64 * 1024,
-        ));
+        let storage = StorageManager::new(PathBuf::from(temp_dir.path()), 64 * 1024);
         storage.init().await.unwrap();
+
+        // 初始化全局存储
+        let _ = crate::storage::init_global_storage(storage.clone());
 
         let data = b"Test data for different chunk sizes";
         let file_id = "test_file";

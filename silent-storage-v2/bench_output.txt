@@ -1,0 +1,159 @@
+   Compiling silent-storage-v2 v0.1.0 (/Users/hubertshelley/Documents/silent/silent-nas/silent-storage-v2)
+    Finished `bench` profile [optimized] target(s) in 1.21s
+     Running benches/cdc_benchmark.rs (/Users/hubertshelley/rust_target/release/deps/cdc_benchmark-f871e85d596b8601)
+Gnuplot not found, using plotters backend
+Benchmarking chunking_by_size/text/1KB
+Benchmarking chunking_by_size/text/1KB: Warming up for 3.0000 s
+Benchmarking chunking_by_size/text/1KB: Collecting 100 samples in estimated 5.0324 s (490k iterations)
+Benchmarking chunking_by_size/text/1KB: Analyzing
+chunking_by_size/text/1KB
+                        time:   [10.072 µs 10.134 µs 10.242 µs]
+                        thrpt:  [95.347 MiB/s 96.365 MiB/s 96.961 MiB/s]
+Found 8 outliers among 100 measurements (8.00%)
+  6 (6.00%) high mild
+  2 (2.00%) high severe
+Benchmarking chunking_by_size/text/10KB
+Benchmarking chunking_by_size/text/10KB: Warming up for 3.0000 s
+Benchmarking chunking_by_size/text/10KB: Collecting 100 samples in estimated 5.2890 s (56k iterations)
+Benchmarking chunking_by_size/text/10KB: Analyzing
+chunking_by_size/text/10KB
+                        time:   [95.037 µs 95.219 µs 95.418 µs]
+                        thrpt:  [102.35 MiB/s 102.56 MiB/s 102.76 MiB/s]
+Found 7 outliers among 100 measurements (7.00%)
+  2 (2.00%) low mild
+  4 (4.00%) high mild
+  1 (1.00%) high severe
+Benchmarking chunking_by_size/text/100KB
+Benchmarking chunking_by_size/text/100KB: Warming up for 3.0000 s
+Benchmarking chunking_by_size/text/100KB: Collecting 100 samples in estimated 9.7193 s (10k iterations)
+Benchmarking chunking_by_size/text/100KB: Analyzing
+chunking_by_size/text/100KB
+                        time:   [948.81 µs 950.14 µs 951.56 µs]
+                        thrpt:  [102.63 MiB/s 102.78 MiB/s 102.92 MiB/s]
+Found 11 outliers among 100 measurements (11.00%)
+  2 (2.00%) low mild
+  7 (7.00%) high mild
+  2 (2.00%) high severe
+Benchmarking chunking_by_size/text/1MB
+Benchmarking chunking_by_size/text/1MB: Warming up for 3.0000 s
+Benchmarking chunking_by_size/text/1MB: Collecting 100 samples in estimated 5.8504 s (600 iterations)
+Benchmarking chunking_by_size/text/1MB: Analyzing
+chunking_by_size/text/1MB
+                        time:   [9.7223 ms 9.7789 ms 9.8728 ms]
+                        thrpt:  [101.29 MiB/s 102.26 MiB/s 102.86 MiB/s]
+Found 6 outliers among 100 measurements (6.00%)
+  3 (3.00%) high mild
+  3 (3.00%) high severe
+Benchmarking chunking_by_size/text/10MB
+Benchmarking chunking_by_size/text/10MB: Warming up for 3.0000 s
+
+Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 9.8s, or reduce sample count to 50.
+Benchmarking chunking_by_size/text/10MB: Collecting 100 samples in estimated 9.7962 s (100 iterations)
+Benchmarking chunking_by_size/text/10MB: Analyzing
+chunking_by_size/text/10MB
+                        time:   [97.235 ms 97.371 ms 97.517 ms]
+                        thrpt:  [102.55 MiB/s 102.70 MiB/s 102.84 MiB/s]
+Found 5 outliers among 100 measurements (5.00%)
+  4 (4.00%) high mild
+  1 (1.00%) high severe
+
+Benchmarking chunking_by_pattern/pattern/text
+Benchmarking chunking_by_pattern/pattern/text: Warming up for 3.0000 s
+Benchmarking chunking_by_pattern/pattern/text: Collecting 100 samples in estimated 5.8475 s (600 iterations)
+Benchmarking chunking_by_pattern/pattern/text: Analyzing
+chunking_by_pattern/pattern/text
+                        time:   [9.7526 ms 9.7674 ms 9.7827 ms]
+                        thrpt:  [102.22 MiB/s 102.38 MiB/s 102.54 MiB/s]
+Found 2 outliers among 100 measurements (2.00%)
+  2 (2.00%) high mild
+Benchmarking chunking_by_pattern/pattern/binary
+Benchmarking chunking_by_pattern/pattern/binary: Warming up for 3.0000 s
+Benchmarking chunking_by_pattern/pattern/binary: Collecting 100 samples in estimated 5.9311 s (600 iterations)
+Benchmarking chunking_by_pattern/pattern/binary: Analyzing
+chunking_by_pattern/pattern/binary
+                        time:   [9.7889 ms 9.8632 ms 9.9737 ms]
+                        thrpt:  [100.26 MiB/s 101.39 MiB/s 102.16 MiB/s]
+Found 7 outliers among 100 measurements (7.00%)
+  1 (1.00%) low mild
+  2 (2.00%) high mild
+  4 (4.00%) high severe
+Benchmarking chunking_by_pattern/pattern/repetitive
+Benchmarking chunking_by_pattern/pattern/repetitive: Warming up for 3.0000 s
+Benchmarking chunking_by_pattern/pattern/repetitive: Collecting 100 samples in estimated 5.8999 s (600 iterations)
+Benchmarking chunking_by_pattern/pattern/repetitive: Analyzing
+chunking_by_pattern/pattern/repetitive
+                        time:   [9.7333 ms 9.7515 ms 9.7708 ms]
+                        thrpt:  [102.35 MiB/s 102.55 MiB/s 102.74 MiB/s]
+Found 14 outliers among 100 measurements (14.00%)
+  4 (4.00%) low mild
+  6 (6.00%) high mild
+  4 (4.00%) high severe
+Benchmarking chunking_by_pattern/pattern/random
+Benchmarking chunking_by_pattern/pattern/random: Warming up for 3.0000 s
+Benchmarking chunking_by_pattern/pattern/random: Collecting 100 samples in estimated 5.8426 s (600 iterations)
+Benchmarking chunking_by_pattern/pattern/random: Analyzing
+chunking_by_pattern/pattern/random
+                        time:   [9.7667 ms 9.8304 ms 9.9350 ms]
+                        thrpt:  [100.65 MiB/s 101.72 MiB/s 102.39 MiB/s]
+Found 8 outliers among 100 measurements (8.00%)
+  5 (5.00%) high mild
+  3 (3.00%) high severe
+
+Benchmarking adaptive_chunk_size/text_default
+Benchmarking adaptive_chunk_size/text_default: Warming up for 3.0000 s
+Benchmarking adaptive_chunk_size/text_default: Collecting 100 samples in estimated 5.9448 s (600 iterations)
+Benchmarking adaptive_chunk_size/text_default: Analyzing
+adaptive_chunk_size/text_default
+                        time:   [9.8059 ms 9.8792 ms 10.009 ms]
+                        thrpt:  [99.909 MiB/s 101.22 MiB/s 101.98 MiB/s]
+Found 5 outliers among 100 measurements (5.00%)
+  3 (3.00%) high mild
+  2 (2.00%) high severe
+Benchmarking adaptive_chunk_size/text_adaptive
+Benchmarking adaptive_chunk_size/text_adaptive: Warming up for 3.0000 s
+Benchmarking adaptive_chunk_size/text_adaptive: Collecting 100 samples in estimated 5.9379 s (600 iterations)
+Benchmarking adaptive_chunk_size/text_adaptive: Analyzing
+adaptive_chunk_size/text_adaptive
+                        time:   [9.8206 ms 9.8367 ms 9.8535 ms]
+                        thrpt:  [101.49 MiB/s 101.66 MiB/s 101.83 MiB/s]
+Found 1 outliers among 100 measurements (1.00%)
+  1 (1.00%) high mild
+Benchmarking adaptive_chunk_size/video_default
+Benchmarking adaptive_chunk_size/video_default: Warming up for 3.0000 s
+Benchmarking adaptive_chunk_size/video_default: Collecting 100 samples in estimated 5.8992 s (600 iterations)
+Benchmarking adaptive_chunk_size/video_default: Analyzing
+adaptive_chunk_size/video_default
+                        time:   [9.8054 ms 9.8362 ms 9.8722 ms]
+                        thrpt:  [101.30 MiB/s 101.67 MiB/s 101.98 MiB/s]
+Found 11 outliers among 100 measurements (11.00%)
+  5 (5.00%) high mild
+  6 (6.00%) high severe
+Benchmarking adaptive_chunk_size/video_adaptive
+Benchmarking adaptive_chunk_size/video_adaptive: Warming up for 3.0000 s
+Benchmarking adaptive_chunk_size/video_adaptive: Collecting 100 samples in estimated 5.0080 s (500 iterations)
+Benchmarking adaptive_chunk_size/video_adaptive: Analyzing
+adaptive_chunk_size/video_adaptive
+                        time:   [9.8177 ms 9.8344 ms 9.8519 ms]
+                        thrpt:  [101.50 MiB/s 101.68 MiB/s 101.86 MiB/s]
+Found 2 outliers among 100 measurements (2.00%)
+  2 (2.00%) high mild
+
+Benchmarking deduplication_ratio/高重复文本
+Benchmarking deduplication_ratio/高重复文本: Warming up for 3.0000 s
+Benchmarking deduplication_ratio/高重复文本: Collecting 100 samples in estimated 5.9693 s (600 iterations)
+Benchmarking deduplication_ratio/高重复文本: Analyzing
+deduplication_ratio/高重复文本
+                        time:   [9.8530 ms 9.8710 ms 9.8895 ms]
+Found 1 outliers among 100 measurements (1.00%)
+  1 (1.00%) high severe
+Benchmarking deduplication_ratio/完全重复数据
+Benchmarking deduplication_ratio/完全重复数据: Warming up for 3.0000 s
+Benchmarking deduplication_ratio/完全重复数据: Collecting 100 samples in estimated 5.9650 s (600 iterations)
+Benchmarking deduplication_ratio/完全重复数据: Analyzing
+deduplication_ratio/完全重复数据
+                        time:   [9.8118 ms 9.8303 ms 9.8498 ms]
+Found 6 outliers among 100 measurements (6.00%)
+  6 (6.00%) high mild
+Benchmarking deduplication_ratio/低重复数据
+Benchmarking deduplication_ratio/低重复数据: Warming up for 3.0000 s
+Benchmarking deduplication_ratio/低重复数据: Collecting 100 samples in estimated 5.9397 s (600 iterations)

@@ -705,6 +705,82 @@ impl StorageManager {
     pub fn version_root(&self) -> &Path {
         &self.version_root
     }
+
+    /// 确保文件在 data_root 中存在（用于 WebDAV 等需要文件系统访问的场景）
+    /// 如果文件不存在，从块存储中重建
+    pub async fn ensure_file_in_data_root(&self, file_id: &str) -> Result<()> {
+        let full_path = self.get_full_path(file_id);
+
+        // 如果文件已存在且大小正确，直接返回
+        if let Ok(metadata) = tokio::fs::metadata(&full_path).await {
+            if metadata.is_file() {
+                // 验证文件大小是否匹配
+                if let Ok(file_metadata) = self.get_metadata(file_id).await {
+                    if metadata.len() == file_metadata.size {
+                        return Ok(());
+                    }
+                }
+            }
+        }
+
+        // 文件不存在或大小不对，从块存储重建
+        let data = self.read_file(file_id).await?;
+
+        // 创建父目录
+        if let Some(parent) = full_path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+
+        // 写入文件
+        tokio::fs::write(&full_path, data).await?;
+
+        Ok(())
+    }
+
+    /// 列出指定目录下的文件和子目录
+    /// 返回 (文件列表, 子目录列表)
+    pub async fn list_directory(&self, dir_path: &str) -> Result<(Vec<String>, Vec<String>)> {
+        let all_files = self.list_files().await?;
+
+        // 标准化目录路径
+        let normalized_dir = if dir_path.is_empty() || dir_path == "/" {
+            ""
+        } else {
+            dir_path.trim_matches('/')
+        };
+
+        let mut files = Vec::new();
+        let mut subdirs = std::collections::HashSet::new();
+
+        for file_id in all_files {
+            let normalized_file = file_id.trim_start_matches('/');
+
+            // 检查文件是否在指定目录下
+            if normalized_dir.is_empty() {
+                // 根目录
+                if let Some(slash_pos) = normalized_file.find('/') {
+                    // 有子目录
+                    subdirs.insert(normalized_file[..slash_pos].to_string());
+                } else {
+                    // 根目录下的文件
+                    files.push(file_id);
+                }
+            } else if let Some(rest) = normalized_file.strip_prefix(normalized_dir) {
+                let rest = rest.trim_start_matches('/');
+                if !rest.is_empty() {
+                    if let Some(slash_pos) = rest.find('/') {
+                        // 有子目录
+                        subdirs.insert(rest[..slash_pos].to_string());
+                    } else {
+                        // 当前目录下的文件
+                        files.push(file_id);
+                    }
+                }
+            }
+        }
+
+        Ok((files, subdirs.into_iter().collect()))
+    }
 }
 
 impl StorageManager {
@@ -1206,17 +1282,9 @@ impl StorageManagerTrait for StorageManager {
         relative_path: &str,
         data: &[u8],
     ) -> std::result::Result<FileMetadata, Self::Error> {
-        // 使用路径作为 file_id，保存到块存储
-        let metadata = self.save_file(relative_path, data).await?;
-
-        // 同时在 data_root 下创建实际文件，供 WebDAV 等直接文件系统访问使用
-        let full_path = self.get_full_path(relative_path);
-        if let Some(parent) = full_path.parent() {
-            fs::create_dir_all(parent).await?;
-        }
-        fs::write(&full_path, data).await?;
-
-        Ok(metadata)
+        // 使用路径作为 file_id，只保存到块存储
+        // 不在 data_root 下创建冗余的完整文件副本
+        self.save_file(relative_path, data).await
     }
 
     async fn read_file(&self, file_id: &str) -> std::result::Result<Vec<u8>, Self::Error> {

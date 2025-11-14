@@ -266,7 +266,14 @@ impl WebDavHandler {
             WebDavHandler::parse_prop_filter_and_nsmap(&xml_bytes)
         };
 
-        let storage_path = crate::storage::storage().get_full_path(&path);
+        let storage = crate::storage::storage();
+        let storage_path = storage.get_full_path(&path);
+
+        // 对于文件，确保它在 data_root 中存在
+        if !storage_path.is_dir() {
+            storage.ensure_file_in_data_root(&path).await.ok();
+        }
+
         let metadata = fs::metadata(&storage_path).await.map_err(|e| {
             // macOS 系统文件和元数据文件不存在是正常的，只记录 debug 日志
             let is_macos_metadata = path.starts_with("/._.")
@@ -318,31 +325,54 @@ impl WebDavHandler {
                     self.walk_propfind_recursive(&storage_path, &path, &mut xml)
                         .await?;
                 } else {
-                    let mut entries = fs::read_dir(&storage_path).await.map_err(|e| {
+                    // 使用 StorageManager 获取目录内容而不是直接读取文件系统
+                    let storage = crate::storage::storage();
+                    let (files, subdirs) = storage.list_directory(&path).await.map_err(|e| {
                         SilentError::business_error(
                             StatusCode::INTERNAL_SERVER_ERROR,
                             format!("读取目录失败: {}", e),
                         )
                     })?;
-                    while let Some(entry) = entries.next_entry().await.map_err(|e| {
-                        SilentError::business_error(
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            format!("读取目录项失败: {}", e),
-                        )
-                    })? {
-                        let entry_path = entry.path();
+
+                    // 先添加子目录
+                    for subdir in subdirs {
                         let relative_path = if path.is_empty() || path == "/" {
-                            format!("/{}", entry.file_name().to_string_lossy())
+                            format!("/{}", subdir)
                         } else {
-                            format!("{}/{}", path, entry.file_name().to_string_lossy())
+                            format!("{}/{}", path, subdir)
                         };
                         let full_href = self.build_full_href(&relative_path);
-                        let is_dir = entry_path.is_dir();
+                        let dir_path = storage.get_full_path(&relative_path);
+
+                        // 确保目录存在
+                        if !dir_path.exists() {
+                            tokio::fs::create_dir_all(&dir_path).await.ok();
+                        }
+
                         self.add_prop_response_with_filter(
                             &mut xml,
                             &full_href,
-                            &entry_path,
-                            is_dir,
+                            &dir_path,
+                            true,
+                            props_filter.as_ref(),
+                            Some(&ns_echo_map),
+                        )
+                        .await;
+                    }
+
+                    // 再添加文件
+                    for file_id in files {
+                        let full_href = self.build_full_href(&file_id);
+
+                        // 确保文件在文件系统中存在
+                        storage.ensure_file_in_data_root(&file_id).await.ok();
+                        let file_path = storage.get_full_path(&file_id);
+
+                        self.add_prop_response_with_filter(
+                            &mut xml,
+                            &full_href,
+                            &file_path,
+                            false,
                             props_filter.as_ref(),
                             Some(&ns_echo_map),
                         )
@@ -603,38 +633,51 @@ impl WebDavHandler {
 
     pub(super) async fn walk_propfind_recursive(
         &self,
-        storage_dir: &Path,
+        _storage_dir: &Path,
         relative_dir: &str,
         xml: &mut String,
     ) -> silent::Result<()> {
-        let mut stack: Vec<(std::path::PathBuf, String)> =
-            vec![(storage_dir.to_path_buf(), relative_dir.to_string())];
-        while let Some((dir_path, rel_path)) = stack.pop() {
-            let mut entries = fs::read_dir(&dir_path).await.map_err(|e| {
+        let storage = crate::storage::storage();
+        let mut stack: Vec<String> = vec![relative_dir.to_string()];
+
+        while let Some(rel_path) = stack.pop() {
+            let (files, subdirs) = storage.list_directory(&rel_path).await.map_err(|e| {
                 SilentError::business_error(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     format!("读取目录失败: {}", e),
                 )
             })?;
-            while let Some(entry) = entries.next_entry().await.map_err(|e| {
-                SilentError::business_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("读取目录项失败: {}", e),
-                )
-            })? {
-                let entry_path = entry.path();
+
+            // 处理子目录
+            for subdir in subdirs {
                 let relative_path = if rel_path.is_empty() || rel_path == "/" {
-                    format!("/{}", entry.file_name().to_string_lossy())
+                    format!("/{}", subdir)
                 } else {
-                    format!("{}/{}", rel_path, entry.file_name().to_string_lossy())
+                    format!("{}/{}", rel_path, subdir)
                 };
                 let full_href = self.build_full_href(&relative_path);
-                let is_dir = entry_path.is_dir();
-                self.add_prop_response(xml, &full_href, &entry_path, is_dir)
-                    .await;
-                if is_dir {
-                    stack.push((entry_path, relative_path));
+                let dir_path = storage.get_full_path(&relative_path);
+
+                // 确保目录存在
+                if !dir_path.exists() {
+                    tokio::fs::create_dir_all(&dir_path).await.ok();
                 }
+
+                self.add_prop_response(xml, &full_href, &dir_path, true)
+                    .await;
+                stack.push(relative_path);
+            }
+
+            // 处理文件
+            for file_id in files {
+                let full_href = self.build_full_href(&file_id);
+
+                // 确保文件在文件系统中存在
+                storage.ensure_file_in_data_root(&file_id).await.ok();
+                let file_path = storage.get_full_path(&file_id);
+
+                self.add_prop_response(xml, &full_href, &file_path, false)
+                    .await;
             }
         }
         Ok(())
@@ -642,7 +685,17 @@ impl WebDavHandler {
 
     pub(super) async fn handle_head(&self, path: &str, req: &Request) -> silent::Result<Response> {
         let path = Self::decode_path(path)?;
-        let storage_path = crate::storage::storage().get_full_path(&path);
+        let storage = crate::storage::storage();
+        let storage_path = storage.get_full_path(&path);
+
+        // 对于文件，确保它在 data_root 中存在
+        if !storage_path.is_dir() {
+            storage
+                .ensure_file_in_data_root(&path)
+                .await
+                .map_err(|_| SilentError::business_error(StatusCode::NOT_FOUND, "文件不存在"))?;
+        }
+
         let metadata = fs::metadata(&storage_path)
             .await
             .map_err(|_| SilentError::business_error(StatusCode::NOT_FOUND, "文件不存在"))?;
@@ -711,7 +764,17 @@ impl WebDavHandler {
 
     pub(super) async fn handle_get(&self, path: &str, req: &Request) -> silent::Result<Response> {
         let path = Self::decode_path(path)?;
-        let storage_path = crate::storage::storage().get_full_path(&path);
+        let storage = crate::storage::storage();
+        let storage_path = storage.get_full_path(&path);
+
+        // 对于文件，确保它在 data_root 中存在
+        if !storage_path.is_dir() {
+            storage
+                .ensure_file_in_data_root(&path)
+                .await
+                .map_err(|_| SilentError::business_error(StatusCode::NOT_FOUND, "文件不存在"))?;
+        }
+
         let metadata = fs::metadata(&storage_path)
             .await
             .map_err(|_| SilentError::business_error(StatusCode::NOT_FOUND, "文件不存在"))?;
@@ -1009,8 +1072,15 @@ impl WebDavHandler {
                 SilentError::business_error(StatusCode::BAD_REQUEST, "缺少 Destination 头")
             })?;
         let dest_path = self.extract_path_from_url(dest)?;
-        let storage_path = crate::storage::storage().get_full_path(&path);
-        let dest_storage_path = crate::storage::storage().get_full_path(&dest_path);
+        let storage = crate::storage::storage();
+        let storage_path = storage.get_full_path(&path);
+
+        // 对于文件，确保它在 data_root 中存在
+        if !storage_path.is_dir() {
+            storage.ensure_file_in_data_root(&path).await.ok();
+        }
+
+        let dest_storage_path = storage.get_full_path(&dest_path);
         if let Some(parent) = dest_storage_path.parent() {
             fs::create_dir_all(parent).await.map_err(|e| {
                 SilentError::business_error(
@@ -1061,8 +1131,15 @@ impl WebDavHandler {
                 SilentError::business_error(StatusCode::BAD_REQUEST, "缺少 Destination 头")
             })?;
         let dest_path = self.extract_path_from_url(dest)?;
-        let src_storage_path = crate::storage::storage().get_full_path(&path);
-        let dest_storage_path = crate::storage::storage().get_full_path(&dest_path);
+        let storage = crate::storage::storage();
+        let src_storage_path = storage.get_full_path(&path);
+
+        // 对于文件，确保它在 data_root 中存在
+        if !src_storage_path.is_dir() {
+            storage.ensure_file_in_data_root(&path).await.ok();
+        }
+
+        let dest_storage_path = storage.get_full_path(&dest_path);
         let metadata = fs::metadata(&src_storage_path)
             .await
             .map_err(|_| SilentError::business_error(StatusCode::NOT_FOUND, "源路径不存在"))?;
@@ -1329,14 +1406,22 @@ mod tests {
 
     #[tokio::test]
     async fn test_propfind_depth0_and1_and_errors() {
+        use silent::prelude::ReqBody;
+
         let handler = build_handler().await;
 
-        // 创建文件与目录
-        tokio::fs::create_dir_all(crate::storage::storage().get_full_path("/p0"))
-            .await
+        // 使用 WebDAV API 创建文件与目录
+        handler.handle_mkcol("/p0").await.unwrap();
+
+        // 使用 PUT 创建文件
+        let http_req = http::Request::builder()
+            .method("PUT")
+            .uri("/p0/a.txt")
+            .body(())
             .unwrap();
-        let f = crate::storage::storage().get_full_path("/p0/a.txt");
-        tokio::fs::write(&f, b"x").await.unwrap();
+        let (parts, _) = http_req.into_parts();
+        let mut put_req = Request::from_parts(parts, ReqBody::Once(bytes::Bytes::from("x")));
+        handler.handle_put("/p0/a.txt", &mut put_req).await.unwrap();
 
         // Depth: 0 针对文件
         let mut d0 = Request::empty();
@@ -1397,6 +1482,10 @@ mod tests {
         assert_eq!(e.status(), StatusCode::BAD_REQUEST);
 
         // HEAD If-None-Match 304
+        // 先确保文件存在于文件系统中
+        let storage = crate::storage::storage();
+        storage.ensure_file_in_data_root("/p0/a.txt").await.unwrap();
+        let f = storage.get_full_path("/p0/a.txt");
         let meta = std::fs::metadata(&f).unwrap();
         let etag = WebDavHandler::calc_etag_from_meta(&meta).unwrap();
         let mut hreq = Request::empty();

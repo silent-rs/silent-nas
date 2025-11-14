@@ -39,10 +39,12 @@ mod error;
 pub mod bench;
 pub mod core;
 pub mod metadata;
+pub mod metrics;
 pub mod services;
 pub mod storage;
 
 pub use error::{Result, StorageError};
+pub use metrics::{HealthStatus, StorageMetrics};
 
 // 重新导出 storage 模块的公共类型
 pub use storage::{

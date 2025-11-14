@@ -6,6 +6,7 @@
 //! - 差异计算（块级增量）
 //! - 存储引擎（组合上述功能）
 //! - 文件类型检测（智能块大小策略）
+//! - 版本链管理（深度控制和自动合并）
 
 pub mod chunker;
 pub mod circular_buffer;
@@ -13,6 +14,7 @@ pub mod compression;
 pub mod delta;
 pub mod engine;
 pub mod file_type;
+pub mod version_chain;
 
 pub use chunker::*;
 pub use circular_buffer::*;
@@ -20,3 +22,4 @@ pub use compression::*;
 pub use delta::*;
 pub use engine::*;
 pub use file_type::*;
+pub use version_chain::*;

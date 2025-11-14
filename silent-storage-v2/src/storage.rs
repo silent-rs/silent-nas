@@ -2,6 +2,7 @@
 //!
 //! 实现版本链式存储和块级存储功能
 
+use crate::cache::CacheManager;
 use crate::error::{Result, StorageError};
 use crate::metadata::SledMetadataDb;
 use crate::{ChunkInfo, FileDelta, IncrementalConfig, VersionInfo};
@@ -69,6 +70,8 @@ pub struct StorageManager {
     version_index: Arc<RwLock<HashMap<String, VersionInfo>>>,
     /// 块索引缓存（使用内部可变性）
     block_index: Arc<RwLock<HashMap<String, PathBuf>>>,
+    /// 缓存管理器（Phase 5 Step 3）
+    cache_manager: Arc<CacheManager>,
 }
 
 impl StorageManager {
@@ -88,6 +91,7 @@ impl StorageManager {
             metadata_db: Arc::new(OnceCell::new()),
             version_index: Arc::new(RwLock::new(HashMap::new())),
             block_index: Arc::new(RwLock::new(HashMap::new())),
+            cache_manager: Arc::new(CacheManager::with_default()),
         }
     }
 
@@ -128,6 +132,11 @@ impl StorageManager {
         self.metadata_db
             .get()
             .ok_or_else(|| StorageError::Storage("元数据数据库未初始化".to_string()))
+    }
+
+    /// 获取缓存管理器引用
+    pub fn get_cache_manager(&self) -> Arc<CacheManager> {
+        self.cache_manager.clone()
     }
 
     /// 保存文件版本（使用增量存储）

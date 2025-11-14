@@ -37,12 +37,14 @@
 mod error;
 
 pub mod bench;
+pub mod cache;
 pub mod core;
 pub mod metadata;
 pub mod metrics;
 pub mod services;
 pub mod storage;
 
+pub use cache::{CacheConfig, CacheManager, CacheStats};
 pub use error::{Result, StorageError};
 pub use metrics::{HealthStatus, StorageMetrics};
 

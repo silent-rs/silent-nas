@@ -5,6 +5,7 @@
 use crate::cache::CacheManager;
 use crate::error::{Result, StorageError};
 use crate::metadata::SledMetadataDb;
+use crate::reliability::{ChunkVerifier, OrphanChunkCleaner, WalManager, WalOperation};
 use crate::{ChunkInfo, FileDelta, IncrementalConfig, VersionInfo};
 use async_trait::async_trait;
 use chrono::Local;
@@ -72,6 +73,12 @@ pub struct StorageManager {
     block_index: Arc<RwLock<HashMap<String, PathBuf>>>,
     /// 缓存管理器（Phase 5 Step 3）
     cache_manager: Arc<CacheManager>,
+    /// WAL 管理器（Phase 5 Step 4）
+    wal_manager: Arc<RwLock<WalManager>>,
+    /// Chunk 校验器（Phase 5 Step 4）
+    chunk_verifier: Arc<ChunkVerifier>,
+    /// 孤儿 Chunk 清理器（Phase 5 Step 4）
+    orphan_cleaner: Arc<OrphanChunkCleaner>,
 }
 
 impl StorageManager {
@@ -80,18 +87,22 @@ impl StorageManager {
         let v2_root = root_path.join("v2");
         let version_root = v2_root.join("incremental");
         let chunk_root = version_root.join("chunks");
+        let wal_path = version_root.join("wal.log");
 
         Self {
             root_path,
             data_root,
             config,
             version_root,
-            chunk_root,
+            chunk_root: chunk_root.clone(),
             chunk_size,
             metadata_db: Arc::new(OnceCell::new()),
             version_index: Arc::new(RwLock::new(HashMap::new())),
             block_index: Arc::new(RwLock::new(HashMap::new())),
             cache_manager: Arc::new(CacheManager::with_default()),
+            wal_manager: Arc::new(RwLock::new(WalManager::new(wal_path))),
+            chunk_verifier: Arc::new(ChunkVerifier::new(chunk_root.clone())),
+            orphan_cleaner: Arc::new(OrphanChunkCleaner::new(chunk_root)),
         }
     }
 
@@ -113,6 +124,11 @@ impl StorageManager {
             .map_err(|_| StorageError::Storage("元数据数据库已初始化".to_string()))?;
 
         info!("Sled 元数据数据库初始化完成: path={:?}", db_path);
+
+        // 初始化 WAL（Phase 5 Step 4）
+        let mut wal = self.wal_manager.write().await;
+        wal.init().await?;
+        drop(wal); // 释放锁
 
         // 加载现有索引
         self.load_version_index().await?;
@@ -297,6 +313,17 @@ impl StorageManager {
             comment: None,
             is_current: true,
         };
+
+        // 记录 WAL（Phase 5 Step 4）
+        let chunk_hashes: Vec<String> = delta.chunks.iter().map(|c| c.chunk_id.clone()).collect();
+        let operation = WalOperation::CreateVersion {
+            file_id: file_id.to_string(),
+            version_id: version_id.clone(),
+            chunk_hashes,
+        };
+        let mut wal = self.wal_manager.write().await;
+        wal.write(operation).await?;
+        drop(wal);
 
         Ok((delta, file_version))
     }
@@ -1054,6 +1081,66 @@ impl StorageManager {
             .map_err(|e| StorageError::Storage(format!("读取文件信息失败: {}", e)))?
             .ok_or_else(|| StorageError::FileNotFound(file_id.to_string()))
     }
+
+    // ============ Phase 5 Step 4: 可靠性增强 API ============
+
+    /// 验证所有 chunks 的完整性
+    pub async fn verify_all_chunks(&self) -> Result<crate::ChunkVerifyReport> {
+        self.chunk_verifier
+            .scan_and_verify()
+            .await
+            .map_err(|e| StorageError::Storage(format!("验证 chunks 失败: {}", e)))
+    }
+
+    /// 验证指定 chunks 的完整性
+    pub async fn verify_chunks(&self, chunk_hashes: &[String]) -> Result<crate::ChunkVerifyReport> {
+        self.chunk_verifier
+            .verify_chunks(chunk_hashes)
+            .await
+            .map_err(|e| StorageError::Storage(format!("验证 chunks 失败: {}", e)))
+    }
+
+    /// 检测孤儿 chunks
+    pub async fn detect_orphan_chunks(&self) -> Result<Vec<String>> {
+        use std::collections::HashSet;
+
+        // 收集所有被引用的 chunks
+        let metadata_db = self.get_metadata_db()?;
+        let chunk_refs = metadata_db
+            .list_all_chunks()
+            .map_err(|e| StorageError::Storage(format!("读取 chunk 引用失败: {}", e)))?;
+
+        let referenced: HashSet<String> = chunk_refs.into_iter().map(|(hash, _)| hash).collect();
+
+        // 检测孤儿 chunks
+        self.orphan_cleaner
+            .detect_orphans(&referenced)
+            .await
+            .map_err(|e| StorageError::Storage(format!("检测孤儿 chunks 失败: {}", e)))
+    }
+
+    /// 清理孤儿 chunks
+    pub async fn cleanup_orphan_chunks(&self, orphan_hashes: &[String]) -> Result<crate::CleanupReport> {
+        self.orphan_cleaner
+            .clean_orphans(orphan_hashes)
+            .await
+            .map_err(|e| StorageError::Storage(format!("清理孤儿 chunks 失败: {}", e)))
+    }
+
+    /// 优雅关闭（刷新所有数据）
+    pub async fn shutdown(&self) -> Result<()> {
+        info!("开始优雅关闭 StorageManager...");
+
+        // 刷新元数据数据库
+        let metadata_db = self.get_metadata_db()?;
+        metadata_db
+            .flush()
+            .await
+            .map_err(|e| StorageError::Storage(format!("刷新数据库失败: {}", e)))?;
+
+        info!("StorageManager 优雅关闭完成");
+        Ok(())
+    }
 }
 
 /// 垃圾回收结果
@@ -1616,6 +1703,38 @@ mod tests {
         let total_chunks = metadata_db.chunk_ref_count();
         assert!(total_chunks > 0);
         assert!(orphaned.len() < total_chunks); // 不是所有块都是孤立的
+    }
+
+    #[tokio::test]
+    async fn test_verify_chunks() {
+        let (storage, _temp) = create_test_storage().await;
+        storage.init().await.unwrap();
+
+        // 创建测试数据
+        let data = b"Test chunk verification data";
+        storage.save_version("test_file", data, None).await.unwrap();
+
+        // 验证所有 chunks
+        let report = storage.verify_all_chunks().await.unwrap();
+        assert_eq!(report.valid + report.invalid + report.missing, report.total);
+        // 正常情况下应该所有 chunks 都是有效的
+        assert!(report.valid > 0, "应该有有效的 chunks");
+        assert_eq!(report.invalid, 0, "不应该有损坏的 chunk");
+    }
+
+    #[tokio::test]
+    async fn test_orphan_cleanup() {
+        let (storage, _temp) = create_test_storage().await;
+        storage.init().await.unwrap();
+
+        // 创建测试数据
+        let data = b"Test orphan cleanup";
+        storage.save_version("test_file", data, None).await.unwrap();
+
+        // 检测孤儿 chunks（正常情况下应该没有）
+        let orphans = storage.detect_orphan_chunks().await.unwrap();
+        // 正常情况下，所有 chunks 都应该被引用，没有孤儿
+        assert_eq!(orphans.len(), 0, "不应该有孤儿 chunks");
     }
 }
 // 性能对比测试：原版存储 vs v0.7.0增量存储

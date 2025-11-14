@@ -1,0 +1,131 @@
+   Compiling silent-storage-v2 v0.1.0 (/Users/hubertshelley/Documents/silent/silent-nas/silent-storage-v2)
+warning: unused import: `BenchmarkId`
+ --> benches/compression_benchmark.rs:1:61
+  |
+1 | use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+  |                                                             ^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: `silent-storage-v2` (bench "compression_benchmark") generated 1 warning (run `cargo fix --bench "compression_benchmark"` to apply 1 suggestion)
+    Finished `bench` profile [optimized] target(s) in 4.28s
+     Running benches/compression_benchmark.rs (/Users/hubertshelley/rust_target/release/deps/compression_benchmark-c15234d5f02089d4)
+Gnuplot not found, using plotters backend
+Benchmarking compression_algorithms/LZ4
+Benchmarking compression_algorithms/LZ4: Warming up for 3.0000 s
+Benchmarking compression_algorithms/LZ4: Collecting 100 samples in estimated 5.0666 s (101k iterations)
+Benchmarking compression_algorithms/LZ4: Analyzing
+compression_algorithms/LZ4
+                        time:   [50.619 µs 51.195 µs 52.112 µs]
+                        thrpt:  [18.740 GiB/s 19.075 GiB/s 19.292 GiB/s]
+Found 4 outliers among 100 measurements (4.00%)
+  1 (1.00%) low mild
+  3 (3.00%) high severe
+Benchmarking compression_algorithms/Zstd
+Benchmarking compression_algorithms/Zstd: Warming up for 3.0000 s
+Benchmarking compression_algorithms/Zstd: Collecting 100 samples in estimated 5.5064 s (45k iterations)
+Benchmarking compression_algorithms/Zstd: Analyzing
+compression_algorithms/Zstd
+                        time:   [122.35 µs 123.91 µs 125.72 µs]
+                        thrpt:  [7.7677 GiB/s 7.8810 GiB/s 7.9814 GiB/s]
+Found 10 outliers among 100 measurements (10.00%)
+  5 (5.00%) high mild
+  5 (5.00%) high severe
+Benchmarking compression_algorithms/None
+Benchmarking compression_algorithms/None: Warming up for 3.0000 s
+Benchmarking compression_algorithms/None: Collecting 100 samples in estimated 5.0449 s (288k iterations)
+Benchmarking compression_algorithms/None: Analyzing
+compression_algorithms/None
+                        time:   [17.527 µs 17.602 µs 17.695 µs]
+                        thrpt:  [55.189 GiB/s 55.481 GiB/s 55.717 GiB/s]
+Found 6 outliers among 100 measurements (6.00%)
+  3 (3.00%) high mild
+  3 (3.00%) high severe
+
+Benchmarking compression_ratio/LZ4/高重复文本
+Benchmarking compression_ratio/LZ4/高重复文本: Warming up for 3.0000 s
+Benchmarking compression_ratio/LZ4/高重复文本: Collecting 100 samples in estimated 5.1693 s (101k iterations)
+Benchmarking compression_ratio/LZ4/高重复文本: Analyzing
+compression_ratio/LZ4/高重复文本
+                        time:   [50.664 µs 50.790 µs 50.927 µs]
+Found 7 outliers among 100 measurements (7.00%)
+  1 (1.00%) low mild
+  4 (4.00%) high mild
+  2 (2.00%) high severe
+Benchmarking compression_ratio/Zstd/高重复文本
+Benchmarking compression_ratio/Zstd/高重复文本: Warming up for 3.0000 s
+Benchmarking compression_ratio/Zstd/高重复文本: Collecting 100 samples in estimated 5.4122 s (45k iterations)
+Benchmarking compression_ratio/Zstd/高重复文本: Analyzing
+compression_ratio/Zstd/高重复文本
+                        time:   [118.82 µs 119.23 µs 119.71 µs]
+Found 7 outliers among 100 measurements (7.00%)
+  3 (3.00%) high mild
+  4 (4.00%) high severe
+Benchmarking compression_ratio/LZ4/JSON数据
+Benchmarking compression_ratio/LZ4/JSON数据: Warming up for 3.0000 s
+Benchmarking compression_ratio/LZ4/JSON数据: Collecting 100 samples in estimated 5.1367 s (101k iterations)
+Benchmarking compression_ratio/LZ4/JSON数据: Analyzing
+compression_ratio/LZ4/JSON数据
+                        time:   [50.535 µs 50.620 µs 50.700 µs]
+Found 2 outliers among 100 measurements (2.00%)
+  2 (2.00%) high mild
+Benchmarking compression_ratio/Zstd/JSON数据
+Benchmarking compression_ratio/Zstd/JSON数据: Warming up for 3.0000 s
+Benchmarking compression_ratio/Zstd/JSON数据: Collecting 100 samples in estimated 5.4142 s (45k iterations)
+Benchmarking compression_ratio/Zstd/JSON数据: Analyzing
+compression_ratio/Zstd/JSON数据
+                        time:   [118.80 µs 119.30 µs 120.18 µs]
+Found 15 outliers among 100 measurements (15.00%)
+  1 (1.00%) low mild
+  10 (10.00%) high mild
+  4 (4.00%) high severe
+Benchmarking compression_ratio/LZ4/完全重复
+Benchmarking compression_ratio/LZ4/完全重复: Warming up for 3.0000 s
+Benchmarking compression_ratio/LZ4/完全重复: Collecting 100 samples in estimated 5.1783 s (101k iterations)
+Benchmarking compression_ratio/LZ4/完全重复: Analyzing
+compression_ratio/LZ4/完全重复
+                        time:   [50.524 µs 50.654 µs 50.786 µs]
+Found 7 outliers among 100 measurements (7.00%)
+  5 (5.00%) low mild
+  1 (1.00%) high mild
+  1 (1.00%) high severe
+Benchmarking compression_ratio/Zstd/完全重复
+Benchmarking compression_ratio/Zstd/完全重复: Warming up for 3.0000 s
+Benchmarking compression_ratio/Zstd/完全重复: Collecting 100 samples in estimated 5.1440 s (30k iterations)
+Benchmarking compression_ratio/Zstd/完全重复: Analyzing
+compression_ratio/Zstd/完全重复
+                        time:   [166.40 µs 166.74 µs 167.06 µs]
+Found 2 outliers among 100 measurements (2.00%)
+  2 (2.00%) high severe
+Benchmarking compression_ratio/LZ4/低重复随机
+Benchmarking compression_ratio/LZ4/低重复随机: Warming up for 3.0000 s
+Benchmarking compression_ratio/LZ4/低重复随机: Collecting 100 samples in estimated 5.9984 s (30k iterations)
+Benchmarking compression_ratio/LZ4/低重复随机: Analyzing
+compression_ratio/LZ4/低重复随机
+                        time:   [198.64 µs 199.98 µs 202.50 µs]
+Found 10 outliers among 100 measurements (10.00%)
+  7 (7.00%) high mild
+  3 (3.00%) high severe
+Benchmarking compression_ratio/Zstd/低重复随机
+Benchmarking compression_ratio/Zstd/低重复随机: Warming up for 3.0000 s
+Benchmarking compression_ratio/Zstd/低重复随机: Collecting 100 samples in estimated 5.6114 s (20k iterations)
+Benchmarking compression_ratio/Zstd/低重复随机: Analyzing
+compression_ratio/Zstd/低重复随机
+                        time:   [279.92 µs 282.51 µs 285.72 µs]
+Found 9 outliers among 100 measurements (9.00%)
+  2 (2.00%) high mild
+  7 (7.00%) high severe
+
+Benchmarking compression_levels/Zstd/level_1
+Benchmarking compression_levels/Zstd/level_1: Warming up for 3.0000 s
+Benchmarking compression_levels/Zstd/level_1: Collecting 100 samples in estimated 5.2280 s (66k iterations)
+Benchmarking compression_levels/Zstd/level_1: Analyzing
+compression_levels/Zstd/level_1
+                        time:   [79.538 µs 79.771 µs 80.134 µs]
+                        thrpt:  [12.187 GiB/s 12.242 GiB/s 12.278 GiB/s]
+Found 11 outliers among 100 measurements (11.00%)
+  3 (3.00%) low mild
+  4 (4.00%) high mild
+  4 (4.00%) high severe
+Benchmarking compression_levels/Zstd/level_3
+Benchmarking compression_levels/Zstd/level_3: Warming up for 3.0000 s

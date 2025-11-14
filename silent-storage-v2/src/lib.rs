@@ -1,38 +1,80 @@
-//! Storage V2: Advanced storage system with deduplication, incremental storage, and tiering
+//! # Silent Storage V2
 //!
-//! 该模块提供基于块差异的文件版本存储功能，包括：
-//! - 滚动哈希算法(Rabin-Karp)
-//! - 内容定义分块(Content-Defined Chunking)
-//! - 版本链式存储
-//! - 增量更新与读取
-//! - 自动压缩与冷热分离
-//! - 数据生命周期管理
-//! - 跨文件块级去重
+//! 高性能、可靠的增量存储系统，基于内容定义分块（CDC）和块级去重技术。
 //!
-//! ## V0.7.0 架构设计（已完成）
+//! ## 特性
+//!
+//! - **增量存储**: 基于 CDC 的增量存储，只保存变化的数据块
+//! - **高效去重**: 跨文件块级去重，显著节省存储空间
+//! - **智能压缩**: 自适应压缩策略（LZ4/Zstd），已压缩文件自动跳过
+//! - **版本管理**: 完整的版本链管理，支持版本回溯
+//! - **可靠性**: WAL 日志、数据校验、孤儿清理
+//! - **性能**: 三级缓存、自适应分块、高吞吐量（CDC 102+ MiB/s）
+//! - **监控**: Prometheus 指标导出，完整的性能监控
+//!
+//! ## 快速开始
+//!
+//! ```rust,no_run
+//! use silent_storage_v2::{StorageManager, IncrementalConfig};
+//! use std::path::PathBuf;
+//!
+//! #[tokio::main]
+//! async fn main() -> Result<(), Box<dyn std::error::Error>> {
+//!     // 创建存储管理器
+//!     let config = IncrementalConfig::default();
+//!     let storage = StorageManager::new(
+//!         PathBuf::from("./storage"),
+//!         64 * 1024,
+//!         config,
+//!     );
+//!
+//!     // 初始化
+//!     storage.init().await?;
+//!
+//!     // 保存文件版本
+//!     let data = b"Hello, World!";
+//!     let (delta, version) = storage.save_version("file", data, None).await?;
+//!
+//!     // 读取数据
+//!     let content = storage.read_version_data(&version.version_id).await?;
+//!
+//!     // 优雅关闭
+//!     storage.shutdown().await?;
+//!
+//!     Ok(())
+//! }
+//! ```
+//!
+//! ## 架构
 //!
 //! ```text
 //! silent-storage-v2/
-//! |-- core/           # 核心存储引擎
-//! |   |-- chunker     # 分块算法
-//! |   |-- compression # 压缩算法
-//! |   |-- delta       # 差异计算
-//! |   |-- engine      # 引擎组合
-//! |-- services/       # 有状态服务
-//! |   |-- dedup       # 去重服务
-//! |   |-- index       # 索引服务
-//! |   |-- tiering     # 分层存储
-//! |   |-- lifecycle   # 生命周期
-//! |-- storage         # 顶层 API (StorageManager)
+//! ├── core/           # 核心存储引擎
+//! │   ├── chunker     # 内容定义分块（CDC）
+//! │   ├── compression # 压缩算法（LZ4/Zstd）
+//! │   ├── delta       # 增量计算
+//! │   ├── engine      # 存储引擎
+//! │   ├── file_type   # 文件类型检测
+//! │   └── version_chain # 版本链管理
+//! ├── services/       # 有状态服务
+//! │   ├── dedup       # 去重服务
+//! │   ├── index       # 索引服务
+//! │   ├── lifecycle   # 生命周期管理
+//! │   └── tiering     # 分层存储
+//! ├── cache.rs        # 三级缓存系统
+//! ├── metadata.rs     # 元数据管理（Sled）
+//! ├── metrics.rs      # Prometheus 指标
+//! ├── reliability.rs  # 可靠性保障
+//! └── storage.rs      # 顶层 API
 //! ```
 //!
-//! ## V0.7.1 开发计划
+//! ## 主要组件
 //!
-//! 基于现有 StorageManager 进行渐进式改进：
-//! - Phase 2: Sled 元信息数据库集成
-//! - Phase 3: 增强 CDC 分块和去重
-//! - Phase 4: 优化压缩和增量存储
-//! - Phase 5: 独立 Prometheus 监控端点
+//! - [`StorageManager`] - 顶层存储管理器
+//! - [`CacheManager`] - 三级缓存管理
+//! - [`WalManager`] - WAL 日志管理
+//! - [`ChunkVerifier`] - Chunk 数据校验
+//! - [`StorageMetrics`] - Prometheus 指标
 
 mod error;
 

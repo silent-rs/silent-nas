@@ -16,8 +16,7 @@ path = "src/main.rs"
 silent = { path = "./silent/silent" }
 silent-crdt = { path = "./silent-crdt" }
 silent-nas-core = { path = "./silent-nas-core" }
-silent-storage-v1 = { path = "./silent-storage-v1" }
-silent-storage-v2 = { path = "./silent-storage-v2" }
+silent-storage = { path = "./silent-storage" }
 
 tokio = { version = "1", features = ["full"] }
 http-body-util = "0.1"

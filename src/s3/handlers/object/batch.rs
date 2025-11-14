@@ -2,7 +2,6 @@ use crate::models::{EventType, FileEvent};
 use crate::s3::service::S3Service;
 use http::StatusCode;
 use silent::prelude::*;
-use silent_nas_core::StorageManagerTrait;
 use tracing::debug;
 
 impl S3Service {

@@ -88,7 +88,8 @@ impl FileType {
         if data.len() > 12 && &data[4..12] == b"ftypmp42" {
             return Some(Self::Video); // MP4
         }
-        if data.starts_with(b"\x00\x00\x00\x18ftypmp42") || data.starts_with(b"\x00\x00\x00\x20ftypisom")
+        if data.starts_with(b"\x00\x00\x00\x18ftypmp42")
+            || data.starts_with(b"\x00\x00\x00\x20ftypisom")
         {
             return Some(Self::Video);
         }
@@ -147,13 +148,13 @@ impl FileType {
     /// 获取推荐的块大小范围 (min, max)
     pub fn recommended_chunk_size(&self) -> (usize, usize) {
         match self {
-            Self::Text => (2 * 1024, 8 * 1024),        // 2KB - 8KB，文本去重效果好
-            Self::Binary => (4 * 1024, 16 * 1024),     // 4KB - 16KB，标准大小
-            Self::Archive => (8 * 1024, 32 * 1024),    // 8KB - 32KB，已压缩，大块减少开销
-            Self::Image => (16 * 1024, 64 * 1024),     // 16KB - 64KB，多媒体大块
-            Self::Video => (32 * 1024, 128 * 1024),    // 32KB - 128KB，视频大块
-            Self::Audio => (16 * 1024, 64 * 1024),     // 16KB - 64KB，音频大块
-            Self::Unknown => (4 * 1024, 16 * 1024),    // 4KB - 16KB，默认值
+            Self::Text => (2 * 1024, 8 * 1024), // 2KB - 8KB，文本去重效果好
+            Self::Binary => (4 * 1024, 16 * 1024), // 4KB - 16KB，标准大小
+            Self::Archive => (8 * 1024, 32 * 1024), // 8KB - 32KB，已压缩，大块减少开销
+            Self::Image => (16 * 1024, 64 * 1024), // 16KB - 64KB，多媒体大块
+            Self::Video => (32 * 1024, 128 * 1024), // 32KB - 128KB，视频大块
+            Self::Audio => (16 * 1024, 64 * 1024), // 16KB - 64KB，音频大块
+            Self::Unknown => (4 * 1024, 16 * 1024), // 4KB - 16KB，默认值
         }
     }
 
@@ -227,7 +228,10 @@ mod tests {
 
     #[test]
     fn test_recommended_chunk_size() {
-        assert_eq!(FileType::Text.recommended_chunk_size(), (2 * 1024, 8 * 1024));
+        assert_eq!(
+            FileType::Text.recommended_chunk_size(),
+            (2 * 1024, 8 * 1024)
+        );
         assert_eq!(
             FileType::Video.recommended_chunk_size(),
             (32 * 1024, 128 * 1024)

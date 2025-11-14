@@ -884,8 +884,11 @@ mod tests {
     #[tokio::test]
     async fn test_build_full_href_rules() {
         let dir = tempfile::tempdir().unwrap();
-        let storage =
-            crate::storage::StorageManager::new(dir.path().to_path_buf(), 4 * 1024 * 1024);
+        let storage = crate::storage::StorageManager::new(
+            dir.path().to_path_buf(),
+            4 * 1024 * 1024,
+            crate::storage::IncrementalConfig::default(),
+        );
         let _ = crate::storage::init_global_storage(storage.clone());
         storage.init().await.unwrap();
         let syncm = SyncManager::new("node-test".to_string(), None);

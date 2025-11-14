@@ -1211,6 +1211,7 @@ mod tests {
         let storage = Arc::new(crate::storage::StorageManager::new(
             dir.path().to_path_buf(),
             4 * 1024 * 1024,
+            crate::storage::IncrementalConfig::default(),
         ));
         storage.init().await.unwrap();
         let syncm = SyncManager::new("node-test".to_string(), None);

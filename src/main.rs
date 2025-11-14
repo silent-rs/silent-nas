@@ -45,13 +45,15 @@ async fn main() -> Result<()> {
     let config = Config::load();
     info!("配置加载完成: {:?}", config);
 
-    // 初始化全局存储管理器（根据配置选择版本）
+    // 初始化全局存储管理器
     let storage = storage::create_storage(&config.storage).await?;
-    info!("存储引擎版本: {}", config.storage.version);
+    info!(
+        "存储引擎初始化完成: compression={}, dedup={}",
+        config.storage.enable_compression, config.storage.enable_deduplication
+    );
 
     // 将存储设置为全局实例
-    let storage_for_global = storage.as_ref().clone();
-    storage::init_global_storage(storage_for_global)?;
+    storage::init_global_storage(storage.clone())?;
     info!("✅ 全局存储已初始化");
 
     // 尝试连接 NATS（可选，单节点模式下可不连接）
@@ -71,7 +73,7 @@ async fn main() -> Result<()> {
     // 初始化版本管理器
     let version_config = VersionConfig::default();
     let version_manager = VersionManager::new(
-        storage.clone(),
+        Arc::new(storage.clone()),
         version_config,
         &config.storage.root_path.to_string_lossy(),
     );
@@ -235,7 +237,7 @@ async fn main() -> Result<()> {
         .parse()
         .expect("无效的 gRPC 地址");
 
-    let storage_clone = storage.clone();
+    let storage_clone = Arc::new(storage.clone());
     let notifier_clone = notifier.clone();
     let source_http_addr_clone = source_http_addr.clone();
 
@@ -290,7 +292,7 @@ async fn main() -> Result<()> {
     // 启动 S3 服务器
     let s3_addr = format!("{}:{}", config.server.host, config.server.s3_port);
     let s3_addr_clone = s3_addr.clone();
-    let storage_s3 = storage.clone();
+    let storage_s3 = Arc::new(storage.clone());
     let notifier_s3 = notifier.clone();
     let s3_config = config.s3.clone();
     let source_http_addr_for_s3 = source_http_addr.clone();
@@ -322,8 +324,7 @@ async fn main() -> Result<()> {
     let storage_quic = storage.clone();
     let notifier_quic = notifier.clone();
     let quic_handle = tokio::spawn(async move {
-        let mut quic_server =
-            transfer::QuicTransferServer::new(storage_quic.as_ref().clone(), notifier_quic);
+        let mut quic_server = transfer::QuicTransferServer::new(storage_quic, notifier_quic);
         if let Err(e) = quic_server.start(quic_addr).await {
             error!("QUIC 服务器错误: {}", e);
         }

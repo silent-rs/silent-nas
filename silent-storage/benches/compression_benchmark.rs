@@ -1,5 +1,5 @@
-use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
-use silent_storage_v2::core::{CompressionAlgorithm, CompressionConfig, Compressor};
+use criterion::{Criterion, Throughput, black_box, criterion_group, criterion_main};
+use silent_storage::core::{CompressionAlgorithm, CompressionConfig, Compressor};
 
 /// 生成不同类型的测试数据
 fn generate_test_data(size: usize, pattern: &str) -> Vec<u8> {
@@ -8,22 +8,13 @@ fn generate_test_data(size: usize, pattern: &str) -> Vec<u8> {
             // 模拟文本文件：重复的ASCII文本（高压缩比）
             let text = "Lorem ipsum dolor sit amet, consectetur adipiscing elit. \
                         Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. ";
-            text.as_bytes()
-                .iter()
-                .cycle()
-                .take(size)
-                .copied()
-                .collect()
+            text.as_bytes().iter().cycle().take(size).copied().collect()
         }
         "json" => {
             // 模拟JSON数据：结构化重复（中等压缩比）
-            let json = r#"{"id":1234,"name":"test user","email":"test@example.com","status":"active"}"#;
-            json.as_bytes()
-                .iter()
-                .cycle()
-                .take(size)
-                .copied()
-                .collect()
+            let json =
+                r#"{"id":1234,"name":"test user","email":"test@example.com","status":"active"}"#;
+            json.as_bytes().iter().cycle().take(size).copied().collect()
         }
         "repetitive" => {
             // 高重复度数据（极高压缩比）

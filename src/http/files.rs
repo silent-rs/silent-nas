@@ -117,10 +117,15 @@ pub async fn delete_file(
 pub async fn list_files(
     CfgExtractor(_state): CfgExtractor<AppState>,
 ) -> silent::Result<Vec<crate::models::FileMetadata>> {
-    crate::storage::storage().list_files().await.map_err(|e| {
-        SilentError::business_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("列出文件失败: {}", e),
-        )
-    })
+    use silent_nas_core::StorageManagerTrait;
+
+    // 显式调用 trait 方法
+    StorageManagerTrait::list_files(crate::storage::storage())
+        .await
+        .map_err(|e| {
+            SilentError::business_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("列出文件失败: {}", e),
+            )
+        })
 }

@@ -50,16 +50,9 @@ impl From<sled::Error> for NasError {
     }
 }
 
-// 为 silent_storage_v1::StorageError 实现 From trait
-impl From<silent_storage_v1::StorageError> for NasError {
-    fn from(err: silent_storage_v1::StorageError) -> Self {
-        NasError::Storage(format!("存储错误: {}", err))
-    }
-}
-
-// 为 silent_storage_v2::StorageError 实现 From trait
-impl From<silent_storage_v2::StorageError> for NasError {
-    fn from(err: silent_storage_v2::StorageError) -> Self {
+// 为 silent_storage::StorageError 实现 From trait
+impl From<silent_storage::StorageError> for NasError {
+    fn from(err: silent_storage::StorageError) -> Self {
         NasError::Storage(format!("存储错误: {}", err))
     }
 }

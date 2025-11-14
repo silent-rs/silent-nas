@@ -24,11 +24,11 @@ pub struct CacheConfig {
 impl Default for CacheConfig {
     fn default() -> Self {
         Self {
-            file_metadata_capacity: 10_000,      // 10000 个文件
-            chunk_index_capacity: 100_000,       // 100000 个 chunks
+            file_metadata_capacity: 10_000,       // 10000 个文件
+            chunk_index_capacity: 100_000,        // 100000 个 chunks
             hot_data_capacity: 100 * 1024 * 1024, // 100 MB
-            ttl_seconds: 3600,                   // 1 小时
-            idle_seconds: 300,                   // 5 分钟
+            ttl_seconds: 3600,                    // 1 小时
+            idle_seconds: 300,                    // 5 分钟
         }
     }
 }
@@ -339,7 +339,9 @@ mod tests {
         let data = vec![1, 2, 3, 4, 5];
 
         // 设置
-        manager.set_hot_data("data1".to_string(), data.clone()).await;
+        manager
+            .set_hot_data("data1".to_string(), data.clone())
+            .await;
 
         // 获取
         let cached = manager.get_hot_data("data1").await;

@@ -16,7 +16,7 @@ pub mod version;
 
 // Re-export core types and storage
 pub use silent_nas_core as models;
-pub use silent_storage_v2 as storage_v2;
+pub use silent_storage;
 
 // Re-export storage traits for easier access
 pub use silent_nas_core::{S3CompatibleStorageTrait, StorageManagerTrait};

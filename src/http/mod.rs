@@ -380,7 +380,7 @@ fn state_injector(state: AppState) -> StateInjector {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::{StorageManager, StorageManagerTrait};
+    use crate::storage::StorageManager;
     use crate::sync::crdt::SyncManager;
     use crate::version::VersionManager;
     use silent::extractor::Configs as CfgExtractor;
@@ -391,6 +391,7 @@ mod tests {
         let storage = StorageManager::new(
             temp_dir.path().to_path_buf(),
             64 * 1024, // 64KB chunk size for tests
+            crate::storage::IncrementalConfig::default(),
         );
         storage.init().await.unwrap();
         (storage, temp_dir)

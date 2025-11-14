@@ -392,12 +392,16 @@ impl WebDavHandler {
 
 impl WebDavHandler {
     async fn report_versions(&self, path: &str) -> silent::Result<Response> {
-        let files = crate::storage::storage().list_files().await.map_err(|e| {
-            SilentError::business_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("列出文件失败: {}", e),
-            )
-        })?;
+        use silent_nas_core::StorageManagerTrait;
+
+        let files = StorageManagerTrait::list_files(crate::storage::storage())
+            .await
+            .map_err(|e| {
+                SilentError::business_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("列出文件失败: {}", e),
+                )
+            })?;
         let file_id = files
             .iter()
             .find(|m| m.path == path)

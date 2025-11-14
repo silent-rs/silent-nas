@@ -1,9 +1,9 @@
 [package]
-name = "silent-storage-v2"
+name = "silent-storage"
 version = "0.1.0"
 edition = "2024"
 authors = ["Hubert Shelley <hubertshelley@163.com>"]
-description = "Advanced storage system with deduplication, incremental storage, and tiering for Silent NAS (V2)"
+description = "Advanced storage system with deduplication, incremental storage, and tiering for Silent NAS"
 license = "MIT"
 
 [dependencies]

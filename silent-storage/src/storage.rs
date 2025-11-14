@@ -658,9 +658,11 @@ impl StorageManager {
 
     /// 获取差异路径
     fn get_delta_path(&self, file_id: &str, version_id: &str) -> PathBuf {
+        // 移除开头的 / 以确保是相对路径
+        let cleaned_file_id = file_id.trim_start_matches('/');
         self.version_root
             .join("deltas")
-            .join(file_id)
+            .join(cleaned_file_id)
             .join(format!("{}.json", version_id))
     }
 
@@ -1120,7 +1122,10 @@ impl StorageManager {
     }
 
     /// 清理孤儿 chunks
-    pub async fn cleanup_orphan_chunks(&self, orphan_hashes: &[String]) -> Result<crate::CleanupReport> {
+    pub async fn cleanup_orphan_chunks(
+        &self,
+        orphan_hashes: &[String],
+    ) -> Result<crate::CleanupReport> {
         self.orphan_cleaner
             .clean_orphans(orphan_hashes)
             .await
@@ -1201,8 +1206,17 @@ impl StorageManagerTrait for StorageManager {
         relative_path: &str,
         data: &[u8],
     ) -> std::result::Result<FileMetadata, Self::Error> {
-        // 使用路径作为 file_id
-        self.save_file(relative_path, data).await
+        // 使用路径作为 file_id，保存到块存储
+        let metadata = self.save_file(relative_path, data).await?;
+
+        // 同时在 data_root 下创建实际文件，供 WebDAV 等直接文件系统访问使用
+        let full_path = self.get_full_path(relative_path);
+        if let Some(parent) = full_path.parent() {
+            fs::create_dir_all(parent).await?;
+        }
+        fs::write(&full_path, data).await?;
+
+        Ok(metadata)
     }
 
     async fn read_file(&self, file_id: &str) -> std::result::Result<Vec<u8>, Self::Error> {
@@ -1577,16 +1591,10 @@ mod tests {
         let data2 = b"Hello World! ".repeat(100); // 相同内容
 
         // 保存第一个文件
-        let (_delta1, _version1) = storage
-            .save_version("file1", &data1, None)
-            .await
-            .unwrap();
+        let (_delta1, _version1) = storage.save_version("file1", &data1, None).await.unwrap();
 
         // 保存第二个文件（相同内容，应触发去重）
-        let (_delta2, _version2) = storage
-            .save_version("file2", &data2, None)
-            .await
-            .unwrap();
+        let (_delta2, _version2) = storage.save_version("file2", &data2, None).await.unwrap();
 
         // 获取去重统计
         let dedup_stats = storage.get_deduplication_stats().await.unwrap();
@@ -1635,16 +1643,10 @@ mod tests {
         println!("数据大小: {}B", data.len());
 
         // 保存第一个文件
-        storage
-            .save_version("file1", &data, None)
-            .await
-            .unwrap();
+        storage.save_version("file1", &data, None).await.unwrap();
 
         // 保存第二个文件（完全相同的数据）
-        storage
-            .save_version("file2", &data, None)
-            .await
-            .unwrap();
+        storage.save_version("file2", &data, None).await.unwrap();
 
         // 获取去重统计
         let dedup_stats = storage.get_deduplication_stats().await.unwrap();
@@ -1665,7 +1667,8 @@ mod tests {
         // 验证跨文件去重效果
         // 两个完全相同的文件，总块数应该是唯一块数的2倍
         assert_eq!(
-            dedup_stats.total_chunks, dedup_stats.new_chunks * 2,
+            dedup_stats.total_chunks,
+            dedup_stats.new_chunks * 2,
             "两个相同文件，总块数应该是唯一块数的2倍"
         );
         assert_eq!(

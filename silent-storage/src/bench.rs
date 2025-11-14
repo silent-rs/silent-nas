@@ -7,7 +7,7 @@
 #[cfg(any())] // 暂时禁用所有基准测试，将来使用 cargo bench 启用
 mod tests {
     use crate::{IncrementalConfig, StorageManager};
-    // use silent_storage_v1::StorageManager; // V1 暂时不可用
+    // V1 已移除
     use std::sync::Arc;
     use tempfile::TempDir;
 

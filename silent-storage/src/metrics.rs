@@ -4,8 +4,8 @@
 
 use chrono::NaiveDateTime;
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 /// 存储指标
 #[derive(Debug, Clone, Default)]
@@ -378,11 +378,26 @@ impl Serialize for PerformanceMetrics {
     {
         use serde::ser::SerializeStruct;
         let mut state = serializer.serialize_struct("PerformanceMetrics", 5)?;
-        state.serialize_field("read_latency_us", &self.read_latency_us.load(Ordering::Relaxed))?;
-        state.serialize_field("write_latency_us", &self.write_latency_us.load(Ordering::Relaxed))?;
-        state.serialize_field("delete_latency_us", &self.delete_latency_us.load(Ordering::Relaxed))?;
-        state.serialize_field("read_throughput_bps", &self.read_throughput_bps.load(Ordering::Relaxed))?;
-        state.serialize_field("write_throughput_bps", &self.write_throughput_bps.load(Ordering::Relaxed))?;
+        state.serialize_field(
+            "read_latency_us",
+            &self.read_latency_us.load(Ordering::Relaxed),
+        )?;
+        state.serialize_field(
+            "write_latency_us",
+            &self.write_latency_us.load(Ordering::Relaxed),
+        )?;
+        state.serialize_field(
+            "delete_latency_us",
+            &self.delete_latency_us.load(Ordering::Relaxed),
+        )?;
+        state.serialize_field(
+            "read_throughput_bps",
+            &self.read_throughput_bps.load(Ordering::Relaxed),
+        )?;
+        state.serialize_field(
+            "write_throughput_bps",
+            &self.write_throughput_bps.load(Ordering::Relaxed),
+        )?;
         state.end()
     }
 }
@@ -710,7 +725,11 @@ mod tests {
         };
 
         assert_eq!(stats.usage_ratio(), 0.6);
-        assert!(stats.to_prometheus().contains("storage_total_space_bytes 1000"));
+        assert!(
+            stats
+                .to_prometheus()
+                .contains("storage_total_space_bytes 1000")
+        );
     }
 
     #[test]
@@ -742,9 +761,7 @@ mod tests {
 
         assert_eq!(compression.compression_ratio(), 4.0);
         assert_eq!(compression.space_saving_ratio(), 0.75);
-        assert!(compression
-            .to_prometheus()
-            .contains("compression_ratio 4"));
+        assert!(compression.to_prometheus().contains("compression_ratio 4"));
     }
 
     #[test]

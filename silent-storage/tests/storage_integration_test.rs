@@ -2,7 +2,7 @@
 //!
 //! 测试完整的文件存储、读取、版本管理、去重和垃圾回收流程
 
-use silent_storage_v2::{IncrementalConfig, StorageManager};
+use silent_storage::{IncrementalConfig, StorageManager};
 use tempfile::TempDir;
 
 /// 创建测试用的 StorageManager

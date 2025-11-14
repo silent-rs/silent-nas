@@ -15,7 +15,7 @@
 //! ## 快速开始
 //!
 //! ```rust,no_run
-//! use silent_storage_v2::{StorageManager, IncrementalConfig};
+//! use silent_storage::{StorageManager, IncrementalConfig};
 //! use std::path::PathBuf;
 //!
 //! #[tokio::main]
@@ -48,7 +48,7 @@
 //! ## 架构
 //!
 //! ```text
-//! silent-storage-v2/
+//! silent-storage/
 //! ├── core/           # 核心存储引擎
 //! │   ├── chunker     # 内容定义分块（CDC）
 //! │   ├── compression # 压缩算法（LZ4/Zstd）
@@ -91,7 +91,7 @@ pub use cache::{CacheConfig, CacheManager, CacheStats};
 pub use error::{Result, StorageError};
 pub use metrics::{HealthStatus, StorageMetrics};
 pub use reliability::{
-    ChunkVerifyReport, ChunkVerifier, CleanupReport, OrphanChunkCleaner, WalEntry, WalManager,
+    ChunkVerifier, ChunkVerifyReport, CleanupReport, OrphanChunkCleaner, WalEntry, WalManager,
     WalOperation,
 };
 

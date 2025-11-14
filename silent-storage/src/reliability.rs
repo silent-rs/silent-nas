@@ -21,10 +21,7 @@ pub enum WalOperation {
         chunk_hashes: Vec<String>,
     },
     /// 删除文件版本
-    DeleteVersion {
-        file_id: String,
-        version_id: String,
-    },
+    DeleteVersion { file_id: String, version_id: String },
     /// 删除文件
     DeleteFile { file_id: String },
     /// 垃圾回收
@@ -116,7 +113,10 @@ impl WalManager {
             fs::File::create(&self.wal_path).await?;
         }
 
-        info!("WAL 初始化完成: {:?}, sequence={}", self.wal_path, self.current_sequence);
+        info!(
+            "WAL 初始化完成: {:?}, sequence={}",
+            self.wal_path, self.current_sequence
+        );
         Ok(())
     }
 
@@ -322,10 +322,7 @@ impl OrphanChunkCleaner {
     }
 
     /// 检测孤儿 chunks
-    pub async fn detect_orphans(
-        &self,
-        referenced_chunks: &HashSet<String>,
-    ) -> Result<Vec<String>> {
+    pub async fn detect_orphans(&self, referenced_chunks: &HashSet<String>) -> Result<Vec<String>> {
         let mut orphans = Vec::new();
 
         // 递归扫描 data 目录
@@ -480,15 +477,9 @@ mod tests {
         fs::create_dir_all(&data_dir).await.unwrap();
 
         // 创建一些 chunks
-        fs::write(data_dir.join("chunk1"), b"data1")
-            .await
-            .unwrap();
-        fs::write(data_dir.join("chunk2"), b"data2")
-            .await
-            .unwrap();
-        fs::write(data_dir.join("chunk3"), b"data3")
-            .await
-            .unwrap();
+        fs::write(data_dir.join("chunk1"), b"data1").await.unwrap();
+        fs::write(data_dir.join("chunk2"), b"data2").await.unwrap();
+        fs::write(data_dir.join("chunk3"), b"data3").await.unwrap();
 
         // 只有 chunk1 和 chunk2 被引用
         let mut referenced = HashSet::new();

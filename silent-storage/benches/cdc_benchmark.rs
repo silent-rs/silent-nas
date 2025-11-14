@@ -1,6 +1,6 @@
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use silent_storage_v2::core::{FileType, RabinKarpChunker};
-use silent_storage_v2::IncrementalConfig;
+use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
+use silent_storage::IncrementalConfig;
+use silent_storage::core::{FileType, RabinKarpChunker};
 
 /// 生成不同类型的测试数据
 fn generate_test_data(size: usize, pattern: &str) -> Vec<u8> {
@@ -8,18 +8,11 @@ fn generate_test_data(size: usize, pattern: &str) -> Vec<u8> {
         "text" => {
             // 模拟文本文件：重复的ASCII文本
             let text = "Lorem ipsum dolor sit amet, consectetur adipiscing elit. ";
-            text.as_bytes()
-                .iter()
-                .cycle()
-                .take(size)
-                .copied()
-                .collect()
+            text.as_bytes().iter().cycle().take(size).copied().collect()
         }
         "binary" => {
             // 模拟二进制文件：伪随机但有模式
-            (0..size)
-                .map(|i| ((i * 7 + 13) % 256) as u8)
-                .collect()
+            (0..size).map(|i| ((i * 7 + 13) % 256) as u8).collect()
         }
         "repetitive" => {
             // 高重复度数据

@@ -287,6 +287,7 @@ mod tests {
         Arc::new(StorageManager::new(
             "./test_storage".into(),
             4 * 1024 * 1024,
+            crate::storage::IncrementalConfig::default(),
         ))
     }
 
@@ -671,6 +672,7 @@ mod tests {
         let storage = Arc::new(StorageManager::new(
             temp_dir.path().to_path_buf(),
             64 * 1024,
+            crate::storage::IncrementalConfig::default(),
         ));
         storage.init().await.unwrap();
 

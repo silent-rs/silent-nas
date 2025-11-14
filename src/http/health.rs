@@ -16,7 +16,9 @@ pub async fn readiness(
     CfgExtractor(_state): CfgExtractor<AppState>,
 ) -> silent::Result<serde_json::Value> {
     // 检查存储是否可用
-    let storage_ok = crate::storage::storage().list_files().await.is_ok();
+    let storage_ok = StorageManagerTrait::list_files(crate::storage::storage())
+        .await
+        .is_ok();
 
     // 检查搜索引擎是否可用（简单检查，总是返回true）
     let search_ok = true;
@@ -39,8 +41,7 @@ pub async fn health_status(
     CfgExtractor(state): CfgExtractor<AppState>,
 ) -> silent::Result<serde_json::Value> {
     // 存储状态
-    let files = crate::storage::storage()
-        .list_files()
+    let files = StorageManagerTrait::list_files(crate::storage::storage())
         .await
         .unwrap_or_default();
     let total_size: u64 = files.iter().map(|f| f.size).sum();

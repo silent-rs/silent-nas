@@ -4,7 +4,7 @@ use crate::http::AppState;
 use http::StatusCode;
 use silent::SilentError;
 use silent::prelude::*;
-use silent_storage_v2::{HealthStatus, StorageMetrics};
+use silent_storage::{HealthStatus, StorageMetrics};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 

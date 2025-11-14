@@ -19,8 +19,8 @@ pub struct VersionChainConfig {
 impl Default for VersionChainConfig {
     fn default() -> Self {
         Self {
-            max_depth: 5,     // 默认最大5层
-            keep_recent: 2,   // 合并后保留最近2个版本
+            max_depth: 5,   // 默认最大5层
+            keep_recent: 2, // 合并后保留最近2个版本
         }
     }
 }
@@ -202,10 +202,7 @@ mod tests {
     use super::*;
     use chrono::Local;
 
-    fn create_test_version(
-        version_id: &str,
-        parent_id: Option<&str>,
-    ) -> VersionInfo {
+    fn create_test_version(version_id: &str, parent_id: Option<&str>) -> VersionInfo {
         VersionInfo {
             version_id: version_id.to_string(),
             file_id: "test_file".to_string(),

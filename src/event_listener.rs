@@ -382,9 +382,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_event_listener_creation() {
-        // 测试可以创建EventListener（不启动）
+        // 测试可以创建 EventListener（不启动）
         let temp_dir = TempDir::new().unwrap();
-        let storage = StorageManager::new(PathBuf::from(temp_dir.path()), 64 * 1024);
+        let storage = StorageManager::new(
+            PathBuf::from(temp_dir.path()),
+            64 * 1024,
+            crate::storage::IncrementalConfig::default(),
+        );
 
         // 初始化全局storage
         let _ = crate::storage::init_global_storage(storage.clone());
@@ -431,7 +435,11 @@ mod tests {
     async fn test_storage_operations() {
         // 测试存储操作的基本功能
         let temp_dir = TempDir::new().unwrap();
-        let storage = StorageManager::new(PathBuf::from(temp_dir.path()), 64 * 1024);
+        let storage = StorageManager::new(
+            PathBuf::from(temp_dir.path()),
+            64 * 1024,
+            crate::storage::IncrementalConfig::default(),
+        );
         storage.init().await.unwrap();
 
         // 测试保存文件

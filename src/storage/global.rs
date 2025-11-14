@@ -6,9 +6,6 @@ use super::StorageManager;
 use crate::error::{NasError, Result};
 use std::sync::OnceLock;
 
-#[cfg(test)]
-use silent_nas_core::StorageManagerTrait;
-
 /// 全局存储管理器实例
 static STORAGE: OnceLock<StorageManager> = OnceLock::new();
 
@@ -61,7 +58,11 @@ pub async fn init_test_storage_async() -> &'static StorageManager {
     let temp_dir = TEST_DIR.get_or_init(|| Box::leak(Box::new(TempDir::new().unwrap())));
 
     // 创建并初始化存储
-    let mgr = StorageManager::new(temp_dir.path().to_path_buf(), 64 * 1024);
+    let mgr = StorageManager::new(
+        temp_dir.path().to_path_buf(),
+        64 * 1024,
+        crate::storage::IncrementalConfig::default(),
+    );
     mgr.init().await.unwrap();
 
     // 初始化全局存储（忽略错误，因为可能已经初始化）
@@ -79,7 +80,11 @@ mod tests {
         use tempfile::TempDir;
 
         let temp_dir = TempDir::new().unwrap();
-        let storage = StorageManager::new(temp_dir.path().to_path_buf(), 64 * 1024);
+        let storage = StorageManager::new(
+            temp_dir.path().to_path_buf(),
+            64 * 1024,
+            crate::storage::IncrementalConfig::default(),
+        );
 
         // 注意：这个测试只能运行一次，因为全局变量只能初始化一次
         // 在实际测试中，应该使用独立的测试进程或者避免依赖全局状态

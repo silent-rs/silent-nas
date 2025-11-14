@@ -140,9 +140,9 @@ impl FileService for FileServiceImpl {
         &self,
         _request: Request<ListFilesRequest>,
     ) -> std::result::Result<Response<ListFilesResponse>, Status> {
-        let files = self
-            .storage
-            .list_files()
+        use silent_nas_core::StorageManagerTrait;
+
+        let files = StorageManagerTrait::list_files(&self.storage)
             .await
             .map_err(|e| Status::internal(format!("列出文件失败: {}", e)))?;
 

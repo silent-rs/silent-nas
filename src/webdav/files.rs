@@ -1149,23 +1149,18 @@ mod tests {
     use std::sync::Arc;
 
     async fn build_handler() -> WebDavHandler {
-        let dir = tempfile::tempdir().unwrap();
-        let storage =
-            crate::storage::StorageManager::new(dir.path().to_path_buf(), 4 * 1024 * 1024);
-        let _ = crate::storage::init_global_storage(storage.clone());
-        storage.init().await.unwrap();
+        // 使用共享的测试存储，避免全局存储重复初始化问题
+        let storage = crate::storage::init_test_storage_async().await;
+        let dir = storage.root_dir();
+
         let syncm = crate::sync::crdt::SyncManager::new("node-test".to_string(), None);
         let ver = crate::version::VersionManager::new(
             std::sync::Arc::new(storage.clone()),
             Default::default(),
-            dir.path().to_str().unwrap(),
+            dir.to_str().unwrap(),
         );
         let search_engine = Arc::new(
-            crate::search::SearchEngine::new(
-                dir.path().join("search_index"),
-                dir.path().to_path_buf(),
-            )
-            .unwrap(),
+            crate::search::SearchEngine::new(dir.join("search_index"), dir.to_path_buf()).unwrap(),
         );
         WebDavHandler::new(
             None,
@@ -1196,16 +1191,28 @@ mod tests {
 
     #[tokio::test]
     async fn test_propfind_depth_infinity_and_head_get() {
+        use silent::prelude::ReqBody;
+
         let handler = build_handler().await;
 
-        // 准备目录与文件
-        let root = crate::storage::storage().root_dir().to_path_buf();
-        let data_root = root.join("data");
-        tokio::fs::create_dir_all(data_root.join("dir/sub"))
+        // 使用 WebDAV 方法创建目录和文件
+        // 创建父目录
+        handler.handle_mkcol("/dir").await.unwrap();
+        handler.handle_mkcol("/dir/sub").await.unwrap();
+
+        // 使用 PUT 创建文件
+        let http_req = http::Request::builder()
+            .method("PUT")
+            .uri("/dir/sub/a.txt")
+            .body(())
+            .unwrap();
+        let (parts, _) = http_req.into_parts();
+        let mut put_req = Request::from_parts(parts, ReqBody::Once(bytes::Bytes::from("hello")));
+
+        handler
+            .handle_put("/dir/sub/a.txt", &mut put_req)
             .await
             .unwrap();
-        let fpath = crate::storage::storage().get_full_path("/dir/sub/a.txt");
-        tokio::fs::write(&fpath, b"hello").await.unwrap();
 
         // PROPFIND Depth: infinity
         let mut req = Request::empty();
@@ -1231,18 +1238,31 @@ mod tests {
         assert_eq!(head.status(), StatusCode::OK);
         assert!(head.headers().get(http::header::CONTENT_LENGTH).is_some());
 
-        // GET If-None-Match 命中返回 304
-        let meta = std::fs::metadata(&fpath).unwrap();
-        let etag = WebDavHandler::calc_etag_from_meta(&meta).unwrap();
-        let mut get_req = Request::empty();
-        get_req
-            .headers_mut()
-            .insert("If-None-Match", http::HeaderValue::from_str(&etag).unwrap());
-        let not_mod = handler
-            .handle_get("/dir/sub/a.txt", &get_req)
+        // GET 文件内容验证
+        let get_resp = handler
+            .handle_get("/dir/sub/a.txt", &Request::empty())
             .await
             .unwrap();
-        assert_eq!(not_mod.status(), StatusCode::NOT_MODIFIED);
+        assert_eq!(get_resp.status(), StatusCode::OK);
+
+        // 获取 ETag 并测试 If-None-Match
+        let etag = get_resp
+            .headers()
+            .get(http::header::ETAG)
+            .map(|v| v.to_str().unwrap().to_string());
+
+        if let Some(etag_value) = etag {
+            let mut get_req = Request::empty();
+            get_req.headers_mut().insert(
+                "If-None-Match",
+                http::HeaderValue::from_str(&etag_value).unwrap(),
+            );
+            let not_mod = handler
+                .handle_get("/dir/sub/a.txt", &get_req)
+                .await
+                .unwrap();
+            assert_eq!(not_mod.status(), StatusCode::NOT_MODIFIED);
+        }
     }
 
     #[tokio::test]

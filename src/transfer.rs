@@ -369,12 +369,16 @@ mod tests {
     #[tokio::test]
     #[ignore] // 需要NATS服务器运行，集成测试时再执行
     async fn test_quic_transfer_server_creation() {
-        use crate::storage::{StorageManager, StorageManagerTrait};
+        use crate::storage::StorageManager;
         use std::path::PathBuf;
         use tempfile::TempDir;
 
         let temp_dir = TempDir::new().unwrap();
-        let storage = StorageManager::new(PathBuf::from(temp_dir.path()), 64 * 1024);
+        let storage = StorageManager::new(
+            PathBuf::from(temp_dir.path()),
+            64 * 1024,
+            crate::storage::IncrementalConfig::default(),
+        );
         storage.init().await.unwrap();
 
         // EventNotifier需要NATS，这里测试服务器创建即可

@@ -26,7 +26,7 @@ pub async fn handle_get_delta(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::StorageManagerTrait;
+    use silent_nas_core::StorageManagerTrait;
 
     #[tokio::test]
     async fn test_handle_get_signature() {

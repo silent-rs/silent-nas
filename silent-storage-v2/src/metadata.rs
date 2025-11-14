@@ -74,7 +74,7 @@ impl SledMetadataDb {
 
     /// 保存文件索引条目
     pub fn put_file_index(&self, file_id: &str, entry: &FileIndexEntry) -> Result<()> {
-        let value = serde_json::to_vec(entry).map_err(|e| StorageError::Serialization(e))?;
+        let value = serde_json::to_vec(entry).map_err(StorageError::Serialization)?;
 
         self.file_index_tree
             .insert(file_id.as_bytes(), value)
@@ -123,7 +123,7 @@ impl SledMetadataDb {
 
     /// 保存版本信息
     pub fn put_version_info(&self, version_id: &str, info: &VersionInfo) -> Result<()> {
-        let value = serde_json::to_vec(info).map_err(|e| StorageError::Serialization(e))?;
+        let value = serde_json::to_vec(info).map_err(StorageError::Serialization)?;
 
         self.version_index_tree
             .insert(version_id.as_bytes(), value)
@@ -157,7 +157,7 @@ impl SledMetadataDb {
                 item.map_err(|e| StorageError::Database(format!("遍历版本索引失败: {}", e)))?;
 
             let version_info: VersionInfo =
-                serde_json::from_slice(&value).map_err(|e| StorageError::Serialization(e))?;
+                serde_json::from_slice(&value).map_err(StorageError::Serialization)?;
 
             if version_info.file_id == file_id {
                 versions.push(version_info);
@@ -179,7 +179,7 @@ impl SledMetadataDb {
 
     /// 保存块引用计数
     pub fn put_chunk_ref(&self, chunk_id: &str, ref_count: &ChunkRefCount) -> Result<()> {
-        let value = serde_json::to_vec(ref_count).map_err(|e| StorageError::Serialization(e))?;
+        let value = serde_json::to_vec(ref_count).map_err(StorageError::Serialization)?;
 
         self.chunk_ref_tree
             .insert(chunk_id.as_bytes(), value)
@@ -240,7 +240,7 @@ impl SledMetadataDb {
         match result {
             Some(bytes) => {
                 let ref_count: ChunkRefCount =
-                    serde_json::from_slice(&bytes).map_err(|e| StorageError::Serialization(e))?;
+                    serde_json::from_slice(&bytes).map_err(StorageError::Serialization)?;
                 Ok(ref_count.ref_count)
             }
             None => Err(StorageError::Chunk(format!("块不存在: {}", chunk_id))),
@@ -256,7 +256,7 @@ impl SledMetadataDb {
                 item.map_err(|e| StorageError::Database(format!("遍历块引用计数失败: {}", e)))?;
 
             let ref_count: ChunkRefCount =
-                serde_json::from_slice(&value).map_err(|e| StorageError::Serialization(e))?;
+                serde_json::from_slice(&value).map_err(StorageError::Serialization)?;
 
             if ref_count.ref_count == 0 {
                 let chunk_id = String::from_utf8_lossy(&key).to_string();
@@ -278,8 +278,7 @@ impl SledMetadataDb {
     fn get_value<T: DeserializeOwned>(&self, tree: &sled::Tree, key: &str) -> Result<Option<T>> {
         match tree.get(key.as_bytes()) {
             Ok(Some(bytes)) => {
-                let value =
-                    serde_json::from_slice(&bytes).map_err(|e| StorageError::Serialization(e))?;
+                let value = serde_json::from_slice(&bytes).map_err(StorageError::Serialization)?;
                 Ok(Some(value))
             }
             Ok(None) => Ok(None),

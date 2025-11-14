@@ -69,10 +69,6 @@ pub struct StorageManager {
     version_index: Arc<RwLock<HashMap<String, VersionInfo>>>,
     /// 块索引缓存（使用内部可变性）
     block_index: Arc<RwLock<HashMap<String, PathBuf>>>,
-    /// 块引用计数（保留作为临时缓存，逐步迁移到 metadata_db）
-    chunk_ref_count: Arc<RwLock<HashMap<String, ChunkRefCount>>>,
-    /// 文件索引（保留作为临时缓存，逐步迁移到 metadata_db）
-    file_index: Arc<RwLock<HashMap<String, FileIndexEntry>>>,
 }
 
 impl StorageManager {
@@ -92,8 +88,6 @@ impl StorageManager {
             metadata_db: Arc::new(OnceCell::new()),
             version_index: Arc::new(RwLock::new(HashMap::new())),
             block_index: Arc::new(RwLock::new(HashMap::new())),
-            chunk_ref_count: Arc::new(RwLock::new(HashMap::new())),
-            file_index: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -186,11 +180,6 @@ impl StorageManager {
                 metadata_db
                     .put_chunk_ref(&chunk.chunk_id, &ref_count)
                     .map_err(|e| StorageError::Storage(format!("保存块引用信息失败: {}", e)))?;
-
-                // 同时更新内存缓存
-                let mut ref_count_map = self.chunk_ref_count.write().await;
-                ref_count_map.insert(chunk.chunk_id.clone(), ref_count);
-                drop(ref_count_map);
             }
         }
 
@@ -226,11 +215,6 @@ impl StorageManager {
         metadata_db
             .put_file_index(file_id, &file_entry)
             .map_err(|e| StorageError::Storage(format!("保存文件索引失败: {}", e)))?;
-
-        // 同时更新内存缓存
-        let mut file_index = self.file_index.write().await;
-        file_index.insert(file_id.to_string(), file_entry);
-        drop(file_index);
 
         // 定期刷新数据库（每10个版本刷新一次）
         let version_count = self.version_index.read().await.len();
@@ -625,34 +609,21 @@ impl StorageManager {
             fs::rename(&ref_count_path, &backup_path).await?;
             info!("已将 ref_count.json 备份到 {:?}", backup_path);
 
-            // 加载到内存缓存（保持兼容性）
-            *self.chunk_ref_count.write().await = ref_counts;
-            info!(
-                "迁移完成，共 {} 个块引用计数",
-                self.chunk_ref_count.read().await.len()
-            );
+            info!("迁移完成，共 {} 个块引用计数", ref_counts.len());
         } else {
-            // 从 Sled 加载数据（目前不实现完整加载，按需加载）
-            // 块引用计数通常按需使用，不需要全部加载到内存
-            info!("使用 Sled 数据库存储块引用计数，采用按需加载模式");
+            // 数据已在 Sled 中，无需全部加载到内存
+            let count = metadata_db.chunk_ref_count();
+            info!("使用 Sled 数据库存储块引用计数，当前 {} 个块", count);
         }
 
         Ok(())
     }
 
-    /// 保存块引用计数
+    /// 保存块引用计数到 Sled（主要用于刷新操作）
     async fn save_chunk_ref_count(&self) -> Result<()> {
         let metadata_db = self.get_metadata_db()?;
-        let ref_counts = self.chunk_ref_count.read().await;
 
-        // 保存到 Sled（如果内存中有缓存的数据）
-        for (chunk_id, ref_count) in ref_counts.iter() {
-            metadata_db
-                .put_chunk_ref(chunk_id, ref_count)
-                .map_err(|e| StorageError::Storage(format!("保存块引用计数失败: {}", e)))?;
-        }
-
-        // 异步刷新到磁盘
+        // Sled 已经在写入时自动持久化，这里只需要刷新即可
         metadata_db
             .flush()
             .await
@@ -692,12 +663,23 @@ impl StorageManager {
         }
         drop(version_index);
 
-        *self.chunk_ref_count.write().await = ref_counts;
+        // 获取 metadata_db 引用
+        let metadata_db = self.get_metadata_db()?;
 
-        // 保存到磁盘
-        self.save_chunk_ref_count().await?;
+        // 直接保存到 Sled
+        for (chunk_id, ref_count) in ref_counts.iter() {
+            metadata_db
+                .put_chunk_ref(chunk_id, ref_count)
+                .map_err(|e| StorageError::Storage(format!("保存块引用计数失败: {}", e)))?;
+        }
 
-        let count = self.chunk_ref_count.read().await.len();
+        // 刷新到磁盘
+        metadata_db
+            .flush()
+            .await
+            .map_err(|e| StorageError::Storage(format!("刷新数据库失败: {}", e)))?;
+
+        let count = ref_counts.len();
         info!("重建完成，共 {} 个块", count);
         Ok(())
     }
@@ -732,46 +714,21 @@ impl StorageManager {
             fs::rename(&file_index_path, &backup_path).await?;
             info!("已将 file_index.json 备份到 {:?}", backup_path);
 
-            // 加载到内存缓存（保持兼容性）
-            *self.file_index.write().await = file_index;
-            info!(
-                "迁移完成，共 {} 个文件索引",
-                self.file_index.read().await.len()
-            );
+            info!("迁移完成，共 {} 个文件索引", file_index.len());
         } else {
-            // 从 Sled 加载数据
-            let file_ids = metadata_db
-                .list_file_ids()
-                .map_err(|e| StorageError::Storage(format!("列出文件ID失败: {}", e)))?;
-
-            let mut file_index = HashMap::new();
-            for file_id in file_ids {
-                if let Ok(Some(entry)) = metadata_db.get_file_index(&file_id) {
-                    file_index.insert(file_id, entry);
-                }
-            }
-
-            *self.file_index.write().await = file_index;
-            let count = self.file_index.read().await.len();
-            info!("从 Sled 加载了 {} 个文件索引", count);
+            // 数据已在 Sled 中，无需加载到内存
+            let count = metadata_db.file_index_count();
+            info!("使用 Sled 数据库存储文件索引，当前 {} 个文件", count);
         }
 
         Ok(())
     }
 
-    /// 保存文件索引
+    /// 保存文件索引到 Sled（主要用于刷新操作）
     async fn save_file_index(&self) -> Result<()> {
         let metadata_db = self.get_metadata_db()?;
-        let file_index = self.file_index.read().await;
 
-        // 保存到 Sled
-        for (file_id, entry) in file_index.iter() {
-            metadata_db
-                .put_file_index(file_id, entry)
-                .map_err(|e| StorageError::Storage(format!("保存文件索引失败: {}", e)))?;
-        }
-
-        // 异步刷新到磁盘
+        // Sled 已经在写入时自动持久化，这里只需要刷新即可
         metadata_db
             .flush()
             .await
@@ -786,6 +743,7 @@ impl StorageManager {
     async fn rebuild_file_index(&self) -> Result<()> {
         info!("开始重建文件索引...");
         let mut file_index: HashMap<String, FileIndexEntry> = HashMap::new();
+        let metadata_db = self.get_metadata_db()?;
 
         // 遍历所有版本，构建文件索引
         let version_index = self.version_index.read().await;
@@ -809,20 +767,30 @@ impl StorageManager {
         }
         drop(version_index);
 
-        *self.file_index.write().await = file_index;
+        // 直接保存到 Sled
+        for (file_id, entry) in file_index.iter() {
+            metadata_db
+                .put_file_index(file_id, entry)
+                .map_err(|e| StorageError::Storage(format!("保存文件索引失败: {}", e)))?;
+        }
 
-        // 保存到磁盘
-        self.save_file_index().await?;
+        // 刷新到磁盘
+        metadata_db
+            .flush()
+            .await
+            .map_err(|e| StorageError::Storage(format!("刷新数据库失败: {}", e)))?;
 
-        let count = self.file_index.read().await.len();
+        let count = file_index.len();
         info!("重建完成，共 {} 个文件", count);
         Ok(())
     }
 
     /// 列出所有文件
     pub async fn list_files(&self) -> Result<Vec<String>> {
-        let file_index = self.file_index.read().await;
-        let mut files: Vec<String> = file_index.keys().cloned().collect();
+        let metadata_db = self.get_metadata_db()?;
+        let mut files = metadata_db
+            .list_file_ids()
+            .map_err(|e| StorageError::Storage(format!("列出文件失败: {}", e)))?;
         files.sort();
         Ok(files)
     }
@@ -880,13 +848,6 @@ impl StorageManager {
             if let Err(e) = metadata_db.decrement_chunk_ref(&chunk_id) {
                 info!("递减块 {} 引用计数失败: {}", chunk_id, e);
             }
-
-            // 同时更新内存缓存
-            let mut ref_count = self.chunk_ref_count.write().await;
-            if let Some(entry) = ref_count.get_mut(&chunk_id) {
-                entry.ref_count = entry.ref_count.saturating_sub(1);
-            }
-            drop(ref_count);
         }
 
         // 4. 从文件索引中移除
@@ -894,7 +855,6 @@ impl StorageManager {
         if let Err(e) = metadata_db.remove_file_index(file_id) {
             info!("从 Sled 移除文件索引失败: {}", e);
         }
-        self.file_index.write().await.remove(file_id);
 
         // 5. 删除文件的 delta 目录
         let file_delta_dir = self.version_root.join("deltas").join(file_id);
@@ -945,8 +905,7 @@ impl StorageManager {
                                             chunk_id, e
                                         ));
                                     }
-                                    // 从内存缓存移除
-                                    self.chunk_ref_count.write().await.remove(&chunk_id);
+                                    // 从块索引移除
                                     self.block_index.write().await.remove(&chunk_id);
                                 }
                                 Err(e) => {
@@ -963,17 +922,16 @@ impl StorageManager {
                     if let Err(e) = metadata_db.remove_chunk_ref(&chunk_id) {
                         errors.push(format!("从 Sled 移除块 {} 失败: {}", chunk_id, e));
                     }
-                    self.chunk_ref_count.write().await.remove(&chunk_id);
                     self.block_index.write().await.remove(&chunk_id);
                 }
             }
         }
 
         // 刷新数据库
-        if orphaned_chunks > 0 {
-            if let Err(e) = metadata_db.flush().await {
-                errors.push(format!("刷新数据库失败: {}", e));
-            }
+        if orphaned_chunks > 0
+            && let Err(e) = metadata_db.flush().await
+        {
+            errors.push(format!("刷新数据库失败: {}", e));
         }
 
         info!(
@@ -990,11 +948,10 @@ impl StorageManager {
 
     /// 获取文件信息（不读取内容）
     pub async fn get_file_info(&self, file_id: &str) -> Result<FileIndexEntry> {
-        self.file_index
-            .read()
-            .await
-            .get(file_id)
-            .cloned()
+        let metadata_db = self.get_metadata_db()?;
+        metadata_db
+            .get_file_index(file_id)
+            .map_err(|e| StorageError::Storage(format!("读取文件信息失败: {}", e)))?
             .ok_or_else(|| StorageError::FileNotFound(file_id.to_string()))
     }
 }
@@ -1022,6 +979,231 @@ pub struct StorageStats {
     pub avg_chunk_size: f64,
 }
 
+/// 实现 StorageManagerTrait 以提供标准存储接口
+#[async_trait]
+impl StorageManagerTrait for StorageManager {
+    type Error = StorageError;
+
+    async fn init(&self) -> std::result::Result<(), Self::Error> {
+        StorageManager::init(self).await
+    }
+
+    async fn save_file(
+        &self,
+        file_id: &str,
+        data: &[u8],
+    ) -> std::result::Result<FileMetadata, Self::Error> {
+        // V2 使用增量存储，这里我们保存第一个版本
+        // parent_version_id 为 None 表示创建新文件
+        let (_delta, file_version) = self.save_version(file_id, data, None).await?;
+
+        // 转换为 FileMetadata
+        Ok(FileMetadata {
+            id: file_id.to_string(),
+            name: file_id.to_string(),
+            path: file_id.to_string(),
+            size: data.len() as u64,
+            hash: file_version.version_id.clone(),
+            created_at: file_version.created_at,
+            modified_at: file_version.created_at,
+        })
+    }
+
+    async fn save_at_path(
+        &self,
+        relative_path: &str,
+        data: &[u8],
+    ) -> std::result::Result<FileMetadata, Self::Error> {
+        // 使用路径作为 file_id
+        self.save_file(relative_path, data).await
+    }
+
+    async fn read_file(&self, file_id: &str) -> std::result::Result<Vec<u8>, Self::Error> {
+        // 读取文件的最新版本
+        // 首先获取文件的版本列表
+        let versions = self.list_file_versions(file_id).await?;
+
+        if versions.is_empty() {
+            return Err(StorageError::FileNotFound(format!(
+                "文件不存在: {}",
+                file_id
+            )));
+        }
+
+        // 获取最新版本（list_file_versions 已按时间降序排列）
+        let latest_version = &versions[0];
+
+        // 读取版本数据
+        self.read_version_data(&latest_version.version_id).await
+    }
+
+    async fn delete_file(&self, file_id: &str) -> std::result::Result<(), Self::Error> {
+        // 删除文件及其所有版本
+        StorageManager::delete_file(self, file_id).await
+    }
+
+    async fn file_exists(&self, file_id: &str) -> bool {
+        // 检查文件是否有版本
+        match self.list_file_versions(file_id).await {
+            Ok(versions) => !versions.is_empty(),
+            Err(_) => false,
+        }
+    }
+
+    async fn get_metadata(&self, file_id: &str) -> std::result::Result<FileMetadata, Self::Error> {
+        let versions = self.list_file_versions(file_id).await?;
+
+        if versions.is_empty() {
+            return Err(StorageError::FileNotFound(format!(
+                "文件不存在: {}",
+                file_id
+            )));
+        }
+
+        let latest_version = &versions[0];
+
+        Ok(FileMetadata {
+            id: file_id.to_string(),
+            name: file_id.to_string(),
+            path: file_id.to_string(),
+            size: latest_version.file_size,
+            hash: latest_version.version_id.clone(),
+            created_at: latest_version.created_at,
+            modified_at: latest_version.created_at,
+        })
+    }
+
+    async fn list_files(&self) -> std::result::Result<Vec<FileMetadata>, Self::Error> {
+        // 从文件索引获取所有文件列表
+        let file_ids = StorageManager::list_files(self).await?;
+
+        let mut files = Vec::new();
+        for file_id in file_ids {
+            // 获取文件信息
+            if let Ok(file_info) = self.get_file_info(&file_id).await {
+                // 获取最新版本的详细信息
+                if let Ok(version_info) = self.get_version_info(&file_info.latest_version_id).await
+                {
+                    files.push(FileMetadata {
+                        id: file_id.clone(),
+                        name: file_id,
+                        path: file_info.latest_version_id.clone(),
+                        size: version_info.file_size,
+                        hash: version_info.version_id,
+                        created_at: file_info.created_at,
+                        modified_at: file_info.modified_at,
+                    });
+                }
+            }
+        }
+
+        Ok(files)
+    }
+
+    async fn verify_hash(
+        &self,
+        file_id: &str,
+        expected_hash: &str,
+    ) -> std::result::Result<bool, Self::Error> {
+        let metadata = self.get_metadata(file_id).await?;
+        Ok(metadata.hash == expected_hash)
+    }
+
+    /// 获取存储根目录
+    ///
+    /// 返回用户文件存储的根目录 (data 目录)
+    fn root_dir(&self) -> &Path {
+        &self.data_root
+    }
+
+    fn get_full_path(&self, relative_path: &str) -> std::path::PathBuf {
+        // 移除开头的 / 以确保是相对路径
+        // PathBuf::join() 对绝对路径会直接返回绝对路径，忽略 root
+        let cleaned_path = relative_path.trim_start_matches('/');
+        self.data_root.join(cleaned_path)
+    }
+}
+
+/// 实现 S3CompatibleStorageTrait 以提供 S3 API 支持
+#[async_trait]
+impl S3CompatibleStorageTrait for StorageManager {
+    type Error = StorageError;
+
+    async fn create_bucket(&self, bucket_name: &str) -> std::result::Result<(), Self::Error> {
+        // V2 中 bucket 可以映射为目录
+        let bucket_path = self.root_dir().join(bucket_name);
+        tokio::fs::create_dir_all(&bucket_path).await?;
+        Ok(())
+    }
+
+    async fn delete_bucket(&self, bucket_name: &str) -> std::result::Result<(), Self::Error> {
+        let bucket_path = self.root_dir().join(bucket_name);
+        tokio::fs::remove_dir_all(&bucket_path).await?;
+        Ok(())
+    }
+
+    async fn bucket_exists(&self, bucket_name: &str) -> bool {
+        let bucket_path = self.root_dir().join(bucket_name);
+        bucket_path.exists()
+    }
+
+    async fn list_buckets(&self) -> std::result::Result<Vec<String>, Self::Error> {
+        let mut buckets = Vec::new();
+        let mut entries = tokio::fs::read_dir(self.root_dir()).await?;
+
+        while let Some(entry) = entries.next_entry().await? {
+            if entry.file_type().await?.is_dir()
+                && let Some(name) = entry.file_name().to_str()
+            {
+                buckets.push(name.to_string());
+            }
+        }
+
+        Ok(buckets)
+    }
+
+    async fn list_bucket_objects(
+        &self,
+        bucket_name: &str,
+        prefix: &str,
+    ) -> std::result::Result<Vec<String>, Self::Error> {
+        let bucket_path = self.root_dir().join(bucket_name);
+        let mut objects = Vec::new();
+
+        if !bucket_path.exists() {
+            return Ok(objects);
+        }
+
+        // 递归扫描目录
+        fn collect_files(
+            dir: &std::path::Path,
+            base: &std::path::Path,
+            prefix: &str,
+            objects: &mut Vec<String>,
+        ) -> std::io::Result<()> {
+            for entry in std::fs::read_dir(dir)? {
+                let entry = entry?;
+                let path = entry.path();
+                if path.is_file() {
+                    if let Ok(relative) = path.strip_prefix(base) {
+                        let key = relative.to_string_lossy().to_string();
+                        if key.starts_with(prefix) {
+                            objects.push(key);
+                        }
+                    }
+                } else if path.is_dir() {
+                    collect_files(&path, base, prefix, objects)?;
+                }
+            }
+            Ok(())
+        }
+
+        collect_files(&bucket_path, &bucket_path, prefix, &mut objects)?;
+
+        Ok(objects)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1031,7 +1213,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let config = IncrementalConfig::default();
         let storage = StorageManager::new(temp_dir.path().to_path_buf(), 4 * 1024 * 1024, config);
-        storage.init().await.unwrap();
+        // 注意：不在这里调用 init()，由各个测试自己调用
 
         (storage, temp_dir)
     }
@@ -1214,13 +1396,14 @@ mod tests {
             .await
             .unwrap();
 
-        // 检查引用计数
-        let ref_count = storage.chunk_ref_count.read().await;
-        assert!(!ref_count.is_empty());
+        // 从 Sled 检查引用计数
+        let metadata_db = storage.get_metadata_db().unwrap();
+        let orphaned = metadata_db.list_orphaned_chunks().unwrap();
 
-        // 至少有一些块的引用计数应该大于0
-        let has_refs = ref_count.values().any(|entry| entry.ref_count > 0);
-        assert!(has_refs);
+        // 确保有正常引用的块
+        let total_chunks = metadata_db.chunk_ref_count();
+        assert!(total_chunks > 0);
+        assert!(orphaned.len() < total_chunks); // 不是所有块都是孤立的
     }
 }
 // 性能对比测试：原版存储 vs v0.7.0增量存储
@@ -1229,228 +1412,3 @@ mod tests {
 // ============================================================================
 // Trait 实现
 // ============================================================================
-
-/// 实现 StorageManagerTrait 以提供标准存储接口
-#[async_trait]
-impl StorageManagerTrait for StorageManager {
-    type Error = StorageError;
-
-    async fn init(&self) -> std::result::Result<(), Self::Error> {
-        StorageManager::init(self).await
-    }
-
-    async fn save_file(
-        &self,
-        file_id: &str,
-        data: &[u8],
-    ) -> std::result::Result<FileMetadata, Self::Error> {
-        // V2 使用增量存储，这里我们保存第一个版本
-        // parent_version_id 为 None 表示创建新文件
-        let (_delta, file_version) = self.save_version(file_id, data, None).await?;
-
-        // 转换为 FileMetadata
-        Ok(FileMetadata {
-            id: file_id.to_string(),
-            name: file_id.to_string(),
-            path: file_id.to_string(),
-            size: data.len() as u64,
-            hash: file_version.version_id.clone(),
-            created_at: file_version.created_at,
-            modified_at: file_version.created_at,
-        })
-    }
-
-    async fn save_at_path(
-        &self,
-        relative_path: &str,
-        data: &[u8],
-    ) -> std::result::Result<FileMetadata, Self::Error> {
-        // 使用路径作为 file_id
-        self.save_file(relative_path, data).await
-    }
-
-    async fn read_file(&self, file_id: &str) -> std::result::Result<Vec<u8>, Self::Error> {
-        // 读取文件的最新版本
-        // 首先获取文件的版本列表
-        let versions = self.list_file_versions(file_id).await?;
-
-        if versions.is_empty() {
-            return Err(StorageError::FileNotFound(format!(
-                "文件不存在: {}",
-                file_id
-            )));
-        }
-
-        // 获取最新版本（list_file_versions 已按时间降序排列）
-        let latest_version = &versions[0];
-
-        // 读取版本数据
-        self.read_version_data(&latest_version.version_id).await
-    }
-
-    async fn delete_file(&self, file_id: &str) -> std::result::Result<(), Self::Error> {
-        // 删除文件及其所有版本
-        StorageManager::delete_file(self, file_id).await
-    }
-
-    async fn file_exists(&self, file_id: &str) -> bool {
-        // 检查文件是否有版本
-        match self.list_file_versions(file_id).await {
-            Ok(versions) => !versions.is_empty(),
-            Err(_) => false,
-        }
-    }
-
-    async fn get_metadata(&self, file_id: &str) -> std::result::Result<FileMetadata, Self::Error> {
-        let versions = self.list_file_versions(file_id).await?;
-
-        if versions.is_empty() {
-            return Err(StorageError::FileNotFound(format!(
-                "文件不存在: {}",
-                file_id
-            )));
-        }
-
-        let latest_version = &versions[0];
-
-        Ok(FileMetadata {
-            id: file_id.to_string(),
-            name: file_id.to_string(),
-            path: file_id.to_string(),
-            size: latest_version.file_size,
-            hash: latest_version.version_id.clone(),
-            created_at: latest_version.created_at,
-            modified_at: latest_version.created_at,
-        })
-    }
-
-    async fn list_files(&self) -> std::result::Result<Vec<FileMetadata>, Self::Error> {
-        // 从文件索引获取所有文件列表
-        let file_ids = StorageManager::list_files(self).await?;
-
-        let mut files = Vec::new();
-        for file_id in file_ids {
-            // 获取文件信息
-            if let Ok(file_info) = self.get_file_info(&file_id).await {
-                // 获取最新版本的详细信息
-                if let Ok(version_info) = self.get_version_info(&file_info.latest_version_id).await
-                {
-                    files.push(FileMetadata {
-                        id: file_id.clone(),
-                        name: file_id,
-                        path: file_info.latest_version_id.clone(),
-                        size: version_info.file_size,
-                        hash: version_info.version_id,
-                        created_at: file_info.created_at,
-                        modified_at: file_info.modified_at,
-                    });
-                }
-            }
-        }
-
-        Ok(files)
-    }
-
-    async fn verify_hash(
-        &self,
-        file_id: &str,
-        expected_hash: &str,
-    ) -> std::result::Result<bool, Self::Error> {
-        let metadata = self.get_metadata(file_id).await?;
-        Ok(metadata.hash == expected_hash)
-    }
-
-    /// 获取存储根目录
-    ///
-    /// 返回用户文件存储的根目录 (data 目录)
-    fn root_dir(&self) -> &Path {
-        &self.data_root
-    }
-
-    fn get_full_path(&self, relative_path: &str) -> std::path::PathBuf {
-        // 移除开头的 / 以确保是相对路径
-        // PathBuf::join() 对绝对路径会直接返回绝对路径，忽略 root
-        let cleaned_path = relative_path.trim_start_matches('/');
-        self.data_root.join(cleaned_path)
-    }
-}
-
-/// 实现 S3CompatibleStorageTrait 以提供 S3 API 支持
-#[async_trait]
-impl S3CompatibleStorageTrait for StorageManager {
-    type Error = StorageError;
-
-    async fn create_bucket(&self, bucket_name: &str) -> std::result::Result<(), Self::Error> {
-        // V2 中 bucket 可以映射为目录
-        let bucket_path = self.root_dir().join(bucket_name);
-        tokio::fs::create_dir_all(&bucket_path).await?;
-        Ok(())
-    }
-
-    async fn delete_bucket(&self, bucket_name: &str) -> std::result::Result<(), Self::Error> {
-        let bucket_path = self.root_dir().join(bucket_name);
-        tokio::fs::remove_dir_all(&bucket_path).await?;
-        Ok(())
-    }
-
-    async fn bucket_exists(&self, bucket_name: &str) -> bool {
-        let bucket_path = self.root_dir().join(bucket_name);
-        bucket_path.exists()
-    }
-
-    async fn list_buckets(&self) -> std::result::Result<Vec<String>, Self::Error> {
-        let mut buckets = Vec::new();
-        let mut entries = tokio::fs::read_dir(self.root_dir()).await?;
-
-        while let Some(entry) = entries.next_entry().await? {
-            if entry.file_type().await?.is_dir() {
-                if let Some(name) = entry.file_name().to_str() {
-                    buckets.push(name.to_string());
-                }
-            }
-        }
-
-        Ok(buckets)
-    }
-
-    async fn list_bucket_objects(
-        &self,
-        bucket_name: &str,
-        prefix: &str,
-    ) -> std::result::Result<Vec<String>, Self::Error> {
-        let bucket_path = self.root_dir().join(bucket_name);
-        let mut objects = Vec::new();
-
-        if !bucket_path.exists() {
-            return Ok(objects);
-        }
-
-        // 递归扫描目录
-        fn collect_files(
-            dir: &std::path::Path,
-            base: &std::path::Path,
-            prefix: &str,
-            objects: &mut Vec<String>,
-        ) -> std::io::Result<()> {
-            for entry in std::fs::read_dir(dir)? {
-                let entry = entry?;
-                let path = entry.path();
-                if path.is_file() {
-                    if let Ok(relative) = path.strip_prefix(base) {
-                        let key = relative.to_string_lossy().to_string();
-                        if key.starts_with(prefix) {
-                            objects.push(key);
-                        }
-                    }
-                } else if path.is_dir() {
-                    collect_files(&path, base, prefix, objects)?;
-                }
-            }
-            Ok(())
-        }
-
-        collect_files(&bucket_path, &bucket_path, prefix, &mut objects)?;
-
-        Ok(objects)
-    }
-}

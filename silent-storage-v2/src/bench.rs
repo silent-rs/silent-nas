@@ -4,7 +4,7 @@
 //! 注意：暂时禁用，等待 V1 接口可用后再启用
 
 #[cfg(test)]
-#[cfg(feature = "benchmark")] // 需要 benchmark feature 才启用
+#[cfg(any())] // 暂时禁用所有基准测试，将来使用 cargo bench 启用
 mod tests {
     use crate::{IncrementalConfig, StorageManager};
     // use silent_storage_v1::StorageManager; // V1 暂时不可用

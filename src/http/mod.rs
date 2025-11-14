@@ -12,11 +12,13 @@ mod incremental_sync;
 mod metrics_api;
 mod search;
 mod state;
+mod storage_v2_metrics;
 mod sync;
 mod versions;
 
 pub use auth_middleware::{AuthHook, OptionalAuthHook};
 pub use state::AppState;
+pub use storage_v2_metrics::StorageV2MetricsState;
 
 use crate::error::Result;
 use crate::notify::EventNotifier;
@@ -96,6 +98,9 @@ pub async fn start_http_server(
         .unwrap_or(8080);
     let source_http_addr = Arc::new(format!("http://{}:{}", advertise_host, http_port));
 
+    // 创建 Storage V2 指标状态
+    let storage_v2_metrics = Arc::new(StorageV2MetricsState::new());
+
     // 创建应用状态
     let app_state = AppState {
         notifier: notifier.map(Arc::new),
@@ -106,6 +111,7 @@ pub async fn start_http_server(
         source_http_addr,
         audit_logger,
         auth_manager,
+        storage_v2_metrics: storage_v2_metrics.clone(),
     };
 
     // 定期提交索引
@@ -251,6 +257,22 @@ pub async fn start_http_server(
                     .hook(auth_hook.clone())
                     .get(metrics_api::get_metrics),
             )
+            // Storage V2 指标 - 需要认证
+            .append(
+                Route::new("metrics/storage-v2")
+                    .hook(auth_hook.clone())
+                    .get(storage_v2_metrics::get_storage_v2_metrics),
+            )
+            .append(
+                Route::new("metrics/storage-v2/health")
+                    .hook(auth_hook.clone())
+                    .get(storage_v2_metrics::get_storage_v2_health),
+            )
+            .append(
+                Route::new("metrics/storage-v2/json")
+                    .hook(auth_hook.clone())
+                    .get(storage_v2_metrics::get_storage_v2_metrics_json),
+            )
             // 审计日志 - 需要认证
             .append(
                 Route::new("audit/logs")
@@ -298,6 +320,17 @@ pub async fn start_http_server(
             .append(Route::new("search").get(search::search_files))
             .append(Route::new("search/stats").get(search::get_search_stats))
             .append(Route::new("metrics").get(metrics_api::get_metrics))
+            .append(
+                Route::new("metrics/storage-v2").get(storage_v2_metrics::get_storage_v2_metrics),
+            )
+            .append(
+                Route::new("metrics/storage-v2/health")
+                    .get(storage_v2_metrics::get_storage_v2_health),
+            )
+            .append(
+                Route::new("metrics/storage-v2/json")
+                    .get(storage_v2_metrics::get_storage_v2_metrics_json),
+            )
             .append(Route::new("audit/logs").get(audit_api::get_audit_logs))
             .append(Route::new("audit/stats").get(audit_api::get_audit_stats));
 
@@ -387,6 +420,7 @@ mod tests {
         );
         let inc_sync_handler = Arc::new(IncrementalSyncHandler::new(64 * 1024));
         let source_http_addr = Arc::new("http://localhost:8080".to_string());
+        let storage_v2_metrics = Arc::new(StorageV2MetricsState::new());
 
         let app_state = AppState {
             notifier: None,
@@ -397,6 +431,7 @@ mod tests {
             source_http_addr,
             audit_logger: None,
             auth_manager: None,
+            storage_v2_metrics,
         };
 
         (app_state, temp_dir)

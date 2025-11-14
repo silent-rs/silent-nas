@@ -2,6 +2,7 @@
 
 use crate::audit::AuditLogger;
 use crate::auth::AuthManager;
+use crate::http::StorageV2MetricsState;
 use crate::notify::EventNotifier;
 use crate::search::SearchEngine;
 #[cfg(not(test))]
@@ -29,6 +30,7 @@ pub struct AppState {
     pub source_http_addr: Arc<String>,
     pub audit_logger: Option<Arc<AuditLogger>>,
     pub auth_manager: Option<Arc<AuthManager>>,
+    pub storage_v2_metrics: Arc<StorageV2MetricsState>,
 }
 
 /// 搜索查询参数

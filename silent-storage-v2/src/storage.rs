@@ -139,7 +139,29 @@ impl StorageManager {
     ) -> Result<(FileDelta, FileVersion)> {
         let version_id = format!("v_{}", scru128::new());
 
-        // 生成差异（使用相同的version_id）
+        // 检测文件类型并调整配置
+        let file_type = crate::core::FileType::detect(data);
+        let (min_chunk, max_chunk) = file_type.recommended_chunk_size();
+
+        let mut adjusted_config = self.config.clone();
+        adjusted_config.min_chunk_size = min_chunk;
+        adjusted_config.max_chunk_size = max_chunk;
+
+        // 已压缩文件不需要再压缩
+        if file_type.is_compressed() {
+            adjusted_config.enable_compression = false;
+        }
+
+        info!(
+            "文件 {} 类型: {}, 块大小: {}KB-{}KB, 压缩: {}",
+            file_id,
+            file_type.as_str(),
+            min_chunk / 1024,
+            max_chunk / 1024,
+            adjusted_config.enable_compression
+        );
+
+        // 生成差异（使用调整后的配置）
         let base_data = if let Some(parent_id) = parent_version_id {
             // 只有在有父版本时才读取
             self.read_version_data(parent_id).await?
@@ -147,7 +169,7 @@ impl StorageManager {
             Vec::new()
         };
 
-        let mut generator = crate::core::delta::DeltaGenerator::new(self.config.clone());
+        let mut generator = crate::core::delta::DeltaGenerator::new(adjusted_config);
         let mut delta =
             generator.generate_delta(&base_data, data, file_id, parent_version_id.unwrap_or(""))?;
         // 使用相同的version_id

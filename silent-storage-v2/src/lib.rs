@@ -9,7 +9,7 @@
 //! - 数据生命周期管理
 //! - 跨文件块级去重
 //!
-//! ## 架构设计
+//! ## V0.7.0 架构设计（已完成）
 //!
 //! ```text
 //! silent-storage-v2/
@@ -23,20 +23,31 @@
 //! |   |-- index       # 索引服务
 //! |   |-- tiering     # 分层存储
 //! |   |-- lifecycle   # 生命周期
-//! |-- storage         # 顶层 API
+//! |-- storage         # 顶层 API (StorageManager)
 //! ```
+//!
+//! ## V0.7.1 开发计划
+//!
+//! 基于现有 StorageManager 进行渐进式改进：
+//! - Phase 2: Sled 元信息数据库集成
+//! - Phase 3: 增强 CDC 分块和去重
+//! - Phase 4: 优化压缩和增量存储
+//! - Phase 5: 独立 Prometheus 监控端点
 
 mod error;
 
 pub mod bench;
 pub mod core;
+pub mod metadata;
 pub mod services;
 pub mod storage;
 
 pub use error::{Result, StorageError};
 
 // 重新导出 storage 模块的公共类型
-pub use storage::{FileIndexEntry, GarbageCollectResult, StorageManager, StorageStats};
+pub use storage::{
+    ChunkRefCount, FileIndexEntry, GarbageCollectResult, StorageManager, StorageStats,
+};
 
 // 重新导出核心模块
 pub use core::chunker::*;

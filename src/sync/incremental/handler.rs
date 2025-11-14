@@ -265,18 +265,11 @@ impl IncrementalSyncHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::StorageManager;
-    use std::path::PathBuf;
-    use tempfile::TempDir;
 
     #[tokio::test]
     async fn test_handler_creation() {
-        let temp_dir = TempDir::new().unwrap();
-        let storage = StorageManager::new(PathBuf::from(temp_dir.path()), 64 * 1024);
-        storage.init().await.unwrap();
-
-        // 初始化全局storage
-        let _ = crate::storage::init_global_storage(storage);
+        // 使用共享的测试存储
+        let _storage = crate::storage::init_test_storage_async().await;
 
         let handler = IncrementalSyncHandler::new(64 * 1024);
         assert!(Arc::strong_count(&handler.sync_manager) >= 1);
@@ -284,15 +277,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_calculate_local_signature() {
-        let temp_dir = TempDir::new().unwrap();
-        let storage = StorageManager::new(PathBuf::from(temp_dir.path()), 64 * 1024);
-        storage.init().await.unwrap();
-
-        // 初始化全局storage
-        let _ = crate::storage::init_global_storage(storage.clone());
+        // 使用共享的测试存储
+        let storage = crate::storage::init_test_storage_async().await;
 
         // 创建测试文件
-        let file_id = "test_file";
+        let file_id = "test_calc_sig";
         let data = b"Test content for signature calculation";
         storage.save_file(file_id, data).await.unwrap();
 
@@ -306,15 +295,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_generate_delta_chunks() {
-        let temp_dir = TempDir::new().unwrap();
-        let storage = StorageManager::new(PathBuf::from(temp_dir.path()), 64 * 1024);
-        storage.init().await.unwrap();
-
-        // 初始化全局存储
-        let _ = crate::storage::init_global_storage(storage.clone());
+        // 使用共享的测试存储
+        let storage = crate::storage::init_test_storage_async().await;
 
         // 创建源文件
-        let file_id = "test_file";
+        let file_id = "test_delta";
         let data = b"Source content with modifications";
         storage.save_file(file_id, data).await.unwrap();
 
@@ -340,15 +325,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_generate_delta_chunks_identical() {
-        let temp_dir = TempDir::new().unwrap();
-        let storage = StorageManager::new(PathBuf::from(temp_dir.path()), 64 * 1024);
-        storage.init().await.unwrap();
-
-        // 初始化全局存储
-        let _ = crate::storage::init_global_storage(storage.clone());
+        // 使用共享的测试存储
+        let storage = crate::storage::init_test_storage_async().await;
 
         // 创建文件
-        let file_id = "test_file";
+        let file_id = "test_identical";
         let data = b"Identical content";
         storage.save_file(file_id, data).await.unwrap();
 
@@ -368,31 +349,25 @@ mod tests {
 
     #[tokio::test]
     async fn test_calculate_signature_file_not_found() {
-        let temp_dir = TempDir::new().unwrap();
-        let storage = StorageManager::new(PathBuf::from(temp_dir.path()), 64 * 1024);
-        storage.init().await.unwrap();
-
-        // 初始化全局存储
-        let _ = crate::storage::init_global_storage(storage);
+        // 使用共享的测试存储
+        let _storage = crate::storage::init_test_storage_async().await;
 
         let handler = IncrementalSyncHandler::new(64 * 1024);
 
         // 尝试计算不存在文件的签名
-        let result = handler.calculate_local_signature("nonexistent").await;
+        let result = handler
+            .calculate_local_signature("nonexistent_file_12345")
+            .await;
         assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn test_generate_delta_chunks_large_file() {
-        let temp_dir = TempDir::new().unwrap();
-        let storage = StorageManager::new(PathBuf::from(temp_dir.path()), 64 * 1024);
-        storage.init().await.unwrap();
-
-        // 初始化全局存储
-        let _ = crate::storage::init_global_storage(storage.clone());
+        // 使用共享的测试存储
+        let storage = crate::storage::init_test_storage_async().await;
 
         // 创建一个大文件（超过一个块的大小）
-        let file_id = "large_file";
+        let file_id = "large_file_test";
         let mut data = Vec::new();
         for i in 0..1000 {
             data.extend_from_slice(format!("Line {} with some content\n", i).as_bytes());
@@ -428,15 +403,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_calculate_local_signature_empty_file() {
-        let temp_dir = TempDir::new().unwrap();
-        let storage = StorageManager::new(PathBuf::from(temp_dir.path()), 64 * 1024);
-        storage.init().await.unwrap();
-
-        // 初始化全局存储
-        let _ = crate::storage::init_global_storage(storage.clone());
+        // 使用共享的测试存储
+        let storage = crate::storage::init_test_storage_async().await;
 
         // 创建空文件
-        let file_id = "empty_file";
+        let file_id = "empty_file_test";
         let data = b"";
         storage.save_file(file_id, data).await.unwrap();
 
@@ -451,15 +422,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_handler_with_different_chunk_sizes() {
-        let temp_dir = TempDir::new().unwrap();
-        let storage = StorageManager::new(PathBuf::from(temp_dir.path()), 64 * 1024);
-        storage.init().await.unwrap();
-
-        // 初始化全局存储
-        let _ = crate::storage::init_global_storage(storage.clone());
+        // 使用共享的测试存储
+        let storage = crate::storage::init_test_storage_async().await;
 
         let data = b"Test data for different chunk sizes";
-        let file_id = "test_file";
+        let file_id = "test_chunk_sizes";
         storage.save_file(file_id, data).await.unwrap();
 
         // 测试不同的块大小

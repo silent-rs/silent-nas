@@ -26,27 +26,17 @@ pub async fn handle_get_delta(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::{StorageBackend, StorageManagerTrait, StorageV1, init_global_storage};
-    use std::path::PathBuf;
-    use tempfile::TempDir;
+    use crate::storage::StorageManagerTrait;
 
     #[tokio::test]
     async fn test_handle_get_signature() {
-        let temp_dir = TempDir::new().unwrap();
-        let storage_v1 = StorageV1::new(PathBuf::from(temp_dir.path()), 64 * 1024);
-        storage_v1.init().await.unwrap();
-
-        // 初始化全局存储
-        let storage_backend = StorageBackend::V1(storage_v1);
-        init_global_storage(storage_backend).unwrap();
+        // 使用共享的测试存储
+        let storage = crate::storage::init_test_storage_async().await;
 
         // 创建测试文件
-        let file_id = "test_file";
+        let file_id = "test_sig_api";
         let data = b"Test content for signature";
-        crate::storage::storage()
-            .save_file(file_id, data)
-            .await
-            .unwrap();
+        storage.save_file(file_id, data).await.unwrap();
 
         let handler = IncrementalSyncHandler::new(64 * 1024);
         let signature = handle_get_signature(&handler, file_id).await.unwrap();
@@ -57,21 +47,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_get_delta() {
-        let temp_dir = TempDir::new().unwrap();
-        let storage_v1 = StorageV1::new(PathBuf::from(temp_dir.path()), 64 * 1024);
-        storage_v1.init().await.unwrap();
-
-        // 初始化全局存储
-        let storage_backend = StorageBackend::V1(storage_v1);
-        init_global_storage(storage_backend).unwrap();
+        // 使用共享的测试存储
+        let storage = crate::storage::init_test_storage_async().await;
 
         // 创建测试文件
-        let file_id = "test_file";
+        let file_id = "test_delta_api";
         let data = b"Modified content for delta test";
-        crate::storage::storage()
-            .save_file(file_id, data)
-            .await
-            .unwrap();
+        storage.save_file(file_id, data).await.unwrap();
 
         let handler = IncrementalSyncHandler::new(64 * 1024);
 

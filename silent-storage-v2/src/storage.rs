@@ -3,6 +3,7 @@
 //! 实现版本链式存储和块级存储功能
 
 use crate::error::{Result, StorageError};
+use crate::metadata::SledMetadataDb;
 use crate::{ChunkInfo, FileDelta, IncrementalConfig, VersionInfo};
 use async_trait::async_trait;
 use chrono::Local;
@@ -13,20 +14,20 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
-use tokio::sync::RwLock;
+use tokio::sync::{OnceCell, RwLock};
 use tracing::info;
 
 /// 块引用计数信息
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct ChunkRefCount {
+pub struct ChunkRefCount {
     /// 块ID
-    chunk_id: String,
+    pub chunk_id: String,
     /// 引用计数
-    ref_count: usize,
+    pub ref_count: usize,
     /// 块大小
-    size: u64,
+    pub size: u64,
     /// 存储路径
-    path: PathBuf,
+    pub path: PathBuf,
 }
 
 /// 文件索引信息
@@ -62,13 +63,15 @@ pub struct StorageManager {
     /// 块大小（预留字段，当前使用 IncrementalConfig 中的分块配置）
     #[allow(dead_code)]
     chunk_size: usize,
+    /// Sled 元数据数据库（在 init() 中初始化）
+    metadata_db: Arc<OnceCell<SledMetadataDb>>,
     /// 版本索引缓存（使用内部可变性）
     version_index: Arc<RwLock<HashMap<String, VersionInfo>>>,
     /// 块索引缓存（使用内部可变性）
     block_index: Arc<RwLock<HashMap<String, PathBuf>>>,
-    /// 块引用计数
+    /// 块引用计数（保留作为临时缓存，逐步迁移到 metadata_db）
     chunk_ref_count: Arc<RwLock<HashMap<String, ChunkRefCount>>>,
-    /// 文件索引
+    /// 文件索引（保留作为临时缓存，逐步迁移到 metadata_db）
     file_index: Arc<RwLock<HashMap<String, FileIndexEntry>>>,
 }
 
@@ -86,6 +89,7 @@ impl StorageManager {
             version_root,
             chunk_root,
             chunk_size,
+            metadata_db: Arc::new(OnceCell::new()),
             version_index: Arc::new(RwLock::new(HashMap::new())),
             block_index: Arc::new(RwLock::new(HashMap::new())),
             chunk_ref_count: Arc::new(RwLock::new(HashMap::new())),
@@ -101,6 +105,17 @@ impl StorageManager {
         fs::create_dir_all(&self.version_root).await?;
         fs::create_dir_all(&self.chunk_root).await?;
 
+        // 初始化 Sled 元数据数据库
+        let db_path = self.version_root.join("metadata");
+        let metadata_db = SledMetadataDb::open(&db_path)
+            .map_err(|e| StorageError::Storage(format!("初始化 Sled 数据库失败: {}", e)))?;
+
+        self.metadata_db
+            .set(metadata_db)
+            .map_err(|_| StorageError::Storage("元数据数据库已初始化".to_string()))?;
+
+        info!("Sled 元数据数据库初始化完成: path={:?}", db_path);
+
         // 加载现有索引
         self.load_version_index().await?;
         self.load_block_index().await?;
@@ -112,6 +127,13 @@ impl StorageManager {
             self.root_path, self.data_root, self.version_root
         );
         Ok(())
+    }
+
+    /// 获取元数据数据库引用
+    fn get_metadata_db(&self) -> Result<&SledMetadataDb> {
+        self.metadata_db
+            .get()
+            .ok_or_else(|| StorageError::Storage("元数据数据库未初始化".to_string()))
     }
 
     /// 保存文件版本（使用增量存储）
@@ -138,21 +160,38 @@ impl StorageManager {
         delta.new_version_id = version_id.clone();
 
         // 保存块数据并更新引用计数
+        let metadata_db = self.get_metadata_db()?;
         for chunk in &delta.chunks {
             self.save_chunk(chunk, data).await?;
 
-            // 更新块引用计数
-            let mut ref_count = self.chunk_ref_count.write().await;
-            let entry = ref_count
-                .entry(chunk.chunk_id.clone())
-                .or_insert_with(|| ChunkRefCount {
+            // 检查块是否已存在
+            let chunk_exists = metadata_db
+                .get_chunk_ref(&chunk.chunk_id)
+                .map_err(|e| StorageError::Storage(format!("查询块引用失败: {}", e)))?
+                .is_some();
+
+            if chunk_exists {
+                // 块已存在，使用原子增量操作
+                metadata_db
+                    .increment_chunk_ref(&chunk.chunk_id)
+                    .map_err(|e| StorageError::Storage(format!("增加块引用计数失败: {}", e)))?;
+            } else {
+                // 新块，创建引用计数记录
+                let ref_count = ChunkRefCount {
                     chunk_id: chunk.chunk_id.clone(),
-                    ref_count: 0,
+                    ref_count: 1,
                     size: chunk.size as u64,
                     path: self.get_chunk_path(&chunk.chunk_id),
-                });
-            entry.ref_count += 1;
-            drop(ref_count);
+                };
+                metadata_db
+                    .put_chunk_ref(&chunk.chunk_id, &ref_count)
+                    .map_err(|e| StorageError::Storage(format!("保存块引用信息失败: {}", e)))?;
+
+                // 同时更新内存缓存
+                let mut ref_count_map = self.chunk_ref_count.write().await;
+                ref_count_map.insert(chunk.chunk_id.clone(), ref_count);
+                drop(ref_count_map);
+            }
         }
 
         // 保存差异数据
@@ -165,26 +204,39 @@ impl StorageManager {
 
         // 更新文件索引
         let now = Local::now().naive_local();
-        let mut file_index = self.file_index.write().await;
-        let file_entry = file_index
-            .entry(file_id.to_string())
-            .or_insert_with(|| FileIndexEntry {
+        let metadata_db = self.get_metadata_db()?;
+
+        // 先从 Sled 读取或创建新条目
+        let mut file_entry = metadata_db
+            .get_file_index(file_id)
+            .map_err(|e| StorageError::Storage(format!("读取文件索引失败: {}", e)))?
+            .unwrap_or_else(|| FileIndexEntry {
                 file_id: file_id.to_string(),
                 latest_version_id: version_id.clone(),
                 version_count: 0,
                 created_at: now,
                 modified_at: now,
             });
+
         file_entry.latest_version_id = version_id.clone();
         file_entry.version_count += 1;
         file_entry.modified_at = now;
+
+        // 保存到 Sled
+        metadata_db
+            .put_file_index(file_id, &file_entry)
+            .map_err(|e| StorageError::Storage(format!("保存文件索引失败: {}", e)))?;
+
+        // 同时更新内存缓存
+        let mut file_index = self.file_index.write().await;
+        file_index.insert(file_id.to_string(), file_entry);
         drop(file_index);
 
-        // 定期保存索引（每10个版本保存一次）
+        // 定期刷新数据库（每10个版本刷新一次）
         let version_count = self.version_index.read().await.len();
         if version_count % 10 == 0 {
             let _ = self.save_chunk_ref_count().await;
-            let _ = self.save_file_index().await;
+            let _ = metadata_db.flush().await;
         }
 
         // 创建FileVersion
@@ -241,31 +293,41 @@ impl StorageManager {
 
     /// 获取版本信息
     pub async fn get_version_info(&self, version_id: &str) -> Result<VersionInfo> {
+        // 首先尝试从内存缓存读取
         if let Some(info) = self.version_index.read().await.get(version_id) {
             return Ok(info.clone());
         }
 
-        // 从磁盘读取
-        let version_path = self.get_version_path(version_id);
-        let data = fs::read(&version_path).await.map_err(StorageError::Io)?;
-        let version_info: VersionInfo = serde_json::from_slice(&data)
-            .map_err(|e| StorageError::Storage(format!("反序列化版本信息失败: {}", e)))?;
+        // 从 Sled 读取
+        let metadata_db = self.get_metadata_db()?;
+        if let Some(version_info) = metadata_db
+            .get_version_info(version_id)
+            .map_err(|e| StorageError::Storage(format!("从 Sled 读取版本信息失败: {}", e)))?
+        {
+            // 更新内存缓存
+            self.version_index
+                .write()
+                .await
+                .insert(version_id.to_string(), version_info.clone());
+            return Ok(version_info);
+        }
 
-        Ok(version_info)
+        Err(StorageError::Storage(format!(
+            "版本信息不存在: {}",
+            version_id
+        )))
     }
 
     /// 列出文件的所有版本
     pub async fn list_file_versions(&self, file_id: &str) -> Result<Vec<VersionInfo>> {
-        let mut versions = Vec::new();
-        let index = self.version_index.read().await;
+        let metadata_db = self.get_metadata_db()?;
 
-        for version in index.values() {
-            if version.file_id == file_id {
-                versions.push(version.clone());
-            }
-        }
+        // 从 Sled 获取文件的所有版本
+        let mut versions = metadata_db
+            .list_file_versions(file_id)
+            .map_err(|e| StorageError::Storage(format!("列出文件版本失败: {}", e)))?;
 
-        // 按创建时间排序
+        // 按创建时间排序（最新的在前）
         versions.sort_by(|a, b| b.created_at.cmp(&a.created_at));
 
         Ok(versions)
@@ -366,22 +428,13 @@ impl StorageManager {
             is_current: true,
         };
 
-        // 保存到磁盘
-        let version_path = self.get_version_path(&version_info.version_id);
+        // 保存到 Sled 数据库
+        let metadata_db = self.get_metadata_db()?;
+        metadata_db
+            .put_version_info(&version_info.version_id, &version_info)
+            .map_err(|e| StorageError::Storage(format!("保存版本信息到 Sled 失败: {}", e)))?;
 
-        // 确保父目录存在
-        if let Some(parent) = version_path.parent() {
-            fs::create_dir_all(parent).await.map_err(StorageError::Io)?;
-        }
-
-        let data = serde_json::to_vec(&version_info)
-            .map_err(|e| StorageError::Storage(format!("序列化版本信息失败: {}", e)))?;
-
-        fs::write(&version_path, data)
-            .await
-            .map_err(StorageError::Io)?;
-
-        // 更新索引
+        // 更新内存索引
         self.version_index
             .write()
             .await
@@ -403,34 +456,58 @@ impl StorageManager {
     /// 加载版本索引
     async fn load_version_index(&self) -> Result<()> {
         let versions_dir = self.version_root.join("versions");
+        let metadata_db = self.get_metadata_db()?;
 
-        if !versions_dir.exists() {
-            return Ok(());
-        }
+        // 如果旧的 versions 目录存在，迁移数据到 Sled
+        if versions_dir.exists() {
+            info!("检测到旧的 versions 目录，开始迁移数据到 Sled");
+            let mut entries = fs::read_dir(&versions_dir)
+                .await
+                .map_err(StorageError::Io)?;
 
-        let mut entries = fs::read_dir(&versions_dir)
-            .await
-            .map_err(StorageError::Io)?;
+            let mut migrated_count = 0;
+            while let Some(entry) = entries.next_entry().await? {
+                let path = entry.path();
+                if path.is_file()
+                    && path.extension().and_then(|s| s.to_str()) == Some("json")
+                    && let Some(file_name) = path.file_name().and_then(|s| s.to_str())
+                {
+                    let version_id = file_name.strip_suffix(".json").unwrap_or(file_name);
+                    let data = fs::read(&path).await.map_err(StorageError::Io)?;
+                    let version_info: VersionInfo = serde_json::from_slice(&data)
+                        .map_err(|e| StorageError::Storage(format!("加载版本信息失败: {}", e)))?;
 
-        while let Some(entry) = entries.next_entry().await? {
-            let path = entry.path();
-            if path.is_file()
-                && path.extension().and_then(|s| s.to_str()) == Some("json")
-                && let Some(file_name) = path.file_name().and_then(|s| s.to_str())
-            {
-                let version_id = file_name.strip_suffix(".json").unwrap_or(file_name);
-                let data = fs::read(&path).await.map_err(StorageError::Io)?;
-                let version_info: VersionInfo = serde_json::from_slice(&data)
-                    .map_err(|e| StorageError::Storage(format!("加载版本信息失败: {}", e)))?;
-                self.version_index
-                    .write()
-                    .await
-                    .insert(version_id.to_string(), version_info);
+                    // 迁移到 Sled
+                    metadata_db
+                        .put_version_info(version_id, &version_info)
+                        .map_err(|e| StorageError::Storage(format!("迁移版本信息失败: {}", e)))?;
+
+                    // 更新内存索引
+                    self.version_index
+                        .write()
+                        .await
+                        .insert(version_id.to_string(), version_info);
+
+                    migrated_count += 1;
+                }
             }
+
+            // 刷新到磁盘
+            metadata_db
+                .flush()
+                .await
+                .map_err(|e| StorageError::Storage(format!("刷新数据库失败: {}", e)))?;
+
+            // 备份旧目录
+            let backup_dir = self.version_root.join("versions.backup");
+            fs::rename(&versions_dir, &backup_dir).await?;
+            info!("已将 versions 目录备份到 {:?}", backup_dir);
+            info!("迁移完成，共 {} 个版本信息", migrated_count);
+        } else {
+            // 从 Sled 加载数据（按需加载，不全部加载到内存）
+            info!("使用 Sled 数据库存储版本信息，采用按需加载模式");
         }
 
-        let index_len = self.version_index.read().await.len();
-        info!("加载了 {} 个版本信息", index_len);
         Ok(())
     }
 
@@ -521,38 +598,72 @@ impl StorageManager {
     /// 加载块引用计数
     async fn load_chunk_ref_count(&self) -> Result<()> {
         let ref_count_path = self.chunk_root.join("ref_count.json");
+        let metadata_db = self.get_metadata_db()?;
 
-        if !ref_count_path.exists() {
-            // 如果文件不存在，从现有数据重建引用计数
-            return self.rebuild_chunk_ref_count().await;
+        // 如果旧的 JSON 文件存在，迁移数据到 Sled
+        if ref_count_path.exists() {
+            info!("检测到旧的 ref_count.json，开始迁移数据到 Sled");
+            let data = fs::read(&ref_count_path).await.map_err(StorageError::Io)?;
+            let ref_counts: HashMap<String, ChunkRefCount> = serde_json::from_slice(&data)
+                .map_err(|e| StorageError::Storage(format!("加载块引用计数失败: {}", e)))?;
+
+            // 迁移到 Sled
+            for (chunk_id, ref_count) in ref_counts.iter() {
+                metadata_db
+                    .put_chunk_ref(chunk_id, ref_count)
+                    .map_err(|e| StorageError::Storage(format!("迁移块引用计数失败: {}", e)))?;
+            }
+
+            // 刷新到磁盘
+            metadata_db
+                .flush()
+                .await
+                .map_err(|e| StorageError::Storage(format!("刷新数据库失败: {}", e)))?;
+
+            // 备份旧文件
+            let backup_path = ref_count_path.with_extension("json.backup");
+            fs::rename(&ref_count_path, &backup_path).await?;
+            info!("已将 ref_count.json 备份到 {:?}", backup_path);
+
+            // 加载到内存缓存（保持兼容性）
+            *self.chunk_ref_count.write().await = ref_counts;
+            info!(
+                "迁移完成，共 {} 个块引用计数",
+                self.chunk_ref_count.read().await.len()
+            );
+        } else {
+            // 从 Sled 加载数据（目前不实现完整加载，按需加载）
+            // 块引用计数通常按需使用，不需要全部加载到内存
+            info!("使用 Sled 数据库存储块引用计数，采用按需加载模式");
         }
 
-        let data = fs::read(&ref_count_path).await.map_err(StorageError::Io)?;
-        let ref_counts: HashMap<String, ChunkRefCount> = serde_json::from_slice(&data)
-            .map_err(|e| StorageError::Storage(format!("加载块引用计数失败: {}", e)))?;
-
-        *self.chunk_ref_count.write().await = ref_counts;
-
-        let count = self.chunk_ref_count.read().await.len();
-        info!("加载了 {} 个块引用计数", count);
         Ok(())
     }
 
     /// 保存块引用计数
     async fn save_chunk_ref_count(&self) -> Result<()> {
-        let ref_count_path = self.chunk_root.join("ref_count.json");
+        let metadata_db = self.get_metadata_db()?;
         let ref_counts = self.chunk_ref_count.read().await;
 
-        let data = serde_json::to_vec_pretty(&*ref_counts)
-            .map_err(|e| StorageError::Storage(format!("序列化块引用计数失败: {}", e)))?;
+        // 保存到 Sled（如果内存中有缓存的数据）
+        for (chunk_id, ref_count) in ref_counts.iter() {
+            metadata_db
+                .put_chunk_ref(chunk_id, ref_count)
+                .map_err(|e| StorageError::Storage(format!("保存块引用计数失败: {}", e)))?;
+        }
 
-        fs::write(&ref_count_path, &data)
+        // 异步刷新到磁盘
+        metadata_db
+            .flush()
             .await
-            .map_err(StorageError::Io)?;
+            .map_err(|e| StorageError::Storage(format!("刷新数据库失败: {}", e)))?;
+
         Ok(())
     }
 
     /// 重建块引用计数
+    /// 重建块引用计数（保留以备恢复使用）
+    #[allow(dead_code)]
     async fn rebuild_chunk_ref_count(&self) -> Result<()> {
         info!("开始重建块引用计数...");
         let mut ref_counts: HashMap<String, ChunkRefCount> = HashMap::new();
@@ -594,38 +705,84 @@ impl StorageManager {
     /// 加载文件索引
     async fn load_file_index(&self) -> Result<()> {
         let file_index_path = self.version_root.join("file_index.json");
+        let metadata_db = self.get_metadata_db()?;
 
-        if !file_index_path.exists() {
-            // 如果文件不存在，从现有数据重建文件索引
-            return self.rebuild_file_index().await;
+        // 如果旧的 JSON 文件存在，迁移数据到 Sled
+        if file_index_path.exists() {
+            info!("检测到旧的 file_index.json，开始迁移数据到 Sled");
+            let data = fs::read(&file_index_path).await.map_err(StorageError::Io)?;
+            let file_index: HashMap<String, FileIndexEntry> = serde_json::from_slice(&data)
+                .map_err(|e| StorageError::Storage(format!("加载文件索引失败: {}", e)))?;
+
+            // 迁移到 Sled
+            for (file_id, entry) in file_index.iter() {
+                metadata_db
+                    .put_file_index(file_id, entry)
+                    .map_err(|e| StorageError::Storage(format!("迁移文件索引失败: {}", e)))?;
+            }
+
+            // 刷新到磁盘
+            metadata_db
+                .flush()
+                .await
+                .map_err(|e| StorageError::Storage(format!("刷新数据库失败: {}", e)))?;
+
+            // 备份旧文件
+            let backup_path = file_index_path.with_extension("json.backup");
+            fs::rename(&file_index_path, &backup_path).await?;
+            info!("已将 file_index.json 备份到 {:?}", backup_path);
+
+            // 加载到内存缓存（保持兼容性）
+            *self.file_index.write().await = file_index;
+            info!(
+                "迁移完成，共 {} 个文件索引",
+                self.file_index.read().await.len()
+            );
+        } else {
+            // 从 Sled 加载数据
+            let file_ids = metadata_db
+                .list_file_ids()
+                .map_err(|e| StorageError::Storage(format!("列出文件ID失败: {}", e)))?;
+
+            let mut file_index = HashMap::new();
+            for file_id in file_ids {
+                if let Ok(Some(entry)) = metadata_db.get_file_index(&file_id) {
+                    file_index.insert(file_id, entry);
+                }
+            }
+
+            *self.file_index.write().await = file_index;
+            let count = self.file_index.read().await.len();
+            info!("从 Sled 加载了 {} 个文件索引", count);
         }
 
-        let data = fs::read(&file_index_path).await.map_err(StorageError::Io)?;
-        let file_index: HashMap<String, FileIndexEntry> = serde_json::from_slice(&data)
-            .map_err(|e| StorageError::Storage(format!("加载文件索引失败: {}", e)))?;
-
-        *self.file_index.write().await = file_index;
-
-        let count = self.file_index.read().await.len();
-        info!("加载了 {} 个文件索引", count);
         Ok(())
     }
 
     /// 保存文件索引
     async fn save_file_index(&self) -> Result<()> {
-        let file_index_path = self.version_root.join("file_index.json");
+        let metadata_db = self.get_metadata_db()?;
         let file_index = self.file_index.read().await;
 
-        let data = serde_json::to_vec_pretty(&*file_index)
-            .map_err(|e| StorageError::Storage(format!("序列化文件索引失败: {}", e)))?;
+        // 保存到 Sled
+        for (file_id, entry) in file_index.iter() {
+            metadata_db
+                .put_file_index(file_id, entry)
+                .map_err(|e| StorageError::Storage(format!("保存文件索引失败: {}", e)))?;
+        }
 
-        fs::write(&file_index_path, &data)
+        // 异步刷新到磁盘
+        metadata_db
+            .flush()
             .await
-            .map_err(StorageError::Io)?;
+            .map_err(|e| StorageError::Storage(format!("刷新数据库失败: {}", e)))?;
+
         Ok(())
     }
 
     /// 重建文件索引
+    /// 重建文件索引（保留以备恢复使用）
+    #[allow(dead_code)]
     async fn rebuild_file_index(&self) -> Result<()> {
         info!("开始重建文件索引...");
         let mut file_index: HashMap<String, FileIndexEntry> = HashMap::new();
@@ -708,20 +865,35 @@ impl StorageManager {
                     .map_err(StorageError::Io)?;
             }
 
-            // 从版本索引中移除
+            // 从 Sled 和内存索引中移除版本信息
+            let metadata_db = self.get_metadata_db()?;
+            if let Err(e) = metadata_db.remove_version_info(&version.version_id) {
+                info!("从 Sled 移除版本信息失败: {}", e);
+            }
             self.version_index.write().await.remove(&version.version_id);
         }
 
-        // 3. 递减块引用计数
-        let mut ref_count = self.chunk_ref_count.write().await;
+        // 3. 递减块引用计数（使用 Sled 原子操作）
+        let metadata_db = self.get_metadata_db()?;
         for chunk_id in chunks_to_decrement {
+            // 使用原子递减操作
+            if let Err(e) = metadata_db.decrement_chunk_ref(&chunk_id) {
+                info!("递减块 {} 引用计数失败: {}", chunk_id, e);
+            }
+
+            // 同时更新内存缓存
+            let mut ref_count = self.chunk_ref_count.write().await;
             if let Some(entry) = ref_count.get_mut(&chunk_id) {
                 entry.ref_count = entry.ref_count.saturating_sub(1);
             }
+            drop(ref_count);
         }
-        drop(ref_count);
 
         // 4. 从文件索引中移除
+        let metadata_db = self.get_metadata_db()?;
+        if let Err(e) = metadata_db.remove_file_index(file_id) {
+            info!("从 Sled 移除文件索引失败: {}", e);
+        }
         self.file_index.write().await.remove(file_id);
 
         // 5. 删除文件的 delta 目录
@@ -748,49 +920,60 @@ impl StorageManager {
         let mut reclaimed_space = 0u64;
         let mut errors = Vec::new();
 
-        let mut ref_count = self.chunk_ref_count.write().await;
-        let mut chunks_to_remove = Vec::new();
+        let metadata_db = self.get_metadata_db()?;
 
-        // 找出引用计数为0的块
-        for (chunk_id, entry) in ref_count.iter() {
-            if entry.ref_count == 0 {
-                chunks_to_remove.push((chunk_id.clone(), entry.clone()));
-            }
-        }
+        // 从 Sled 获取所有引用计数为0的块
+        let orphaned_chunk_ids = metadata_db
+            .list_orphaned_chunks()
+            .map_err(|e| StorageError::Storage(format!("列出孤立块失败: {}", e)))?;
 
         // 删除这些块
-        for (chunk_id, entry) in chunks_to_remove {
-            if entry.path.exists() {
-                match fs::metadata(&entry.path).await {
-                    Ok(metadata) => {
-                        reclaimed_space += metadata.len();
-                        match fs::remove_file(&entry.path).await {
-                            Ok(_) => {
-                                orphaned_chunks += 1;
-                                ref_count.remove(&chunk_id);
-                                self.block_index.write().await.remove(&chunk_id);
-                            }
-                            Err(e) => {
-                                errors.push(format!("删除块 {} 失败: {}", chunk_id, e));
+        for chunk_id in orphaned_chunk_ids {
+            // 从 Sled 获取块信息
+            if let Ok(Some(entry)) = metadata_db.get_chunk_ref(&chunk_id) {
+                if entry.path.exists() {
+                    match fs::metadata(&entry.path).await {
+                        Ok(metadata) => {
+                            reclaimed_space += metadata.len();
+                            match fs::remove_file(&entry.path).await {
+                                Ok(_) => {
+                                    orphaned_chunks += 1;
+                                    // 从 Sled 移除
+                                    if let Err(e) = metadata_db.remove_chunk_ref(&chunk_id) {
+                                        errors.push(format!(
+                                            "从 Sled 移除块 {} 失败: {}",
+                                            chunk_id, e
+                                        ));
+                                    }
+                                    // 从内存缓存移除
+                                    self.chunk_ref_count.write().await.remove(&chunk_id);
+                                    self.block_index.write().await.remove(&chunk_id);
+                                }
+                                Err(e) => {
+                                    errors.push(format!("删除块 {} 失败: {}", chunk_id, e));
+                                }
                             }
                         }
+                        Err(e) => {
+                            errors.push(format!("获取块 {} 元数据失败: {}", chunk_id, e));
+                        }
                     }
-                    Err(e) => {
-                        errors.push(format!("获取块 {} 元数据失败: {}", chunk_id, e));
+                } else {
+                    // 块文件不存在，直接从索引中移除
+                    if let Err(e) = metadata_db.remove_chunk_ref(&chunk_id) {
+                        errors.push(format!("从 Sled 移除块 {} 失败: {}", chunk_id, e));
                     }
+                    self.chunk_ref_count.write().await.remove(&chunk_id);
+                    self.block_index.write().await.remove(&chunk_id);
                 }
-            } else {
-                // 块文件不存在，直接从索引中移除
-                ref_count.remove(&chunk_id);
-                self.block_index.write().await.remove(&chunk_id);
             }
         }
 
-        drop(ref_count);
-
-        // 保存更新后的引用计数
+        // 刷新数据库
         if orphaned_chunks > 0 {
-            self.save_chunk_ref_count().await?;
+            if let Err(e) = metadata_db.flush().await {
+                errors.push(format!("刷新数据库失败: {}", e));
+            }
         }
 
         info!(
@@ -844,10 +1027,10 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    async fn create_test_storage() -> (Storage, TempDir) {
+    async fn create_test_storage() -> (StorageManager, TempDir) {
         let temp_dir = TempDir::new().unwrap();
         let config = IncrementalConfig::default();
-        let storage = Storage::new(temp_dir.path().to_path_buf(), 4 * 1024 * 1024, config);
+        let storage = StorageManager::new(temp_dir.path().to_path_buf(), 4 * 1024 * 1024, config);
         storage.init().await.unwrap();
 
         (storage, temp_dir)

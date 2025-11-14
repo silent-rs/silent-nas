@@ -64,6 +64,8 @@
 
 mod global;
 
+#[cfg(test)]
+pub use global::init_test_storage_async;
 pub use global::{init_global_storage, storage};
 
 use crate::config::StorageConfig;
@@ -111,12 +113,16 @@ fn convert_v2_error(err: silent_storage_v2::StorageError) -> StorageError {
     match err {
         V2Error::FileNotFound(msg) => StorageError::FileNotFound(msg),
         V2Error::Storage(msg) => StorageError::Storage(msg),
+        V2Error::Metadata(msg) => StorageError::Storage(format!("元数据错误: {}", msg)),
+        V2Error::Chunk(msg) => StorageError::Storage(format!("Chunk错误: {}", msg)),
         V2Error::Dedup(msg) => StorageError::Storage(format!("去重错误: {}", msg)),
         V2Error::Compression(msg) => StorageError::Storage(format!("压缩错误: {}", msg)),
         V2Error::Index(msg) => StorageError::Storage(format!("索引错误: {}", msg)),
         V2Error::Tiering(msg) => StorageError::Storage(format!("分层存储错误: {}", msg)),
         V2Error::Lifecycle(msg) => StorageError::Storage(format!("生命周期管理错误: {}", msg)),
         V2Error::Delta(msg) => StorageError::Storage(format!("Delta生成错误: {}", msg)),
+        V2Error::Config(msg) => StorageError::Storage(format!("配置错误: {}", msg)),
+        V2Error::Database(msg) => StorageError::Storage(format!("数据库错误: {}", msg)),
         V2Error::Io(e) => StorageError::Io(e),
         V2Error::Serialization(e) => StorageError::Storage(format!("序列化错误: {}", e)),
     }

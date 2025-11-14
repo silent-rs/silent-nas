@@ -1,10 +1,13 @@
 //! 性能基准测试
 //! 对比原版存储与v0.7.0增量存储的性能
+//!
+//! 注意：暂时禁用，等待 V1 接口可用后再启用
 
 #[cfg(test)]
+#[cfg(feature = "benchmark")] // 需要 benchmark feature 才启用
 mod tests {
-    use crate::{IncrementalConfig, Storage};
-    use silent_storage_v1::StorageManager;
+    use crate::{IncrementalConfig, StorageManager};
+    // use silent_storage_v1::StorageManager; // V1 暂时不可用
     use std::sync::Arc;
     use tempfile::TempDir;
 

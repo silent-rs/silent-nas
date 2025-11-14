@@ -9,6 +9,12 @@ pub enum StorageError {
     #[error("存储错误: {0}")]
     Storage(String),
 
+    #[error("元数据错误: {0}")]
+    Metadata(String),
+
+    #[error("Chunk错误: {0}")]
+    Chunk(String),
+
     #[error("去重错误: {0}")]
     Dedup(String),
 
@@ -26,6 +32,12 @@ pub enum StorageError {
 
     #[error("Delta生成错误: {0}")]
     Delta(String),
+
+    #[error("配置错误: {0}")]
+    Config(String),
+
+    #[error("数据库错误: {0}")]
+    Database(String),
 
     #[error("IO错误: {0}")]
     Io(#[from] std::io::Error),

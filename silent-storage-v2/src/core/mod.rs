@@ -7,11 +7,13 @@
 //! - 存储引擎（组合上述功能）
 
 pub mod chunker;
+pub mod circular_buffer;
 pub mod compression;
 pub mod delta;
 pub mod engine;
 
 pub use chunker::*;
+pub use circular_buffer::*;
 pub use compression::*;
 pub use delta::*;
 pub use engine::*;

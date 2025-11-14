@@ -153,24 +153,34 @@ impl StorageManager {
         // 使用相同的version_id
         delta.new_version_id = version_id.clone();
 
-        // 保存块数据并更新引用计数
+        // 初始化去重统计
+        let mut dedup_stats = crate::DeduplicationStats {
+            total_chunks: delta.chunks.len(),
+            original_size: data.len() as u64,
+            ..Default::default()
+        };
+
+        // 保存块数据并更新引用计数（带去重）
         let metadata_db = self.get_metadata_db()?;
         for chunk in &delta.chunks {
-            self.save_chunk(chunk, data).await?;
-
-            // 检查块是否已存在
+            // 先检查块是否已存在
             let chunk_exists = metadata_db
                 .get_chunk_ref(&chunk.chunk_id)
                 .map_err(|e| StorageError::Storage(format!("查询块引用失败: {}", e)))?
                 .is_some();
 
             if chunk_exists {
-                // 块已存在，使用原子增量操作
+                // 块已存在，跳过写入，只增加引用计数
                 metadata_db
                     .increment_chunk_ref(&chunk.chunk_id)
                     .map_err(|e| StorageError::Storage(format!("增加块引用计数失败: {}", e)))?;
+
+                // 更新去重统计
+                dedup_stats.duplicate_chunks += 1;
             } else {
-                // 新块，创建引用计数记录
+                // 新块，写入磁盘并创建引用计数记录
+                self.save_chunk(chunk, data).await?;
+
                 let ref_count = ChunkRefCount {
                     chunk_id: chunk.chunk_id.clone(),
                     ref_count: 1,
@@ -180,7 +190,28 @@ impl StorageManager {
                 metadata_db
                     .put_chunk_ref(&chunk.chunk_id, &ref_count)
                     .map_err(|e| StorageError::Storage(format!("保存块引用信息失败: {}", e)))?;
+
+                // 更新去重统计
+                dedup_stats.new_chunks += 1;
+                dedup_stats.stored_size += chunk.size as u64;
             }
+        }
+
+        // 计算去重率
+        dedup_stats.calculate_dedup_ratio();
+
+        // 记录去重统计（如果去重率大于 0）
+        if dedup_stats.dedup_ratio > 0.0 {
+            info!(
+                "版本 {} 去重统计: 总块数={}, 新块={}, 重复块={}, 原始大小={}B, 存储大小={}B, 去重率={:.2}%",
+                version_id,
+                dedup_stats.total_chunks,
+                dedup_stats.new_chunks,
+                dedup_stats.duplicate_chunks,
+                dedup_stats.original_size,
+                dedup_stats.stored_size,
+                dedup_stats.dedup_ratio
+            );
         }
 
         // 保存差异数据
@@ -362,6 +393,44 @@ impl StorageManager {
                 0.0
             },
         })
+    }
+
+    /// 获取全局去重统计
+    pub async fn get_deduplication_stats(&self) -> Result<crate::DeduplicationStats> {
+        let metadata_db = self.get_metadata_db()?;
+
+        // 统计所有块
+        let all_chunks = metadata_db
+            .list_all_chunks()
+            .map_err(|e| StorageError::Storage(format!("获取块列表失败: {}", e)))?;
+
+        let mut total_original_size = 0u64;
+        let mut total_stored_size = 0u64;
+        let mut total_ref_count = 0usize;
+
+        for (_chunk_id, ref_count_info) in &all_chunks {
+            // 原始大小 = 块大小 × 引用次数
+            total_original_size += ref_count_info.size * ref_count_info.ref_count as u64;
+            // 存储大小 = 块大小（只存储一次）
+            total_stored_size += ref_count_info.size;
+            total_ref_count += ref_count_info.ref_count;
+        }
+
+        let unique_chunks = all_chunks.len();
+        let duplicate_chunks = total_ref_count.saturating_sub(unique_chunks);
+
+        let mut stats = crate::DeduplicationStats {
+            total_chunks: total_ref_count,
+            new_chunks: unique_chunks,
+            duplicate_chunks,
+            original_size: total_original_size,
+            stored_size: total_stored_size,
+            space_saved: 0,
+            dedup_ratio: 0.0,
+        };
+
+        stats.calculate_dedup_ratio();
+        Ok(stats)
     }
 
     /// 保存块数据
@@ -1378,6 +1447,118 @@ mod tests {
         assert_eq!(file_info.file_id, "test_file");
         assert_eq!(file_info.version_count, 1);
         assert!(!file_info.latest_version_id.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_deduplication() {
+        let (storage, _temp) = create_test_storage().await;
+        storage.init().await.unwrap();
+
+        // 创建包含重复内容的数据
+        let data1 = b"Hello World! ".repeat(100); // 1300 bytes
+        let data2 = b"Hello World! ".repeat(100); // 相同内容
+
+        // 保存第一个文件
+        let (_delta1, _version1) = storage
+            .save_version("file1", &data1, None)
+            .await
+            .unwrap();
+
+        // 保存第二个文件（相同内容，应触发去重）
+        let (_delta2, _version2) = storage
+            .save_version("file2", &data2, None)
+            .await
+            .unwrap();
+
+        // 获取去重统计
+        let dedup_stats = storage.get_deduplication_stats().await.unwrap();
+
+        // 验证去重效果
+        assert!(dedup_stats.total_chunks > 0, "应该有块数据");
+        assert!(
+            dedup_stats.duplicate_chunks > 0,
+            "应该有重复块（file2 与 file1 内容相同）"
+        );
+        assert!(
+            dedup_stats.dedup_ratio > 0.0,
+            "去重率应该大于 0: {}%",
+            dedup_stats.dedup_ratio
+        );
+        assert!(
+            dedup_stats.space_saved > 0,
+            "应该节省了存储空间: {} bytes",
+            dedup_stats.space_saved
+        );
+
+        // 验证原始大小应该是两份数据
+        let expected_original_size = (data1.len() + data2.len()) as u64;
+        assert!(
+            dedup_stats.original_size >= expected_original_size,
+            "原始大小应该至少等于两份数据大小"
+        );
+
+        // 验证存储大小应该小于原始大小
+        assert!(
+            dedup_stats.stored_size < dedup_stats.original_size,
+            "存储大小应该小于原始大小（由于去重）"
+        );
+
+        println!("去重统计: {:?}", dedup_stats);
+    }
+
+    #[tokio::test]
+    async fn test_cross_file_deduplication() {
+        let (storage, _temp) = create_test_storage().await;
+        storage.init().await.unwrap();
+
+        // 策略：创建两个完全相同的文件，应该100%去重
+        let data = b"This is test data for deduplication. ".repeat(300); // ~11KB
+
+        println!("数据大小: {}B", data.len());
+
+        // 保存第一个文件
+        storage
+            .save_version("file1", &data, None)
+            .await
+            .unwrap();
+
+        // 保存第二个文件（完全相同的数据）
+        storage
+            .save_version("file2", &data, None)
+            .await
+            .unwrap();
+
+        // 获取去重统计
+        let dedup_stats = storage.get_deduplication_stats().await.unwrap();
+
+        println!("跨文件去重统计: {:?}", dedup_stats);
+        println!(
+            "总块数: {}, 唯一块: {}, 重复块: {}",
+            dedup_stats.total_chunks, dedup_stats.new_chunks, dedup_stats.duplicate_chunks
+        );
+        println!(
+            "原始大小: {}B, 存储大小: {}B, 节省: {}B ({:.2}%)",
+            dedup_stats.original_size,
+            dedup_stats.stored_size,
+            dedup_stats.space_saved,
+            dedup_stats.dedup_ratio
+        );
+
+        // 验证跨文件去重效果
+        // 两个完全相同的文件，总块数应该是唯一块数的2倍
+        assert_eq!(
+            dedup_stats.total_chunks, dedup_stats.new_chunks * 2,
+            "两个相同文件，总块数应该是唯一块数的2倍"
+        );
+        assert_eq!(
+            dedup_stats.duplicate_chunks, dedup_stats.new_chunks,
+            "重复块数应该等于唯一块数（因为文件完全相同）"
+        );
+        assert!(
+            dedup_stats.dedup_ratio >= 45.0,
+            "去重率应该接近 50%（两个相同文件）: {:.2}%",
+            dedup_stats.dedup_ratio
+        );
     }
 
     #[tokio::test]

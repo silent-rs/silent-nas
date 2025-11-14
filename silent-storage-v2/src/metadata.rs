@@ -272,6 +272,33 @@ impl SledMetadataDb {
         self.chunk_ref_tree.len()
     }
 
+    /// 列出所有块及其引用计数信息
+    pub fn list_all_chunks(&self) -> Result<Vec<(String, ChunkRefCount)>> {
+        let mut chunks = Vec::new();
+
+        for item in self.chunk_ref_tree.iter() {
+            let (key, value) =
+                item.map_err(|e| StorageError::Database(format!("遍历块引用计数失败: {}", e)))?;
+
+            let chunk_id = String::from_utf8_lossy(&key).to_string();
+            let ref_count: ChunkRefCount =
+                serde_json::from_slice(&value).map_err(StorageError::Serialization)?;
+
+            chunks.push((chunk_id, ref_count));
+        }
+
+        Ok(chunks)
+    }
+
+    /// 获取指定块的引用计数
+    pub fn get_chunk_ref_count(&self, chunk_id: &str) -> Result<usize> {
+        if let Some(ref_count) = self.get_chunk_ref(chunk_id)? {
+            Ok(ref_count.ref_count)
+        } else {
+            Ok(0)
+        }
+    }
+
     // ========== 通用辅助方法 ==========
 
     /// 从树中获取并反序列化值

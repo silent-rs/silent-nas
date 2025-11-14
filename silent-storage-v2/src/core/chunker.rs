@@ -5,6 +5,7 @@
 //! - 弱哈希 + 强哈希双校验
 //! - 边界检测
 
+use crate::core::circular_buffer::CircularBuffer;
 use crate::error::Result;
 use crate::{ChunkInfo, IncrementalConfig};
 use sha2::{Digest, Sha256};
@@ -13,12 +14,12 @@ use sha2::{Digest, Sha256};
 pub struct RabinKarpChunker {
     config: IncrementalConfig,
     /// 当前弱哈希值
-    weak_hash: u32,
-    /// 滑动窗口
-    window: Vec<u8>,
+    weak_hash: u64,
+    /// 滑动窗口（使用环形缓冲区）
+    window: CircularBuffer,
     /// 窗口大小（通常为48字节）
     window_size: usize,
-    /// 窗口中字节的幂次和
+    /// 窗口中字节的幂次和 (base^(window_size-1))
     hash_power: u64,
 }
 
@@ -30,46 +31,44 @@ impl RabinKarpChunker {
         Self {
             config,
             weak_hash: 0,
-            window: Vec::with_capacity(window_size),
+            window: CircularBuffer::new(window_size),
             window_size,
             hash_power,
         }
     }
 
     /// 计算块的边界检查
-    fn is_chunk_boundary(&self, weak_hash: u32, bytes_processed: usize) -> bool {
+    fn is_chunk_boundary(&self, weak_hash: u64, bytes_processed: usize) -> bool {
         // 弱哈希值满足边界条件且已达到最小分块大小
         (weak_hash as usize).is_multiple_of(self.config.weak_hash_mod)
             && bytes_processed >= self.config.min_chunk_size
     }
 
-    /// 滚动计算哈希值
-    fn roll_hash(&self, outgoing: u8, incoming: u8, old_hash: u32) -> u32 {
-        // (old_hash - outgoing * base^window_size-1) * base + incoming
-        let _outgoing_u64 = outgoing as u64;
-        let incoming_u64 = incoming as u64;
+    /// 滚动计算哈希值（优化版本）
+    ///
+    /// 公式: hash = (hash - outgoing * base^(k-1)) * base + incoming
+    fn roll_hash(&self, outgoing: u8, incoming: u8, old_hash: u64) -> u64 {
+        let base = self.config.rabin_poly;
 
-        // 使用u128防止溢出，先加一个大的模数避免负数
-        const MODULO: u128 = u32::MAX as u128;
-        let base_power = self.config.rabin_poly as u128 * self.hash_power as u128 % MODULO;
+        // 移除最旧字节的贡献
+        let remove_contrib = (outgoing as u64).wrapping_mul(self.hash_power);
 
-        let new_hash_u128 = ((old_hash as u128 + MODULO - base_power)
-            * self.config.rabin_poly as u128
-            + incoming_u64 as u128)
-            % MODULO;
-
-        new_hash_u128 as u32
+        // 计算新哈希: (old_hash - remove_contrib) * base + incoming
+        old_hash
+            .wrapping_sub(remove_contrib)
+            .wrapping_mul(base)
+            .wrapping_add(incoming as u64)
     }
 
-    /// 计算弱哈希
-    fn calculate_weak_hash(&self, data: &[u8]) -> u32 {
+    /// 计算弱哈希（初始化用）
+    fn calculate_weak_hash(&self, data: &[u8]) -> u64 {
         let mut hash: u64 = 0;
         for &byte in data {
             hash = hash
                 .wrapping_mul(self.config.rabin_poly)
                 .wrapping_add(byte as u64);
         }
-        (hash % u32::MAX as u64) as u32
+        hash
     }
 
     /// 计算强哈希（SHA-256）
@@ -82,81 +81,88 @@ impl RabinKarpChunker {
     /// 生成分块
     pub fn chunk_data(&mut self, data: &[u8]) -> Result<Vec<ChunkInfo>> {
         let mut chunks = Vec::new();
-        let mut offset = 0usize;
+        let mut chunk_start = 0usize;
         let mut bytes_processed = 0;
 
         // 初始化：填充窗口
         self.window.clear();
         let init_size = std::cmp::min(self.window_size, data.len());
-        self.window.extend_from_slice(&data[..init_size]);
+        self.window.from_slice(&data[..init_size]);
 
         if !self.window.is_empty() {
-            self.weak_hash = self.calculate_weak_hash(&self.window);
+            let window_data = self.window.as_slice();
+            self.weak_hash = self.calculate_weak_hash(&window_data);
             bytes_processed = init_size;
         }
 
         let mut i = init_size;
         while i < data.len() {
-            // 检查是否满足分块边界
-            if self.is_chunk_boundary(self.weak_hash, bytes_processed) {
-                // 生成分块
-                let chunk_data = &data[offset..i];
+            // 检查是否达到最大块大小
+            let current_chunk_size = i - chunk_start;
+            if current_chunk_size >= self.config.max_chunk_size {
+                // 强制分块
+                let chunk_data = &data[chunk_start..i];
                 let chunk = ChunkInfo {
                     chunk_id: self.calculate_strong_hash(chunk_data),
-                    offset,
+                    offset: chunk_start,
                     size: chunk_data.len(),
-                    weak_hash: self.weak_hash,
+                    weak_hash: self.weak_hash as u32,
                     strong_hash: self.calculate_strong_hash(chunk_data),
                 };
                 chunks.push(chunk);
 
-                // 更新状态
-                offset = i;
+                chunk_start = i;
                 bytes_processed = 0;
 
-                // 重新初始化窗口
-                self.window.clear();
-                let new_window_size = std::cmp::min(self.window_size, data.len() - i);
-                self.window.extend_from_slice(&data[i..i + new_window_size]);
-
-                if !self.window.is_empty() {
-                    self.weak_hash = self.calculate_weak_hash(&self.window);
-                    bytes_processed = new_window_size;
-                } else {
-                    self.weak_hash = 0;
-                }
-
-                i += new_window_size;
-            } else {
-                // 滑动窗口：移除最旧字节，添加新字节
-                if self.window.len() == self.window_size {
-                    let _outgoing = self.window[0];
-                    self.window.remove(0);
-                }
-
-                self.window.push(data[i]);
-
-                if self.window.len() == self.window_size {
-                    self.weak_hash = self.roll_hash(self.window[0], data[i], self.weak_hash);
-                }
-
-                bytes_processed += 1;
-                i += 1;
+                // 窗口继续滚动，不需要重新初始化
             }
+
+            // 检查是否满足分块边界
+            if bytes_processed >= self.config.min_chunk_size
+                && self.is_chunk_boundary(self.weak_hash, bytes_processed)
+            {
+                // 生成分块
+                let chunk_data = &data[chunk_start..i];
+                let chunk = ChunkInfo {
+                    chunk_id: self.calculate_strong_hash(chunk_data),
+                    offset: chunk_start,
+                    size: chunk_data.len(),
+                    weak_hash: self.weak_hash as u32,
+                    strong_hash: self.calculate_strong_hash(chunk_data),
+                };
+                chunks.push(chunk);
+
+                chunk_start = i;
+                bytes_processed = 0;
+            }
+
+            // 滑动窗口：移除最旧字节，添加新字节
+            if self.window.is_full() {
+                let outgoing = self.window.oldest().unwrap_or(0);
+                self.window.push(data[i]);
+                self.weak_hash = self.roll_hash(outgoing, data[i], self.weak_hash);
+            } else {
+                self.window.push(data[i]);
+                let window_data = self.window.as_slice();
+                self.weak_hash = self.calculate_weak_hash(&window_data);
+            }
+
+            bytes_processed += 1;
+            i += 1;
         }
 
         // 处理最后一个块
-        if offset < data.len() {
-            let remaining_data = &data[offset..];
+        if chunk_start < data.len() {
+            let remaining_data = &data[chunk_start..];
             if !remaining_data.is_empty() {
                 let chunk = ChunkInfo {
                     chunk_id: self.calculate_strong_hash(remaining_data),
-                    offset,
+                    offset: chunk_start,
                     size: remaining_data.len(),
                     weak_hash: if self.window.is_empty() {
-                        self.calculate_weak_hash(remaining_data)
+                        self.calculate_weak_hash(remaining_data) as u32
                     } else {
-                        self.weak_hash
+                        self.weak_hash as u32
                     },
                     strong_hash: self.calculate_strong_hash(remaining_data),
                 };

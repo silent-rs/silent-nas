@@ -161,3 +161,32 @@ pub struct VersionInfo {
     /// 是否为当前版本
     pub is_current: bool,
 }
+
+/// 去重统计信息
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DeduplicationStats {
+    /// 总块数
+    pub total_chunks: usize,
+    /// 新增块数（实际写入磁盘）
+    pub new_chunks: usize,
+    /// 重复块数（已存在，跳过写入）
+    pub duplicate_chunks: usize,
+    /// 原始数据大小（字节）
+    pub original_size: u64,
+    /// 实际存储大小（字节）
+    pub stored_size: u64,
+    /// 节省空间（字节）
+    pub space_saved: u64,
+    /// 去重率（百分比，0-100）
+    pub dedup_ratio: f64,
+}
+
+impl DeduplicationStats {
+    /// 计算去重率
+    pub fn calculate_dedup_ratio(&mut self) {
+        if self.original_size > 0 {
+            self.space_saved = self.original_size.saturating_sub(self.stored_size);
+            self.dedup_ratio = (self.space_saved as f64 / self.original_size as f64) * 100.0;
+        }
+    }
+}

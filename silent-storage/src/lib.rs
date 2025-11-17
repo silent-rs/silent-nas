@@ -1,4 +1,4 @@
-//! # Silent Storage V2
+//! # Silent Storage
 //!
 //! 高性能、可靠的增量存储系统，基于内容定义分块（CDC）和块级去重技术。
 //!

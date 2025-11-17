@@ -1,6 +1,6 @@
 use thiserror::Error;
 
-/// Storage V2 错误类型
+/// Storage 错误类型
 #[derive(Error, Debug)]
 pub enum StorageError {
     #[error("文件未找到: {0}")]

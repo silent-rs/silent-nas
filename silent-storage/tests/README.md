@@ -1,6 +1,6 @@
-# Storage V2 集成测试
+# Storage 集成测试
 
-本目录包含 Silent-NAS Storage V2 的集成测试，用于验证文件存储系统的完整功能。
+本目录包含 Silent-NAS Storage 的集成测试，用于验证文件存储系统的完整功能。
 
 ## 测试覆盖
 
@@ -64,7 +64,7 @@
 
 ### 运行所有集成测试
 ```bash
-cd silent-storage-v2
+cd silent-storage
 cargo test --test storage_integration_test
 ```
 

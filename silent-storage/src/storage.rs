@@ -47,7 +47,7 @@ pub struct FileIndexEntry {
     pub modified_at: chrono::NaiveDateTime,
 }
 
-/// V2 存储管理器
+/// 存储管理器
 ///
 /// 基于增量存储、块级去重和版本管理的高级存储系统
 #[derive(Clone)]
@@ -58,7 +58,7 @@ pub struct StorageManager {
     data_root: PathBuf,
     /// 配置
     config: IncrementalConfig,
-    /// 版本根目录 (root_path/v2/incremental)
+    /// 版本根目录 (root_path/incremental)
     version_root: PathBuf,
     /// 块存储根目录
     chunk_root: PathBuf,
@@ -84,8 +84,7 @@ pub struct StorageManager {
 impl StorageManager {
     pub fn new(root_path: PathBuf, chunk_size: usize, config: IncrementalConfig) -> Self {
         let data_root = root_path.join("data");
-        let v2_root = root_path.join("v2");
-        let version_root = v2_root.join("incremental");
+        let version_root = root_path.join("incremental");
         let chunk_root = version_root.join("chunks");
         let wal_path = version_root.join("wal.log");
 
@@ -1261,7 +1260,7 @@ impl StorageManagerTrait for StorageManager {
         file_id: &str,
         data: &[u8],
     ) -> std::result::Result<FileMetadata, Self::Error> {
-        // V2 使用增量存储，这里我们保存第一个版本
+        // 使用增量存储，这里我们保存第一个版本
         // parent_version_id 为 None 表示创建新文件
         let (_delta, file_version) = self.save_version(file_id, data, None).await?;
 
@@ -1399,7 +1398,7 @@ impl S3CompatibleStorageTrait for StorageManager {
     type Error = StorageError;
 
     async fn create_bucket(&self, bucket_name: &str) -> std::result::Result<(), Self::Error> {
-        // V2 中 bucket 可以映射为目录
+        // bucket 可以映射为目录
         let bucket_path = self.root_dir().join(bucket_name);
         tokio::fs::create_dir_all(&bucket_path).await?;
         Ok(())

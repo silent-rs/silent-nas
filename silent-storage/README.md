@@ -1,4 +1,4 @@
-# Silent Storage V2
+# Silent Storage
 
 高性能、可靠的增量存储系统，基于内容定义分块（CDC）和块级去重技术。
 
@@ -30,7 +30,7 @@
 ## 架构设计
 
 ```text
-silent-storage-v2/
+silent-storage/
 ├── core/              # 核心存储引擎
 │   ├── chunker        # 内容定义分块（CDC）
 │   ├── compression    # 压缩算法（LZ4/Zstd）
@@ -58,13 +58,13 @@ silent-storage-v2/
 
 ```toml
 [dependencies]
-silent-storage-v2 = { path = "../silent-storage-v2" }
+silent-storage = { path = "../silent-storage" }
 ```
 
 ### 基本使用
 
 ```rust
-use silent_storage_v2::{StorageManager, IncrementalConfig};
+use silent_storage::{StorageManager, IncrementalConfig};
 use std::path::PathBuf;
 
 #[tokio::main]
@@ -173,7 +173,7 @@ println!("文件元信息缓存: {}/{} ({:.2}%)",
 ### IncrementalConfig
 
 ```rust
-use silent_storage_v2::IncrementalConfig;
+use silent_storage::IncrementalConfig;
 
 let config = IncrementalConfig {
     // 分块配置
@@ -183,7 +183,7 @@ let config = IncrementalConfig {
 
     // 压缩配置
     enable_compression: true,       // 启用压缩
-    compression_algorithm: silent_storage_v2::CompressionAlgorithm::Lz4,
+    compression_algorithm: silent_storage::CompressionAlgorithm::Lz4,
     compression_level: 0,           // 压缩等级
 
     // 去重配置
@@ -198,7 +198,7 @@ let config = IncrementalConfig {
 ### 缓存配置
 
 ```rust
-use silent_storage_v2::{CacheManager, CacheConfig};
+use silent_storage::{CacheManager, CacheConfig};
 use std::time::Duration;
 
 let cache_config = CacheConfig {
@@ -250,31 +250,31 @@ let cache = CacheManager::new(cache_config);
 
 ### Prometheus 指标
 
-暴露在 `/metrics/storage-v2` 端点：
+暴露在 `/metrics/storage` 端点：
 
 ```text
 # 存储指标
-storage_v2_total_space_bytes
-storage_v2_used_space_bytes
-storage_v2_chunk_count
+storage_total_space_bytes
+storage_used_space_bytes
+storage_chunk_count
 
 # 去重指标
-storage_v2_dedup_ratio
-storage_v2_dedup_space_saved_bytes
+storage_dedup_ratio
+storage_dedup_space_saved_bytes
 
 # 压缩指标
-storage_v2_compression_ratio
-storage_v2_compression_space_saved_bytes
+storage_compression_ratio
+storage_compression_space_saved_bytes
 
 # 性能指标
-storage_v2_read_latency_seconds
-storage_v2_write_latency_seconds
-storage_v2_throughput_bytes_per_second
+storage_read_latency_seconds
+storage_write_latency_seconds
+storage_throughput_bytes_per_second
 
 # 操作计数
-storage_v2_operations_total{operation="create"}
-storage_v2_operations_total{operation="read"}
-storage_v2_operations_total{operation="delete"}
+storage_operations_total{operation="create"}
+storage_operations_total{operation="read"}
+storage_operations_total{operation="delete"}
 ```
 
 ### 健康检查
@@ -334,7 +334,7 @@ println!("清理了 {} 个孤立块，回收 {} bytes",
 ### 自定义文件类型检测
 
 ```rust
-use silent_storage_v2::FileType;
+use silent_storage::FileType;
 
 let data = &[0x1f, 0x8b, 0x08]; // GZIP 魔数
 let file_type = FileType::detect(data);
@@ -350,7 +350,7 @@ println!("推荐块大小: {}-{} bytes", min_chunk, max_chunk);
 ### 版本链合并
 
 ```rust
-use silent_storage_v2::VersionChainManager;
+use silent_storage::VersionChainManager;
 
 let manager = VersionChainManager::default();
 

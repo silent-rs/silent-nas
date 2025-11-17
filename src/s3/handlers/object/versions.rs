@@ -71,15 +71,31 @@ impl S3Service {
 
             // 获取该文件的所有版本
             let versions = self
-                .version_manager
-                .list_versions(&file_id)
+                .storage
+                .list_file_versions(&file_id)
                 .await
                 .unwrap_or_default();
 
             // 如果有版本记录，添加到结果中
             if !versions.is_empty() {
-                for version in versions {
-                    version_entries.push((key.clone(), version));
+                // 获取文件元数据以获取 name 和 hash
+                if let Ok(metadata) = self.storage.get_metadata(&file_id).await {
+                    for version in versions {
+                        version_entries.push((
+                            key.clone(),
+                            crate::models::FileVersion {
+                                version_id: version.version_id,
+                                file_id: version.file_id,
+                                name: key.clone(),
+                                size: version.file_size,
+                                hash: metadata.hash.clone(), // 使用当前文件的 hash
+                                created_at: version.created_at,
+                                is_current: version.is_current,
+                                author: None,
+                                comment: None,
+                            },
+                        ));
+                    }
                 }
             } else {
                 // 如果没有版本记录，尝试从存储中获取当前文件信息

@@ -23,7 +23,7 @@ pub use storage_v2_metrics::StorageV2MetricsState;
 use crate::error::Result;
 use crate::notify::EventNotifier;
 use crate::search::SearchEngine;
-use crate::version::VersionManager;
+use crate::storage::StorageManager;
 use silent::Server;
 use silent::prelude::*;
 use std::sync::Arc;
@@ -46,7 +46,7 @@ pub async fn start_http_server(
     addr: &str,
     notifier: Option<EventNotifier>,
     sync_manager: Arc<SyncManager>,
-    version_manager: Arc<VersionManager>,
+    storage: Arc<StorageManager>,
     search_engine: Arc<SearchEngine>,
     config: crate::config::Config,
 ) -> Result<()> {
@@ -103,9 +103,9 @@ pub async fn start_http_server(
 
     // 创建应用状态
     let app_state = AppState {
+        storage,
         notifier: notifier.map(Arc::new),
         sync_manager,
-        version_manager,
         search_engine: search_engine.clone(),
         inc_sync_handler,
         source_http_addr,
@@ -382,7 +382,6 @@ mod tests {
     use super::*;
     use crate::storage::StorageManager;
     use crate::sync::crdt::SyncManager;
-    use crate::version::VersionManager;
     use silent::extractor::Configs as CfgExtractor;
     use tempfile::TempDir;
 
@@ -406,12 +405,6 @@ mod tests {
         let storage_arc = Arc::new(storage);
 
         let sync_manager = SyncManager::new("test-node".to_string(), None);
-        let version_config = crate::version::VersionConfig::default();
-        let version_manager = VersionManager::new(
-            storage_arc.clone(),
-            version_config,
-            temp_dir.path().to_str().unwrap(),
-        );
         let search_engine = Arc::new(
             SearchEngine::new(
                 temp_dir.path().join("search_index"),
@@ -424,9 +417,9 @@ mod tests {
         let storage_v2_metrics = Arc::new(StorageV2MetricsState::new());
 
         let app_state = AppState {
+            storage: storage_arc,
             notifier: None,
             sync_manager,
-            version_manager,
             search_engine,
             inc_sync_handler,
             source_http_addr,

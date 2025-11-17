@@ -199,11 +199,6 @@ mod tests {
         let _ = crate::storage::init_global_storage(storage.clone());
         storage.init().await.unwrap();
         let syncm = crate::sync::crdt::SyncManager::new("node-test".to_string(), None);
-        let ver = crate::version::VersionManager::new(
-            std::sync::Arc::new(storage.clone()),
-            Default::default(),
-            dir.path().to_str().unwrap(),
-        );
         let search_engine = Arc::new(
             crate::search::SearchEngine::new(
                 dir.path().join("search_index"),
@@ -216,7 +211,6 @@ mod tests {
             syncm,
             "".into(),
             "http://127.0.0.1:8080".into(),
-            ver,
             search_engine,
         )
     }

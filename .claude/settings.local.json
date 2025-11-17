@@ -15,7 +15,8 @@
       "Bash(timeout:*)",
       "Bash(tee:*)",
       "Bash(cat:*)",
-      "Bash(find:*)"
+      "Bash(find:*)",
+      "Bash(xxd:*)"
     ],
     "deny": [],
     "ask": []

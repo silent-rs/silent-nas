@@ -14,7 +14,6 @@ mod search;
 mod storage;
 mod sync;
 mod transfer;
-mod version;
 mod webdav;
 
 use config::Config;
@@ -32,7 +31,6 @@ use sync::crdt::SyncManager;
 use tonic::transport::Server as TonicServer;
 use tracing::{Level, error, info};
 use tracing_subscriber as logger;
-use version::{VersionConfig, VersionManager};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -69,16 +67,6 @@ async fn main() -> Result<()> {
     let node_id = scru128::new_string();
     let sync_manager = SyncManager::new(node_id.clone(), notifier.clone().map(Arc::new));
     info!("同步管理器已初始化: node_id={}", node_id);
-
-    // 初始化版本管理器
-    let version_config = VersionConfig::default();
-    let version_manager = VersionManager::new(
-        Arc::new(storage.clone()),
-        version_config,
-        &config.storage.root_path.to_string_lossy(),
-    );
-    version_manager.init().await?;
-    info!("版本管理器已初始化");
 
     // 初始化搜索引擎
     let index_path = std::path::PathBuf::from(&config.storage.root_path).join("index");
@@ -137,7 +125,7 @@ async fn main() -> Result<()> {
     let http_addr_clone = http_addr.clone();
     let notifier_clone = notifier.clone();
     let sync_clone = sync_manager.clone();
-    let version_clone = version_manager.clone();
+    let storage_http = Arc::new(storage.clone());
     let search_clone = search_engine.clone();
     let config_clone = config.clone();
     // source_http_addr 已用于 HTTP/WebDAV/S3 三处，不再单独复制
@@ -147,7 +135,7 @@ async fn main() -> Result<()> {
             &http_addr_clone,
             notifier_clone,
             sync_clone,
-            version_clone,
+            storage_http,
             search_clone,
             config_clone,
         )
@@ -266,7 +254,6 @@ async fn main() -> Result<()> {
     let webdav_addr_clone = webdav_addr.clone();
     let notifier_webdav = notifier.clone();
     let sync_webdav = sync_manager.clone();
-    let version_webdav = version_manager.clone();
     let source_http_for_webdav = source_http_addr.clone();
 
     let webdav_handle = tokio::spawn(async move {
@@ -275,7 +262,6 @@ async fn main() -> Result<()> {
             notifier_webdav,
             sync_webdav,
             source_http_for_webdav,
-            version_webdav,
             search_engine.clone(),
         )
         .await
@@ -297,7 +283,6 @@ async fn main() -> Result<()> {
     let s3_config = config.s3.clone();
     let source_http_addr_for_s3 = source_http_addr.clone();
     let s3_versioning_clone = s3_versioning_manager.clone();
-    let version_s3 = version_manager.clone();
 
     let s3_handle = tokio::spawn(async move {
         if let Err(e) = start_s3_server(
@@ -307,7 +292,6 @@ async fn main() -> Result<()> {
             s3_config,
             source_http_addr_for_s3,
             s3_versioning_clone,
-            version_s3,
         )
         .await
         {
@@ -509,7 +493,6 @@ async fn start_webdav_server(
     notifier: Option<EventNotifier>,
     sync_manager: Arc<SyncManager>,
     source_http_addr: String,
-    version_manager: Arc<VersionManager>,
     search_engine: Arc<search::SearchEngine>,
 ) -> Result<()> {
     let notifier = notifier.map(Arc::new);
@@ -518,7 +501,6 @@ async fn start_webdav_server(
         notifier,
         sync_manager,
         source_http_addr,
-        version_manager,
         search_engine.clone(),
     );
 
@@ -542,7 +524,6 @@ async fn start_s3_server(
     s3_config: config::S3Config,
     source_http_addr: String,
     versioning_manager: Arc<s3::VersioningManager>,
-    version_manager: Arc<VersionManager>,
 ) -> Result<()> {
     let notifier = notifier.map(Arc::new);
 
@@ -559,7 +540,6 @@ async fn start_s3_server(
         auth,
         source_http_addr.clone(),
         versioning_manager,
-        version_manager,
     );
 
     info!("S3 服务器启动: {}", addr);

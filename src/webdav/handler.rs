@@ -37,8 +37,6 @@ pub struct WebDavHandler {
     pub sync_manager: Arc<SyncManager>,
     pub base_path: String,
     pub source_http_addr: String,
-    #[allow(dead_code)]
-    pub version_manager: Arc<crate::version::VersionManager>,
     pub search_engine: Arc<SearchEngine>,
     pub(super) locks: Arc<tokio::sync::RwLock<std::collections::HashMap<String, Vec<DavLock>>>>,
     pub(super) props: Arc<
@@ -54,7 +52,6 @@ impl WebDavHandler {
         sync_manager: Arc<SyncManager>,
         base_path: String,
         source_http_addr: String,
-        version_manager: Arc<crate::version::VersionManager>,
         search_engine: Arc<SearchEngine>,
     ) -> Self {
         let handler = Self {
@@ -63,7 +60,6 @@ impl WebDavHandler {
             sync_manager,
             base_path,
             source_http_addr,
-            version_manager,
             search_engine,
             locks: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
             props: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
@@ -892,11 +888,6 @@ mod tests {
         let _ = crate::storage::init_global_storage(storage.clone());
         storage.init().await.unwrap();
         let syncm = SyncManager::new("node-test".to_string(), None);
-        let ver = crate::version::VersionManager::new(
-            std::sync::Arc::new(storage.clone()),
-            Default::default(),
-            dir.path().to_str().unwrap(),
-        );
         let search_engine = Arc::new(
             crate::search::SearchEngine::new(
                 dir.path().join("search_index"),
@@ -909,7 +900,6 @@ mod tests {
             syncm,
             "".into(),
             "http://127.0.0.1:8080".into(),
-            ver,
             search_engine,
         );
         assert_eq!(handler.build_full_href("/"), "/");

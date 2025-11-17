@@ -49,8 +49,8 @@ pub async fn health_status(
     // 搜索引擎状态
     let search_stats = state.search_engine.get_stats();
 
-    // 版本管理状态
-    let version_stats = state.version_manager.get_stats().await;
+    // 存储统计信息
+    let storage_stats = state.storage.get_storage_stats().await.ok();
 
     // 同步状态
     let sync_states = state.sync_manager.get_all_sync_states().await;
@@ -68,10 +68,15 @@ pub async fn health_status(
             "index_size": search_stats.index_size,
             "available": true
         },
-        "version": {
-            "total_versions": version_stats.total_versions,
-            "available": true
-        },
+        "storage_stats": storage_stats.as_ref().map(|s| serde_json::json!({
+            "total_versions": s.total_versions,
+            "total_chunks": s.total_chunks,
+            "unique_chunks": s.unique_chunks,
+            "total_size": s.total_size,
+            "total_chunk_size": s.total_chunk_size,
+            "compression_ratio": s.compression_ratio,
+            "avg_chunk_size": s.avg_chunk_size,
+        })).unwrap_or_else(|| serde_json::json!({"available": false})),
         "sync": {
             "states": serde_json::to_value(&sync_states).unwrap_or_default(),
             "available": true

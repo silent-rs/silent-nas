@@ -12,7 +12,6 @@ pub mod s3_search;
 pub mod search;
 pub mod storage; // 导出 storage 模块以支持 V2 测试
 pub mod unified_search;
-pub mod version;
 
 // Re-export core types and storage
 pub use silent_nas_core as models;

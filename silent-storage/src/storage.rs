@@ -405,6 +405,68 @@ impl StorageManager {
         Ok(versions)
     }
 
+    /// 删除特定文件版本
+    pub async fn delete_file_version(&self, version_id: &str) -> Result<()> {
+        let version_info = self.get_version_info(version_id).await?;
+
+        // 不允许删除当前版本
+        if version_info.is_current {
+            return Err(StorageError::Storage("无法删除当前版本".to_string()));
+        }
+
+        // 读取delta以获取块信息
+        let delta = self.read_delta(&version_info.file_id, version_id).await?;
+
+        // 减少每个块的引用计数
+        let metadata_db = self.get_metadata_db()?;
+        for chunk in &delta.chunks {
+            metadata_db
+                .decrement_chunk_ref(&chunk.chunk_id)
+                .map_err(|e| StorageError::Storage(format!("减少块引用计数失败: {}", e)))?;
+        }
+
+        // 删除delta文件
+        let delta_path = self.get_delta_path(&version_info.file_id, version_id);
+        if delta_path.exists() {
+            fs::remove_file(&delta_path).await?;
+        }
+
+        // 从数据库中删除版本信息
+        metadata_db
+            .remove_version_info(version_id)
+            .map_err(|e| StorageError::Storage(format!("删除版本信息失败: {}", e)))?;
+
+        // 从内存索引中删除
+        self.version_index.write().await.remove(version_id);
+
+        info!("删除版本: {}", version_id);
+        Ok(())
+    }
+
+    /// 恢复文件到指定版本
+    pub async fn restore_file_version(&self, file_id: &str, version_id: &str) -> Result<()> {
+        // 获取版本信息
+        let version_info = self.get_version_info(version_id).await?;
+
+        if version_info.file_id != file_id {
+            return Err(StorageError::Storage("版本与文件不匹配".to_string()));
+        }
+
+        // 读取版本数据
+        let version_data = self.read_version_data(version_id).await?;
+
+        // 获取当前版本（如果有）作为父版本
+        let current_versions = self.list_file_versions(file_id).await?;
+        let parent_version_id = current_versions.first().map(|v| v.version_id.as_str());
+
+        // 保存为新版本（基于恢复的内容）
+        self.save_version(file_id, &version_data, parent_version_id)
+            .await?;
+
+        info!("恢复文件到版本: {} -> {}", file_id, version_id);
+        Ok(())
+    }
+
     /// 获取存储统计信息
     pub async fn get_storage_stats(&self) -> Result<StorageStats> {
         let mut total_versions = 0;

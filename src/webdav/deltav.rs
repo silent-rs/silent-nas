@@ -407,9 +407,8 @@ impl WebDavHandler {
             .find(|m| m.path == path)
             .map(|m| m.id.clone())
             .unwrap_or_else(|| path.trim_start_matches('/').to_string());
-        let versions = self
-            .version_manager
-            .list_versions(&file_id)
+        let versions = crate::storage::storage()
+            .list_file_versions(&file_id)
             .await
             .map_err(|e| {
                 SilentError::business_error(

@@ -35,7 +35,6 @@ pub fn create_webdav_routes(
     notifier: Option<Arc<crate::notify::EventNotifier>>,
     sync_manager: Arc<crate::sync::crdt::SyncManager>,
     source_http_addr: String,
-    version_manager: Arc<crate::version::VersionManager>,
     search_engine: Arc<crate::search::SearchEngine>,
 ) -> Route {
     let handler = Arc::new(WebDavHandler::new(
@@ -43,7 +42,6 @@ pub fn create_webdav_routes(
         sync_manager,
         "".to_string(),
         source_http_addr,
-        version_manager,
         search_engine,
     ));
     let root_route = register_webdav_methods(Route::new(""), handler.clone());

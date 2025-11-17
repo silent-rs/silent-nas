@@ -1061,16 +1061,7 @@ impl WebDavHandler {
             })?;
 
         let file_id = metadata.id.clone();
-        if let Err(e) = self
-            .version_manager
-            .create_version(
-                &file_id,
-                crate::models::FileVersion::from_metadata(&metadata, Some("webdav".to_string())),
-            )
-            .await
-        {
-            tracing::debug!("创建版本失败(可忽略): {}", e);
-        }
+        // 版本已由 StorageManager 自动创建，无需手动创建
 
         // 发布事件
         let event_type = if file_exists {
@@ -1410,11 +1401,6 @@ mod tests {
         let dir = storage.root_dir();
 
         let syncm = crate::sync::crdt::SyncManager::new("node-test".to_string(), None);
-        let ver = crate::version::VersionManager::new(
-            std::sync::Arc::new(storage.clone()),
-            Default::default(),
-            dir.to_str().unwrap(),
-        );
         let search_engine = Arc::new(
             crate::search::SearchEngine::new(dir.join("search_index"), dir.to_path_buf()).unwrap(),
         );
@@ -1423,7 +1409,6 @@ mod tests {
             syncm,
             "".into(),
             "http://127.0.0.1:8080".into(),
-            ver,
             search_engine,
         )
     }

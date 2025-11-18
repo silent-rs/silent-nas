@@ -169,12 +169,15 @@ pub struct ChunkInfo {
     pub chunk_id: String,
     /// 块在文件中的偏移量
     pub offset: usize,
-    /// 块大小
+    /// 块大小（原始大小）
     pub size: usize,
     /// 弱哈希值
     pub weak_hash: u32,
     /// 强哈希值（SHA-256）
     pub strong_hash: String,
+    /// 压缩算法（用于读取时解压）
+    #[serde(default)]
+    pub compression: crate::core::compression::CompressionAlgorithm,
 }
 
 /// 文件差异信息

@@ -79,6 +79,8 @@ pub struct StorageManager {
     chunk_verifier: Arc<ChunkVerifier>,
     /// 孤儿 Chunk 清理器（Phase 5 Step 4）
     orphan_cleaner: Arc<OrphanChunkCleaner>,
+    /// 压缩器
+    compressor: Arc<crate::core::compression::Compressor>,
 }
 
 impl StorageManager {
@@ -87,6 +89,29 @@ impl StorageManager {
         let version_root = root_path.join("incremental");
         let chunk_root = version_root.join("chunks");
         let wal_path = version_root.join("wal.log");
+
+        // 从 IncrementalConfig 创建压缩配置
+        let compression_algorithm = match config.compression_algorithm.as_str() {
+            "lz4" => crate::core::compression::CompressionAlgorithm::LZ4,
+            "zstd" => crate::core::compression::CompressionAlgorithm::Zstd,
+            _ => crate::core::compression::CompressionAlgorithm::None,
+        };
+
+        let compression_config = crate::core::compression::CompressionConfig {
+            algorithm: if config.enable_compression {
+                compression_algorithm
+            } else {
+                crate::core::compression::CompressionAlgorithm::None
+            },
+            level: 1,       // 快速压缩
+            min_size: 1024, // 1KB 以上才压缩
+            auto_compress_days: 7,
+            min_ratio: 1.1, // 压缩比至少 10%
+        };
+
+        let compressor = Arc::new(crate::core::compression::Compressor::new(
+            compression_config,
+        ));
 
         Self {
             root_path,
@@ -102,6 +127,7 @@ impl StorageManager {
             wal_manager: Arc::new(RwLock::new(WalManager::new(wal_path))),
             chunk_verifier: Arc::new(ChunkVerifier::new(chunk_root.clone())),
             orphan_cleaner: Arc::new(OrphanChunkCleaner::new(chunk_root)),
+            compressor,
         }
     }
 
@@ -207,15 +233,19 @@ impl StorageManager {
         };
 
         // 保存块数据并更新引用计数（带去重）
+        // 同时更新 chunks 的压缩信息
         let metadata_db = self.get_metadata_db()?;
+        let mut updated_chunks = Vec::new();
+
         for chunk in &delta.chunks {
             // 先检查块是否已存在
-            let chunk_exists = metadata_db
+            let chunk_ref = metadata_db
                 .get_chunk_ref(&chunk.chunk_id)
-                .map_err(|e| StorageError::Storage(format!("查询块引用失败: {}", e)))?
-                .is_some();
+                .map_err(|e| StorageError::Storage(format!("查询块引用失败: {}", e)))?;
 
-            if chunk_exists {
+            let mut chunk_with_compression = chunk.clone();
+
+            if let Some(_ref_count) = chunk_ref {
                 // 块已存在，跳过写入，只增加引用计数
                 metadata_db
                     .increment_chunk_ref(&chunk.chunk_id)
@@ -223,9 +253,16 @@ impl StorageManager {
 
                 // 更新去重统计
                 dedup_stats.duplicate_chunks += 1;
+
+                // 对于已存在的块，从元数据读取压缩算法（如果有的话）
+                // 这里我们假设已存在的块使用相同的压缩设置
+                // TODO: 从元数据中读取实际的压缩算法
             } else {
                 // 新块，写入磁盘并创建引用计数记录
-                self.save_chunk(chunk, data).await?;
+                let compression_algo = self.save_chunk(chunk, data).await?;
+
+                // 更新 chunk 的压缩信息
+                chunk_with_compression.compression = compression_algo;
 
                 let ref_count = ChunkRefCount {
                     chunk_id: chunk.chunk_id.clone(),
@@ -241,7 +278,12 @@ impl StorageManager {
                 dedup_stats.new_chunks += 1;
                 dedup_stats.stored_size += chunk.size as u64;
             }
+
+            updated_chunks.push(chunk_with_compression);
         }
+
+        // 用包含压缩信息的 chunks 替换原来的
+        delta.chunks = updated_chunks;
 
         // 计算去重率
         dedup_stats.calculate_dedup_ratio();
@@ -344,7 +386,7 @@ impl StorageManager {
 
             // 读取并应用分块
             for chunk in &delta.chunks {
-                let chunk_data = self.read_chunk(&chunk.chunk_id).await?;
+                let chunk_data = self.read_chunk(&chunk.chunk_id, chunk.compression).await?;
                 // 扩展到正确的偏移量
                 if result.len() < chunk.offset {
                     result.resize(chunk.offset, 0);
@@ -552,8 +594,12 @@ impl StorageManager {
         Ok(stats)
     }
 
-    /// 保存块数据
-    async fn save_chunk(&self, chunk: &ChunkInfo, file_data: &[u8]) -> Result<()> {
+    /// 保存块数据，返回使用的压缩算法
+    async fn save_chunk(
+        &self,
+        chunk: &ChunkInfo,
+        file_data: &[u8],
+    ) -> Result<crate::core::compression::CompressionAlgorithm> {
         let chunk_data = &file_data[chunk.offset..chunk.offset + chunk.size];
         let chunk_path = self.get_chunk_path(&chunk.chunk_id);
 
@@ -562,9 +608,14 @@ impl StorageManager {
             fs::create_dir_all(parent).await?;
         }
 
-        // 写入块数据
+        // 应用压缩（如果启用）
+        let compression_result = self.compressor.compress(chunk_data)?;
+        let data_to_write = &compression_result.compressed_data;
+        let algorithm = compression_result.algorithm;
+
+        // 写入块数据（可能已压缩）
         let mut file = fs::File::create(&chunk_path).await?;
-        file.write_all(chunk_data).await?;
+        file.write_all(data_to_write).await?;
         file.flush().await?;
 
         // 更新块索引
@@ -573,13 +624,24 @@ impl StorageManager {
             .await
             .insert(chunk.chunk_id.clone(), chunk_path);
 
-        Ok(())
+        Ok(algorithm)
     }
 
     /// 读取块数据
-    async fn read_chunk(&self, chunk_id: &str) -> Result<Vec<u8>> {
+    async fn read_chunk(
+        &self,
+        chunk_id: &str,
+        compression: crate::core::compression::CompressionAlgorithm,
+    ) -> Result<Vec<u8>> {
         let chunk_path = self.get_chunk_path(chunk_id);
-        fs::read(&chunk_path).await.map_err(StorageError::Io)
+        let data = fs::read(&chunk_path).await.map_err(StorageError::Io)?;
+
+        // 如果数据被压缩，解压缩
+        if compression != crate::core::compression::CompressionAlgorithm::None {
+            self.compressor.decompress(&data, compression)
+        } else {
+            Ok(data)
+        }
     }
 
     /// 保存版本信息

@@ -536,6 +536,7 @@ mod tests {
                 size: 1024,
                 weak_hash: 0,
                 strong_hash: "hash1".to_string(),
+                compression: crate::core::compression::CompressionAlgorithm::None,
             },
             crate::ChunkInfo {
                 chunk_id: "chunk2".to_string(),
@@ -543,6 +544,7 @@ mod tests {
                 size: 2048,
                 weak_hash: 0,
                 strong_hash: "hash2".to_string(),
+                compression: crate::core::compression::CompressionAlgorithm::None,
             },
         ];
 
@@ -570,6 +572,7 @@ mod tests {
             size: 1024,
             weak_hash: 0,
             strong_hash: "hash1".to_string(),
+            compression: crate::core::compression::CompressionAlgorithm::None,
         }];
 
         // 第一次处理
@@ -600,6 +603,7 @@ mod tests {
             size: 1024,
             weak_hash: 0,
             strong_hash: "hash1".to_string(),
+            compression: crate::core::compression::CompressionAlgorithm::None,
         }];
 
         manager.process_file("file1", &chunks).await.unwrap();
@@ -625,6 +629,7 @@ mod tests {
             size: 1024,
             weak_hash: 0,
             strong_hash: "hash1".to_string(),
+            compression: crate::core::compression::CompressionAlgorithm::None,
         }];
 
         // 创建重复文件
@@ -652,6 +657,7 @@ mod tests {
             size: 1024,
             weak_hash: 0,
             strong_hash: "hash1".to_string(),
+            compression: crate::core::compression::CompressionAlgorithm::None,
         }];
 
         manager.process_file("file1", &chunks).await.unwrap();

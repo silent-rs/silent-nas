@@ -132,9 +132,16 @@ mod tests {
     #[tokio::test]
     async fn test_global_storage() {
         use silent_nas_core::StorageManagerTrait;
+        use tempfile::TempDir;
 
-        // 使用共享测试存储
-        let storage = init_test_storage_async().await;
+        // 创建独立的测试存储，避免全局状态竞态条件
+        let temp_dir = TempDir::new().unwrap();
+        let storage = StorageManager::new(
+            temp_dir.path().to_path_buf(),
+            64 * 1024,
+            IncrementalConfig::default(),
+        );
+        storage.init().await.unwrap();
 
         // 测试基本操作
         let test_data = b"global storage test";

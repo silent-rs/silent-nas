@@ -879,21 +879,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_build_full_href_rules() {
-        let dir = tempfile::tempdir().unwrap();
-        let storage = crate::storage::StorageManager::new(
-            dir.path().to_path_buf(),
-            4 * 1024 * 1024,
-            crate::storage::IncrementalConfig::default(),
-        );
-        let _ = crate::storage::init_global_storage(storage.clone());
-        storage.init().await.unwrap();
+        // 使用共享的测试存储
+        let storage = crate::storage::init_test_storage_async().await;
+        let dir = storage.root_dir();
+
         let syncm = SyncManager::new("node-test".to_string(), None);
         let search_engine = Arc::new(
-            crate::search::SearchEngine::new(
-                dir.path().join("search_index"),
-                dir.path().to_path_buf(),
-            )
-            .unwrap(),
+            crate::search::SearchEngine::new(dir.join("search_index"), dir.to_path_buf()).unwrap(),
         );
         let handler = WebDavHandler::new(
             None,

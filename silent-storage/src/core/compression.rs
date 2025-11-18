@@ -62,6 +62,9 @@ pub struct CompressionResult {
     pub duration_ms: u64,
     /// 使用的算法
     pub algorithm: CompressionAlgorithm,
+    /// 压缩后的数据
+    #[serde(skip)]
+    pub compressed_data: Vec<u8>,
 }
 
 /// 压缩器
@@ -86,6 +89,7 @@ impl Compressor {
                 ratio: 1.0,
                 duration_ms: 0,
                 algorithm: CompressionAlgorithm::None,
+                compressed_data: data.to_vec(),
             });
         }
 
@@ -117,6 +121,7 @@ impl Compressor {
                 ratio: 1.0,
                 duration_ms: 0,
                 algorithm: CompressionAlgorithm::None,
+                compressed_data: data.to_vec(),
             });
         }
 
@@ -126,6 +131,7 @@ impl Compressor {
             ratio,
             duration_ms: duration.as_millis() as u64,
             algorithm,
+            compressed_data,
         })
     }
 
@@ -148,14 +154,15 @@ impl Compressor {
 
 /// LZ4压缩
 fn compress_lz4(data: &[u8], _level: u32) -> Result<Vec<u8>> {
-    // 使用lz4_flex库进行压缩
-    let compressed = lz4_flex::block::compress(data);
+    // 使用lz4_flex库进行压缩，使用 size-prepended 格式
+    let compressed = lz4_flex::block::compress_prepend_size(data);
     Ok(compressed)
 }
 
 /// LZ4解压缩
 fn decompress_lz4(data: &[u8]) -> Result<Vec<u8>> {
-    let decompressed = lz4_flex::block::decompress(data, 0)
+    // 使用 size-prepended 格式解压，自动读取原始大小
+    let decompressed = lz4_flex::block::decompress_size_prepended(data)
         .map_err(|e| StorageError::Storage(format!("LZ4解压缩失败: {}", e)))?;
     Ok(decompressed)
 }
@@ -287,7 +294,9 @@ mod tests {
         assert!(result.original_size >= result.compressed_size);
         assert!(result.ratio >= 1.0);
 
-        let decompressed = compressor.decompress(data, result.algorithm).unwrap();
+        let decompressed = compressor
+            .decompress(&result.compressed_data, result.algorithm)
+            .unwrap();
         assert_eq!(decompressed, data);
     }
 
@@ -321,6 +330,7 @@ mod tests {
             ratio: 2.0,
             duration_ms: 10,
             algorithm: CompressionAlgorithm::LZ4,
+            compressed_data: vec![0u8; 500],
         };
         stats.update(&result);
 

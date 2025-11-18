@@ -108,6 +108,7 @@ impl RabinKarpChunker {
                     size: chunk_data.len(),
                     weak_hash: self.weak_hash as u32,
                     strong_hash: self.calculate_strong_hash(chunk_data),
+                    compression: crate::core::compression::CompressionAlgorithm::None,
                 };
                 chunks.push(chunk);
 
@@ -129,6 +130,7 @@ impl RabinKarpChunker {
                     size: chunk_data.len(),
                     weak_hash: self.weak_hash as u32,
                     strong_hash: self.calculate_strong_hash(chunk_data),
+                    compression: crate::core::compression::CompressionAlgorithm::None,
                 };
                 chunks.push(chunk);
 
@@ -165,6 +167,7 @@ impl RabinKarpChunker {
                         self.weak_hash as u32
                     },
                     strong_hash: self.calculate_strong_hash(remaining_data),
+                    compression: crate::core::compression::CompressionAlgorithm::None,
                 };
                 chunks.push(chunk);
             }
@@ -207,6 +210,7 @@ impl Chunker for FixedSizeChunker {
                 size: chunk.len(),
                 weak_hash: 0, // 固定大小不需要弱哈希
                 strong_hash,
+                compression: crate::core::compression::CompressionAlgorithm::None,
             });
 
             offset += chunk.len();
@@ -265,6 +269,7 @@ impl Chunker for FastChunker {
                 size: chunk.len(),
                 weak_hash: 0,
                 strong_hash,
+                compression: crate::core::compression::CompressionAlgorithm::None,
             });
 
             offset += chunk.len();

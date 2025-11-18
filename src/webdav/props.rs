@@ -272,24 +272,17 @@ impl WebDavHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use silent_nas_core::StorageManagerTrait;
     use std::sync::Arc;
 
     async fn build_handler() -> WebDavHandler {
-        let dir = tempfile::tempdir().unwrap();
-        let storage = crate::storage::StorageManager::new(
-            dir.path().to_path_buf(),
-            4 * 1024 * 1024,
-            crate::storage::IncrementalConfig::default(),
-        );
-        let _ = crate::storage::init_global_storage(storage.clone());
-        storage.init().await.unwrap();
+        // 使用共享的测试存储，避免临时目录被清理导致全局存储失效
+        let storage = crate::storage::init_test_storage_async().await;
+        let dir = storage.root_dir();
+
         let syncm = crate::sync::crdt::SyncManager::new("node-test".to_string(), None);
         let search_engine = Arc::new(
-            crate::search::SearchEngine::new(
-                dir.path().join("search_index"),
-                dir.path().to_path_buf(),
-            )
-            .unwrap(),
+            crate::search::SearchEngine::new(dir.join("search_index"), dir.to_path_buf()).unwrap(),
         );
         WebDavHandler::new(
             None,

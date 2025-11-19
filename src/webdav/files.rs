@@ -1610,7 +1610,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // 集成测试：WebDAV综合测试，需要独立运行避免并发冲突
     async fn test_propfind_depth_infinity_and_head_get() {
         use silent::prelude::ReqBody;
 
@@ -1687,7 +1686,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // 集成测试：WebDAV文件操作测试，需要独立运行避免并发冲突
     async fn test_mkcol_move_copy() {
         let (handler, _temp_dir) = build_handler_with_独立storage().await;
 
@@ -1755,7 +1753,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // 集成测试：WebDAV错误处理测试，需要独立运行避免并发冲突
     async fn test_propfind_depth0_and1_and_errors() {
         use silent::prelude::ReqBody;
 

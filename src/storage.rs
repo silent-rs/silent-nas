@@ -107,7 +107,6 @@ mod tests {
     use tempfile::TempDir;
 
     #[tokio::test(flavor = "multi_thread")]
-    #[ignore] // 慢测试，手动运行时使用 --ignored 标志
     async fn test_create_storage() {
         let temp_dir = TempDir::new().unwrap();
         let config = StorageConfig {
@@ -131,7 +130,6 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    #[ignore] // 慢测试，手动运行时使用 --ignored 标志
     async fn test_global_storage() {
         use silent_nas_core::StorageManagerTrait;
         use tempfile::TempDir;

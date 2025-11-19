@@ -265,14 +265,34 @@ impl IncrementalSyncHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use silent_storage::StorageManager;
+    use std::path::PathBuf;
+    use tempfile::TempDir;
+
+    // 为每个测试创建独立的存储实例（避免并行测试时的锁竞争）
+    async fn create_test_storage() -> (StorageManager, TempDir) {
+        let temp_dir = TempDir::new().unwrap();
+        let config = crate::storage::IncrementalConfig {
+            enable_compression: false,
+            enable_deduplication: false,
+            ..crate::storage::IncrementalConfig::default()
+        };
+        let storage = StorageManager::new(PathBuf::from(temp_dir.path()), 64 * 1024, config);
+        storage.init().await.unwrap();
+
+        // 设置为全局存储（这样handler中的 storage::storage() 调用才能工作）
+        let _ = crate::storage::init_global_storage(storage.clone());
+
+        (storage, temp_dir)
+    }
 
     // 已删除 test_handler_creation - 测试价值不大，创建handler是trivial操作
 
     #[tokio::test]
-    #[ignore] // 慢测试：使用共享存储，可能超时
+    #[ignore] // 集成测试：需要独立运行避免并发冲突
     async fn test_calculate_local_signature() {
-        // 使用共享的测试存储
-        let storage = crate::storage::init_test_storage_async().await;
+        // 使用独立的测试存储
+        let (storage, _temp_dir) = create_test_storage().await;
 
         // 创建测试文件
         let file_id = "test_calc_sig";
@@ -288,10 +308,10 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // 慢测试：使用共享存储，可能超时
+    #[ignore] // 集成测试：需要独立运行避免并发冲突
     async fn test_generate_delta_chunks() {
-        // 使用共享的测试存储
-        let storage = crate::storage::init_test_storage_async().await;
+        // 使用独立的测试存储
+        let (storage, _temp_dir) = create_test_storage().await;
 
         // 创建源文件
         let file_id = "test_delta";
@@ -319,10 +339,10 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // 慢测试：使用共享存储，可能超时
+    #[ignore] // 集成测试：需要独立运行避免并发冲突
     async fn test_generate_delta_chunks_identical() {
-        // 使用共享的测试存储
-        let storage = crate::storage::init_test_storage_async().await;
+        // 使用独立的测试存储
+        let (storage, _temp_dir) = create_test_storage().await;
 
         // 创建文件
         let file_id = "test_identical";
@@ -344,10 +364,10 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // 慢测试：使用共享存储，可能超时
+    #[ignore] // 集成测试：需要独立运行避免并发冲突
     async fn test_calculate_signature_file_not_found() {
-        // 使用共享的测试存储
-        let _storage = crate::storage::init_test_storage_async().await;
+        // 使用独立的测试存储
+        let (_storage, _temp_dir) = create_test_storage().await;
 
         let handler = IncrementalSyncHandler::new(64 * 1024);
 
@@ -359,10 +379,10 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // 慢测试：创建大文件（1000行），手动运行时使用 --ignored 标志
+    #[ignore] // 集成测试：创建大文件，需要独立运行避免并发冲突
     async fn test_generate_delta_chunks_large_file() {
-        // 使用共享的测试存储
-        let storage = crate::storage::init_test_storage_async().await;
+        // 使用独立的测试存储
+        let (storage, _temp_dir) = create_test_storage().await;
 
         // 创建一个大文件（超过一个块的大小）
         let file_id = "large_file_test";
@@ -400,10 +420,10 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // 慢测试：使用共享存储，可能超时
+    #[ignore] // 集成测试：需要独立运行避免并发冲突
     async fn test_calculate_local_signature_empty_file() {
-        // 使用共享的测试存储
-        let storage = crate::storage::init_test_storage_async().await;
+        // 使用独立的测试存储
+        let (storage, _temp_dir) = create_test_storage().await;
 
         // 创建空文件
         let file_id = "empty_file_test";
@@ -420,10 +440,10 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // 慢测试：循环测试4种chunk size，手动运行时使用 --ignored 标志
+    #[ignore] // 集成测试：循环测试4种chunk size，需要独立运行避免并发冲突
     async fn test_handler_with_different_chunk_sizes() {
-        // 使用共享的测试存储
-        let storage = crate::storage::init_test_storage_async().await;
+        // 使用独立的测试存储
+        let (storage, _temp_dir) = create_test_storage().await;
 
         let data = b"Test data for different chunk sizes";
         let file_id = "test_chunk_sizes";

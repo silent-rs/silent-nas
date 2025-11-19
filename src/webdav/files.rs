@@ -1537,8 +1537,43 @@ impl WebDavHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use silent_storage::StorageManager;
+    use std::path::PathBuf;
     use std::sync::Arc;
+    use tempfile::TempDir;
 
+    // 为每个测试创建独立的存储和handler（避免并行测试时的锁竞争）
+    async fn build_handler_with_独立storage() -> (WebDavHandler, TempDir) {
+        let temp_dir = TempDir::new().unwrap();
+        let config = crate::storage::IncrementalConfig {
+            enable_compression: false,
+            enable_deduplication: false,
+            ..crate::storage::IncrementalConfig::default()
+        };
+        let storage = StorageManager::new(PathBuf::from(temp_dir.path()), 64 * 1024, config);
+        storage.init().await.unwrap();
+
+        // 设置为全局存储
+        let _ = crate::storage::init_global_storage(storage.clone());
+
+        let dir = storage.root_dir();
+        let syncm = crate::sync::crdt::SyncManager::new("node-test".to_string(), None);
+        let search_engine = Arc::new(
+            crate::search::SearchEngine::new(dir.join("search_index"), dir.to_path_buf()).unwrap(),
+        );
+        let handler = WebDavHandler::new(
+            None,
+            syncm,
+            "".into(),
+            "http://127.0.0.1:8080".into(),
+            search_engine,
+        );
+
+        (handler, temp_dir)
+    }
+
+    // 保留build_handler用于非ignore的测试（使用共享存储）
+    #[allow(dead_code)]
     async fn build_handler() -> WebDavHandler {
         // 使用共享的测试存储，避免全局存储重复初始化问题
         let storage = crate::storage::init_test_storage_async().await;
@@ -1575,11 +1610,11 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // 慢测试：WebDAV集成测试，使用共享存储
+    #[ignore] // 集成测试：WebDAV综合测试，需要独立运行避免并发冲突
     async fn test_propfind_depth_infinity_and_head_get() {
         use silent::prelude::ReqBody;
 
-        let handler = build_handler().await;
+        let (handler, _temp_dir) = build_handler_with_独立storage().await;
 
         // 使用 WebDAV 方法创建目录和文件
         // 创建父目录
@@ -1652,9 +1687,9 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // 慢测试：WebDAV集成测试，使用共享存储
+    #[ignore] // 集成测试：WebDAV文件操作测试，需要独立运行避免并发冲突
     async fn test_mkcol_move_copy() {
-        let handler = build_handler().await;
+        let (handler, _temp_dir) = build_handler_with_独立storage().await;
 
         // MKCOL 创建目录
         let mk = handler.handle_mkcol("/mk/a").await.unwrap();
@@ -1720,11 +1755,11 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // 慢测试：WebDAV集成测试，使用共享存储
+    #[ignore] // 集成测试：WebDAV错误处理测试，需要独立运行避免并发冲突
     async fn test_propfind_depth0_and1_and_errors() {
         use silent::prelude::ReqBody;
 
-        let handler = build_handler().await;
+        let (handler, _temp_dir) = build_handler_with_独立storage().await;
 
         // 使用 WebDAV API 创建文件与目录
         handler.handle_mkcol("/p0").await.unwrap();

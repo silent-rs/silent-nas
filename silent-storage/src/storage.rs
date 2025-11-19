@@ -10,11 +10,11 @@ use crate::{ChunkInfo, FileDelta, IncrementalConfig, VersionInfo};
 use async_trait::async_trait;
 use chrono::Local;
 use serde::{Deserialize, Serialize};
+use sha2::Digest;
 use silent_nas_core::{FileMetadata, FileVersion, S3CompatibleStorageTrait, StorageManagerTrait};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use sha2::Digest;
 use tokio::fs;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{OnceCell, RwLock};
@@ -258,9 +258,7 @@ impl StorageManager {
     where
         R: AsyncRead + Unpin,
     {
-        let (_delta, file_version) = self
-            .save_version_from_reader(file_id, reader, None)
-            .await?;
+        let (_delta, file_version) = self.save_version_from_reader(file_id, reader, None).await?;
 
         Ok(FileMetadata {
             id: file_id.to_string(),
@@ -468,10 +466,7 @@ impl StorageManager {
                             .increment_chunk_ref(&chunk.chunk_id)
                             .await
                             .map_err(|e| {
-                                StorageError::Storage(format!(
-                                    "增加块引用计数失败: {}",
-                                    e
-                                ))
+                                StorageError::Storage(format!("增加块引用计数失败: {}", e))
                             })?;
                         dedup_stats.duplicate_chunks += 1;
                     } else {
@@ -484,10 +479,7 @@ impl StorageManager {
                             .add_chunk(&chunk.chunk_id, chunk.size, storage_path)
                             .await
                             .map_err(|e| {
-                                StorageError::Storage(format!(
-                                    "添加块到索引失败: {}",
-                                    e
-                                ))
+                                StorageError::Storage(format!("添加块到索引失败: {}", e))
                             })?;
 
                         dedup_stats.new_chunks += 1;
@@ -586,7 +578,7 @@ impl StorageManager {
 
         // 创建 FileVersion（使用流式哈希和总大小）
         let file_hash = {
-use sha2::Digest;
+            use sha2::Digest;
             let hash_bytes = hasher.finalize();
             hex::encode(hash_bytes)
         };
@@ -1965,6 +1957,20 @@ impl StorageManager {
         }
     }
 
+    /// 获取GC配置
+    ///
+    /// 返回当前GC的配置信息
+    pub fn get_gc_config(&self) -> (bool, u64) {
+        (self.config.enable_auto_gc, self.config.gc_interval_secs)
+    }
+
+    /// 检查GC任务是否正在运行
+    ///
+    /// 返回GC后台任务的运行状态
+    pub async fn is_gc_task_running(&self) -> bool {
+        self.gc_task_handle.read().await.is_some()
+    }
+
     /// 克隆一个用于GC任务的StorageManager副本
     ///
     /// 由于GC任务需要在后台线程中运行，需要克隆必要的字段
@@ -2044,9 +2050,7 @@ impl StorageManager {
             if old_delta_path.exists() {
                 // 确保新路径的父目录存在
                 if let Some(parent) = new_delta_path.parent() {
-                    fs::create_dir_all(parent)
-                        .await
-                        .map_err(StorageError::Io)?;
+                    fs::create_dir_all(parent).await.map_err(StorageError::Io)?;
                 }
 
                 // 读取并更新 delta 文件中的 file_id
@@ -2312,7 +2316,6 @@ impl StorageManagerTrait for StorageManager {
             modified_at: file_version.created_at,
         })
     }
-
 
     async fn save_at_path(
         &self,
@@ -2874,7 +2877,10 @@ mod tests {
         storage.init().await.unwrap();
 
         // 创建并删除文件
-        storage.save_version("test_file", b"Test data", None).await.unwrap();
+        storage
+            .save_version("test_file", b"Test data", None)
+            .await
+            .unwrap();
         storage.delete_file("test_file").await.unwrap();
 
         // 恢复文件
@@ -2895,8 +2901,14 @@ mod tests {
         storage.init().await.unwrap();
 
         // 创建并删除多个文件
-        storage.save_version("file1", b"Data 1", None).await.unwrap();
-        storage.save_version("file2", b"Data 2", None).await.unwrap();
+        storage
+            .save_version("file1", b"Data 1", None)
+            .await
+            .unwrap();
+        storage
+            .save_version("file2", b"Data 2", None)
+            .await
+            .unwrap();
         storage.delete_file("file1").await.unwrap();
         storage.delete_file("file2").await.unwrap();
 
@@ -2988,7 +3000,10 @@ mod tests {
         storage.init().await.unwrap();
 
         // 创建并删除文件
-        storage.save_version("test_file", b"Test data", None).await.unwrap();
+        storage
+            .save_version("test_file", b"Test data", None)
+            .await
+            .unwrap();
         storage.delete_file("test_file").await.unwrap();
 
         // 尝试再次删除应该失败
@@ -3002,9 +3017,18 @@ mod tests {
         storage.init().await.unwrap();
 
         // 创建多个文件
-        storage.save_version("file1", b"Data 1", None).await.unwrap();
-        storage.save_version("file2", b"Data 2", None).await.unwrap();
-        storage.save_version("file3", b"Data 3", None).await.unwrap();
+        storage
+            .save_version("file1", b"Data 1", None)
+            .await
+            .unwrap();
+        storage
+            .save_version("file2", b"Data 2", None)
+            .await
+            .unwrap();
+        storage
+            .save_version("file3", b"Data 3", None)
+            .await
+            .unwrap();
 
         // 删除file2
         storage.delete_file("file2").await.unwrap();
@@ -3047,8 +3071,8 @@ mod tests {
     async fn test_auto_gc_on_init() {
         let temp_dir = TempDir::new().unwrap();
         let config = IncrementalConfig {
-            enable_auto_gc: true,  // 自动启动GC
-            gc_interval_secs: 1,   // 1秒间隔用于快速测试
+            enable_auto_gc: true, // 自动启动GC
+            gc_interval_secs: 1,  // 1秒间隔用于快速测试
             enable_compression: false,
             enable_deduplication: false,
             ..IncrementalConfig::default()
@@ -3076,7 +3100,10 @@ mod tests {
         storage.init().await.unwrap();
 
         // 创建测试文件
-        storage.save_version("file1", b"Test data", None).await.unwrap();
+        storage
+            .save_version("file1", b"Test data", None)
+            .await
+            .unwrap();
 
         // 永久删除文件
         storage.permanently_delete_file("file1").await.unwrap();
@@ -3102,7 +3129,10 @@ mod tests {
         storage.init().await.unwrap();
 
         // 创建并删除文件
-        storage.save_version("file1", b"Test data", None).await.unwrap();
+        storage
+            .save_version("file1", b"Test data", None)
+            .await
+            .unwrap();
         storage.permanently_delete_file("file1").await.unwrap();
 
         // 启动GC任务

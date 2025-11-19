@@ -122,8 +122,8 @@ impl SledMetadataDb {
             let (_, value) =
                 item.map_err(|e| StorageError::Database(format!("遍历文件索引失败: {}", e)))?;
 
-            let entry: crate::storage::FileIndexEntry = serde_json::from_slice(&value)
-                .map_err(StorageError::Serialization)?;
+            let entry: crate::storage::FileIndexEntry =
+                serde_json::from_slice(&value).map_err(StorageError::Serialization)?;
             files.push(entry);
         }
 

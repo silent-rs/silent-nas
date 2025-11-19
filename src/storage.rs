@@ -74,6 +74,8 @@ pub async fn create_storage(config: &StorageConfig) -> Result<StorageManager> {
         enable_compression: config.enable_compression,
         compression_algorithm: config.compression_algorithm.clone(),
         enable_deduplication: config.enable_deduplication,
+        enable_auto_gc: config.enable_auto_gc,
+        gc_interval_secs: config.gc_interval_secs,
         ..IncrementalConfig::default()
     };
 
@@ -91,11 +93,13 @@ pub async fn create_storage(config: &StorageConfig) -> Result<StorageManager> {
         .map_err(|e| NasError::Storage(e.to_string()))?;
 
     tracing::info!(
-        "存储管理器初始化成功: root={:?}, chunk_size={}, compression={}, dedup={}",
+        "存储管理器初始化成功: root={:?}, chunk_size={}, compression={}, dedup={}, auto_gc={}, gc_interval={}s",
         config.root_path,
         config.chunk_size,
         config.enable_compression,
-        config.enable_deduplication
+        config.enable_deduplication,
+        config.enable_auto_gc,
+        config.gc_interval_secs
     );
 
     Ok(storage)
@@ -115,6 +119,8 @@ mod tests {
             enable_compression: false, // 禁用压缩以加快测试速度
             compression_algorithm: "lz4".to_string(),
             enable_deduplication: false, // 禁用去重以加快测试速度
+            enable_auto_gc: false,       // 禁用自动GC以加快测试速度
+            gc_interval_secs: 3600,
         };
 
         let storage = create_storage(&config).await.unwrap();

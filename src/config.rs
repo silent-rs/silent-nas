@@ -40,6 +40,12 @@ pub struct StorageConfig {
     /// 启用去重
     #[serde(default = "StorageConfig::default_enable_deduplication")]
     pub enable_deduplication: bool,
+    /// 启用自动GC
+    #[serde(default = "StorageConfig::default_enable_auto_gc")]
+    pub enable_auto_gc: bool,
+    /// GC触发间隔（秒）
+    #[serde(default = "StorageConfig::default_gc_interval_secs")]
+    pub gc_interval_secs: u64,
 }
 
 impl StorageConfig {
@@ -53,6 +59,14 @@ impl StorageConfig {
 
     fn default_enable_deduplication() -> bool {
         true
+    }
+
+    fn default_enable_auto_gc() -> bool {
+        true
+    }
+
+    fn default_gc_interval_secs() -> u64 {
+        3600 // 默认每小时执行一次GC
     }
 }
 
@@ -243,6 +257,8 @@ impl Default for Config {
                 enable_compression: true,
                 compression_algorithm: "lz4".to_string(),
                 enable_deduplication: true,
+                enable_auto_gc: true,
+                gc_interval_secs: 3600,
             },
             nats: NatsConfig {
                 url: "nats://127.0.0.1:4222".to_string(),
@@ -502,6 +518,8 @@ mod tests {
             enable_compression: true,
             compression_algorithm: "zstd".to_string(),
             enable_deduplication: true,
+            enable_auto_gc: true,
+            gc_interval_secs: 7200,
         };
 
         assert_eq!(storage.root_path, PathBuf::from("/tmp/storage"));
@@ -509,6 +527,8 @@ mod tests {
         assert!(storage.enable_compression);
         assert_eq!(storage.compression_algorithm, "zstd");
         assert!(storage.enable_deduplication);
+        assert!(storage.enable_auto_gc);
+        assert_eq!(storage.gc_interval_secs, 7200);
     }
 
     #[test]

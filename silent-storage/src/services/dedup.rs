@@ -439,7 +439,12 @@ impl DedupManager {
     }
 
     /// 添加新块到索引
-    pub async fn add_chunk(&self, chunk_id: &str, size: usize, storage_path: std::path::PathBuf) -> Result<()> {
+    pub async fn add_chunk(
+        &self,
+        chunk_id: &str,
+        size: usize,
+        storage_path: std::path::PathBuf,
+    ) -> Result<()> {
         let block_index = self.block_index.read().await;
         block_index.add_block(chunk_id, size, storage_path).await?;
         Ok(())

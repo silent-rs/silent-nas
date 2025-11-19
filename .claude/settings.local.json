@@ -20,7 +20,8 @@
       "Bash(RUST_LOG=debug cargo check:*)",
       "Bash(git add:*)",
       "Bash(git commit:*)",
-      "Bash(pkill:*)"
+      "Bash(pkill:*)",
+      "Bash(chmod:*)"
     ],
     "deny": [],
     "ask": []

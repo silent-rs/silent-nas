@@ -154,7 +154,7 @@ impl Default for IncrementalConfig {
             compression_algorithm: "lz4".to_string(),
             enable_deduplication: true,
             enable_auto_gc: true,
-            gc_interval_secs: 3600,    // 默认每小时执行一次GC
+            gc_interval_secs: 3600, // 默认每小时执行一次GC
         }
     }
 }

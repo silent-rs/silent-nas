@@ -518,6 +518,69 @@ pub async fn delete_user(
     .unwrap())
 }
 
+/// 手动触发垃圾回收
+///
+/// POST /api/admin/gc/trigger
+/// 需要管理员权限
+/// 立即执行一次垃圾回收，清理未引用的数据块
+pub async fn trigger_gc(
+    _req: Request,
+    _state: CfgExtractor<AppState>,
+) -> silent::Result<serde_json::Value> {
+    info!("管理员触发手动垃圾回收");
+
+    let storage = crate::storage::storage();
+
+    let deleted_count = storage.garbage_collect_blocks().await.map_err(|e| {
+        SilentError::business_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("垃圾回收执行失败: {}", e),
+        )
+    })?;
+
+    info!("垃圾回收完成，清理了 {} 个未引用的块", deleted_count);
+
+    Ok(serde_json::json!({
+        "success": true,
+        "deleted_blocks": deleted_count,
+        "message": format!("垃圾回收完成，清理了 {} 个未引用的块", deleted_count)
+    }))
+}
+
+/// GC状态响应
+#[derive(Debug, Serialize)]
+pub struct GcStatusResponse {
+    /// 是否启用自动GC
+    pub auto_gc_enabled: bool,
+    /// GC间隔（秒）
+    pub gc_interval_secs: u64,
+    /// 自动GC任务是否正在运行
+    pub task_running: bool,
+}
+
+/// 获取GC状态
+///
+/// GET /api/admin/gc/status
+/// 需要管理员权限
+/// 获取垃圾回收的配置和运行状态
+pub async fn get_gc_status(
+    _req: Request,
+    _state: CfgExtractor<AppState>,
+) -> silent::Result<serde_json::Value> {
+    let storage = crate::storage::storage();
+
+    let (auto_gc_enabled, gc_interval_secs) = storage.get_gc_config();
+    let task_running = storage.is_gc_task_running().await;
+
+    let response = GcStatusResponse {
+        auto_gc_enabled,
+        gc_interval_secs,
+        task_running,
+    };
+
+    Ok(serde_json::to_value(&response).unwrap())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

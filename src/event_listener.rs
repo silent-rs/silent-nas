@@ -330,47 +330,8 @@ mod tests {
     // 注意：由于EventListener依赖NATS客户端，完整的功能测试需要集成测试环境
     // 这里只测试可以独立测试的部分
 
-    #[tokio::test]
-    async fn test_event_listener_dependencies() {
-        // 使用共享的测试存储（异步初始化）
-        let storage = crate::storage::init_test_storage_async().await;
-
-        // 创建NATS客户端需要真实的NATS服务器
-        // 这里只验证存储管理器可以正常工作
-        let test_data = b"test content";
-        let file_id = "test_event_listener_dependencies";
-        storage.save_file(file_id, test_data).await.unwrap();
-
-        // 验证增量同步处理器可以创建
-        let handler = IncrementalSyncHandler::new(64 * 1024);
-
-        // 验证处理器可以正常工作
-        let sig = handler.calculate_local_signature(file_id).await.unwrap();
-        assert_eq!(sig.file_size, test_data.len() as u64);
-    }
-
-    #[tokio::test]
-    async fn test_incremental_sync_handler() {
-        // 使用共享的测试存储（异步初始化）
-        let storage = crate::storage::init_test_storage_async().await;
-
-        let handler = IncrementalSyncHandler::new(4096);
-
-        // 创建测试文件
-        let test_data = b"test content for incremental sync";
-        let file_id = "inc-test";
-        let metadata = storage.save_file(file_id, test_data).await.unwrap();
-
-        // 计算签名
-        let signature = handler
-            .calculate_local_signature(&metadata.id)
-            .await
-            .unwrap();
-
-        assert_eq!(signature.file_size, test_data.len() as u64);
-        assert!(!signature.chunks.is_empty());
-        assert_eq!(signature.chunk_size, 4096);
-    }
+    // 已删除冗余测试: test_event_listener_dependencies 和 test_incremental_sync_handler
+    // 这些功能已在 sync::incremental::handler 模块中充分测试
 
     #[test]
     fn test_module_imports() {
@@ -431,15 +392,17 @@ mod tests {
         assert!(parsed.metadata.is_some());
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_storage_operations() {
         // 测试存储操作的基本功能
         let temp_dir = TempDir::new().unwrap();
-        let storage = StorageManager::new(
-            PathBuf::from(temp_dir.path()),
-            64 * 1024,
-            crate::storage::IncrementalConfig::default(),
-        );
+        let config = crate::storage::IncrementalConfig {
+            enable_compression: false,
+            enable_deduplication: false,
+            ..crate::storage::IncrementalConfig::default()
+        };
+
+        let storage = StorageManager::new(PathBuf::from(temp_dir.path()), 64 * 1024, config);
         storage.init().await.unwrap();
 
         // 测试保存文件

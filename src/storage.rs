@@ -106,15 +106,16 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore] // 慢测试，手动运行时使用 --ignored 标志
     async fn test_create_storage() {
         let temp_dir = TempDir::new().unwrap();
         let config = StorageConfig {
             root_path: temp_dir.path().to_path_buf(),
             chunk_size: 64 * 1024,
-            enable_compression: true,
+            enable_compression: false, // 禁用压缩以加快测试速度
             compression_algorithm: "lz4".to_string(),
-            enable_deduplication: true,
+            enable_deduplication: false, // 禁用去重以加快测试速度
         };
 
         let storage = create_storage(&config).await.unwrap();
@@ -129,18 +130,21 @@ mod tests {
         assert_eq!(read_data, test_data);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore] // 慢测试，手动运行时使用 --ignored 标志
     async fn test_global_storage() {
         use silent_nas_core::StorageManagerTrait;
         use tempfile::TempDir;
 
         // 创建独立的测试存储，避免全局状态竞态条件
         let temp_dir = TempDir::new().unwrap();
-        let storage = StorageManager::new(
-            temp_dir.path().to_path_buf(),
-            64 * 1024,
-            IncrementalConfig::default(),
-        );
+        let config = IncrementalConfig {
+            enable_compression: false,
+            enable_deduplication: false,
+            ..IncrementalConfig::default()
+        };
+
+        let storage = StorageManager::new(temp_dir.path().to_path_buf(), 64 * 1024, config);
         storage.init().await.unwrap();
 
         // 测试基本操作

@@ -14,8 +14,9 @@ use silent_nas_core::{FileMetadata, FileVersion, S3CompatibleStorageTrait, Stora
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use sha2::Digest;
 use tokio::fs;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{OnceCell, RwLock};
 use tracing::info;
 
@@ -81,6 +82,8 @@ pub struct StorageManager {
     orphan_cleaner: Arc<OrphanChunkCleaner>,
     /// 压缩器
     compressor: Arc<crate::core::compression::Compressor>,
+    /// 去重管理器（使用内存索引）
+    dedup_manager: Arc<crate::services::dedup::DedupManager>,
 }
 
 impl StorageManager {
@@ -113,6 +116,29 @@ impl StorageManager {
             compression_config,
         ));
 
+        // 初始化去重管理器
+        let dedup_config = crate::services::dedup::DedupConfig {
+            enable_dedup: config.enable_deduplication,
+            min_dedup_size: 1024, // 1KB
+            batch_size: 1000,
+            concurrent_threads: 4,
+            max_memory_index: 100000,
+            sync_interval_secs: 300,
+            enable_cow: true,
+        };
+        let block_index_config = crate::services::index::BlockIndexConfig {
+            auto_save: true,
+            save_interval_secs: 60,
+            max_memory_entries: 100000,
+            hot_data_ratio: 0.2,
+            gc_interval_secs: 3600,
+        };
+        let dedup_manager = Arc::new(crate::services::dedup::DedupManager::new(
+            dedup_config,
+            block_index_config,
+            root_path.to_str().unwrap(),
+        ));
+
         Self {
             root_path,
             data_root,
@@ -128,6 +154,7 @@ impl StorageManager {
             chunk_verifier: Arc::new(ChunkVerifier::new(chunk_root.clone())),
             orphan_cleaner: Arc::new(OrphanChunkCleaner::new(chunk_root)),
             compressor,
+            dedup_manager,
         }
     }
 
@@ -155,6 +182,9 @@ impl StorageManager {
         wal.init().await?;
         drop(wal); // 释放锁
 
+        // 初始化去重管理器
+        self.dedup_manager.init().await?;
+
         // 加载现有索引
         self.load_version_index().await?;
         self.load_block_index().await?;
@@ -178,6 +208,391 @@ impl StorageManager {
     /// 获取缓存管理器引用
     pub fn get_cache_manager(&self) -> Arc<CacheManager> {
         self.cache_manager.clone()
+    }
+
+    /// 从磁盘路径流式保存文件（避免一次性将整个文件读入内存）
+    pub async fn save_file_from_path(
+        &self,
+        file_id: &str,
+        source_path: &Path,
+    ) -> Result<FileMetadata> {
+        let (_delta, file_version) = self
+            .save_version_from_path(file_id, source_path, None)
+            .await?;
+
+        Ok(FileMetadata {
+            id: file_id.to_string(),
+            name: file_id.to_string(),
+            path: file_id.to_string(),
+            size: file_version.size,
+            hash: file_version.version_id.clone(),
+            created_at: file_version.created_at,
+            modified_at: file_version.created_at,
+        })
+    }
+
+    /// 从异步读取器流式保存文件（供上层传入 HTTP body 等场景使用）
+    pub async fn save_file_from_reader<R>(
+        &self,
+        file_id: &str,
+        reader: &mut R,
+    ) -> Result<FileMetadata>
+    where
+        R: AsyncRead + Unpin,
+    {
+        let (_delta, file_version) = self
+            .save_version_from_reader(file_id, reader, None)
+            .await?;
+
+        Ok(FileMetadata {
+            id: file_id.to_string(),
+            name: file_id.to_string(),
+            path: file_id.to_string(),
+            size: file_version.size,
+            hash: file_version.version_id.clone(),
+            created_at: file_version.created_at,
+            modified_at: file_version.created_at,
+        })
+    }
+
+    /// 从磁盘路径流式保存文件版本（避免将整个文件读入内存）
+    pub async fn save_version_from_path(
+        &self,
+        file_id: &str,
+        source_path: &Path,
+        parent_version_id: Option<&str>,
+    ) -> Result<(FileDelta, FileVersion)> {
+        let mut file = fs::File::open(source_path)
+            .await
+            .map_err(StorageError::Io)?;
+        self.save_version_from_reader(file_id, &mut file, parent_version_id)
+            .await
+    }
+
+    /// 从异步读取器流式保存文件版本（用于 WebDAV 等场景）
+    pub async fn save_version_from_reader<R>(
+        &self,
+        file_id: &str,
+        reader: &mut R,
+        parent_version_id: Option<&str>,
+    ) -> Result<(FileDelta, FileVersion)>
+    where
+        R: AsyncRead + Unpin,
+    {
+        let version_id = format!("v_{}", scru128::new());
+
+        // 读取前 1MB 进行类型检测
+        const HEADER_SIZE: usize = 1024 * 1024;
+        let mut header_buf = vec![0u8; HEADER_SIZE];
+        let mut header_len = 0usize;
+        while header_len < HEADER_SIZE {
+            let n = reader
+                .read(&mut header_buf[header_len..])
+                .await
+                .map_err(StorageError::Io)?;
+            if n == 0 {
+                break;
+            }
+            header_len += n;
+        }
+
+        // 空文件特殊处理
+        if header_len == 0 {
+            let now = Local::now().naive_local();
+
+            let delta = FileDelta {
+                file_id: file_id.to_string(),
+                base_version_id: parent_version_id.unwrap_or("").to_string(),
+                new_version_id: version_id.clone(),
+                chunks: Vec::new(),
+                created_at: now,
+            };
+
+            // 保存差异数据（空文件）
+            self.save_delta(file_id, &delta).await?;
+
+            // 保存版本信息
+            let _version_info = self
+                .save_version_info(file_id, &delta, parent_version_id)
+                .await?;
+
+            // 更新文件索引
+            let metadata_db = self.get_metadata_db()?;
+            let mut file_entry = metadata_db
+                .get_file_index(file_id)
+                .map_err(|e| StorageError::Storage(format!("读取文件索引失败: {}", e)))?
+                .unwrap_or_else(|| FileIndexEntry {
+                    file_id: file_id.to_string(),
+                    latest_version_id: version_id.clone(),
+                    version_count: 0,
+                    created_at: now,
+                    modified_at: now,
+                });
+
+            file_entry.latest_version_id = version_id.clone();
+            file_entry.version_count += 1;
+            file_entry.modified_at = now;
+
+            metadata_db
+                .put_file_index(file_id, &file_entry)
+                .map_err(|e| StorageError::Storage(format!("保存文件索引失败: {}", e)))?;
+
+            // 记录 WAL（空文件版本）
+            let operation = WalOperation::CreateVersion {
+                file_id: file_id.to_string(),
+                version_id: version_id.clone(),
+                chunk_hashes: Vec::new(),
+            };
+            let mut wal = self.wal_manager.write().await;
+            wal.write(operation).await?;
+            drop(wal);
+
+            let file_version = FileVersion {
+                version_id: version_id.clone(),
+                file_id: file_id.to_string(),
+                name: file_id.to_string(),
+                size: 0,
+                hash: self.calculate_hash(&[]),
+                created_at: now,
+                author: None,
+                comment: None,
+                is_current: true,
+            };
+
+            return Ok((delta, file_version));
+        }
+
+        header_buf.truncate(header_len);
+
+        // 检测文件类型并调整配置（仅根据前 1MB）
+        let file_type = crate::core::FileType::detect(&header_buf);
+        let (min_chunk, max_chunk) = file_type.recommended_chunk_size();
+
+        let mut adjusted_config = self.config.clone();
+        adjusted_config.min_chunk_size = min_chunk;
+        adjusted_config.max_chunk_size = max_chunk;
+
+        if file_type.is_compressed() {
+            adjusted_config.enable_compression = false;
+        }
+
+        info!(
+            "文件 {} 类型: {}, 块大小: {}KB-{}KB, 压缩: {} (流式)",
+            file_id,
+            file_type.as_str(),
+            min_chunk / 1024,
+            max_chunk / 1024,
+            adjusted_config.enable_compression
+        );
+
+        // 当前仅支持从空版本开始的流式写入
+        if parent_version_id.is_some() {
+            return Err(StorageError::Storage(
+                "save_version_from_reader 目前不支持基于父版本的增量写入".to_string(),
+            ));
+        }
+
+        let mut generator = crate::core::delta::DeltaGenerator::new(adjusted_config);
+
+        // 初始化去重统计
+        let mut dedup_stats = crate::DeduplicationStats {
+            total_chunks: 0,
+            original_size: 0,
+            ..Default::default()
+        };
+
+        let mut all_chunks: Vec<ChunkInfo> = Vec::new();
+        let mut offset_base: usize = 0;
+        let mut total_size: u64 = 0;
+
+        // 增量计算文件哈希
+        let mut hasher = sha2::Sha256::new();
+
+        // 处理首个缓冲区
+        let mut current_buf = header_buf;
+        loop {
+            if current_buf.is_empty() {
+                break;
+            }
+
+            total_size += current_buf.len() as u64;
+            hasher.update(&current_buf);
+
+            let delta_segment = generator
+                .generate_full_delta(&current_buf, file_id)
+                .map_err(|e| StorageError::Storage(format!("生成分块失败: {}", e)))?;
+
+            dedup_stats.total_chunks += delta_segment.chunks.len();
+
+            // 按片段处理块：写入块数据并更新去重状态
+            for chunk in &delta_segment.chunks {
+                let start = chunk.offset;
+                let end = start + chunk.size;
+                if end > current_buf.len() {
+                    return Err(StorageError::Storage(
+                        "分块范围越界（流式处理）".to_string(),
+                    ));
+                }
+                let chunk_data = &current_buf[start..end];
+
+                let mut chunk_with_compression = chunk.clone();
+                // 全局偏移
+                chunk_with_compression.offset = offset_base + chunk.offset;
+
+                if self.config.enable_deduplication {
+                    // 使用 DedupManager 的内存索引进行去重
+                    let exists = self.dedup_manager.chunk_exists(&chunk.chunk_id).await;
+
+                    if exists {
+                        self.dedup_manager
+                            .increment_chunk_ref(&chunk.chunk_id)
+                            .await
+                            .map_err(|e| {
+                                StorageError::Storage(format!(
+                                    "增加块引用计数失败: {}",
+                                    e
+                                ))
+                            })?;
+                        dedup_stats.duplicate_chunks += 1;
+                    } else {
+                        let compression_algo =
+                            self.save_chunk_data(&chunk.chunk_id, chunk_data).await?;
+                        chunk_with_compression.compression = compression_algo;
+
+                        let storage_path = self.get_chunk_path(&chunk.chunk_id);
+                        self.dedup_manager
+                            .add_chunk(&chunk.chunk_id, chunk.size, storage_path)
+                            .await
+                            .map_err(|e| {
+                                StorageError::Storage(format!(
+                                    "添加块到索引失败: {}",
+                                    e
+                                ))
+                            })?;
+
+                        dedup_stats.new_chunks += 1;
+                        dedup_stats.stored_size += chunk.size as u64;
+                    }
+                } else {
+                    // 不使用去重，直接保存所有块
+                    let compression_algo =
+                        self.save_chunk_data(&chunk.chunk_id, chunk_data).await?;
+
+                    chunk_with_compression.compression = compression_algo;
+                    dedup_stats.new_chunks += 1;
+                    dedup_stats.stored_size += chunk.size as u64;
+                }
+
+                all_chunks.push(chunk_with_compression);
+            }
+
+            offset_base += current_buf.len();
+
+            // 读取下一批数据
+            const READ_BUFFER_SIZE: usize = 8 * 1024 * 1024; // 8MB
+            let mut buf = vec![0u8; READ_BUFFER_SIZE];
+            let n = reader.read(&mut buf).await.map_err(StorageError::Io)?;
+            if n == 0 {
+                break;
+            }
+            buf.truncate(n);
+            current_buf = buf;
+        }
+
+        dedup_stats.original_size = total_size;
+        dedup_stats.calculate_dedup_ratio();
+
+        if dedup_stats.dedup_ratio > 0.0 {
+            info!(
+                "版本 {} 去重统计(流式): 总块数={}, 新块={}, 重复块={}, 原始大小={}B, 存储大小={}B, 去重率={:.2}%",
+                version_id,
+                dedup_stats.total_chunks,
+                dedup_stats.new_chunks,
+                dedup_stats.duplicate_chunks,
+                dedup_stats.original_size,
+                dedup_stats.stored_size,
+                dedup_stats.dedup_ratio
+            );
+        }
+
+        // 构建完整的 FileDelta
+        let delta = FileDelta {
+            file_id: file_id.to_string(),
+            base_version_id: parent_version_id.unwrap_or("").to_string(),
+            new_version_id: version_id.clone(),
+            chunks: all_chunks,
+            created_at: Local::now().naive_local(),
+        };
+
+        // 保存差异数据
+        self.save_delta(file_id, &delta).await?;
+
+        // 保存版本信息
+        let _version_info = self
+            .save_version_info(file_id, &delta, parent_version_id)
+            .await?;
+
+        // 更新文件索引
+        let now = Local::now().naive_local();
+        let metadata_db = self.get_metadata_db()?;
+
+        let mut file_entry = metadata_db
+            .get_file_index(file_id)
+            .map_err(|e| StorageError::Storage(format!("读取文件索引失败: {}", e)))?
+            .unwrap_or_else(|| FileIndexEntry {
+                file_id: file_id.to_string(),
+                latest_version_id: version_id.clone(),
+                version_count: 0,
+                created_at: now,
+                modified_at: now,
+            });
+
+        file_entry.latest_version_id = version_id.clone();
+        file_entry.version_count += 1;
+        file_entry.modified_at = now;
+
+        metadata_db
+            .put_file_index(file_id, &file_entry)
+            .map_err(|e| StorageError::Storage(format!("保存文件索引失败: {}", e)))?;
+
+        // 定期刷新数据库（每10个版本刷新一次）
+        let version_count = self.version_index.read().await.len();
+        if version_count % 10 == 0 {
+            let _ = self.save_chunk_ref_count().await;
+            let _ = metadata_db.flush().await;
+        }
+
+        // 创建 FileVersion（使用流式哈希和总大小）
+        let file_hash = {
+use sha2::Digest;
+            let hash_bytes = hasher.finalize();
+            hex::encode(hash_bytes)
+        };
+
+        let file_version = FileVersion {
+            version_id: version_id.clone(),
+            file_id: file_id.to_string(),
+            name: file_id.to_string(),
+            size: total_size,
+            hash: file_hash,
+            created_at: Local::now().naive_local(),
+            author: None,
+            comment: None,
+            is_current: true,
+        };
+
+        // 记录 WAL（Phase 5 Step 4）
+        let chunk_hashes: Vec<String> = delta.chunks.iter().map(|c| c.chunk_id.clone()).collect();
+        let operation = WalOperation::CreateVersion {
+            file_id: file_id.to_string(),
+            version_id: version_id.clone(),
+            chunk_hashes,
+        };
+        let mut wal = self.wal_manager.write().await;
+        wal.write(operation).await?;
+        drop(wal);
+
+        Ok((delta, file_version))
     }
 
     /// 保存文件版本（使用增量存储）
@@ -234,52 +649,60 @@ impl StorageManager {
 
         // 保存块数据并更新引用计数（带去重）
         // 同时更新 chunks 的压缩信息
-        let metadata_db = self.get_metadata_db()?;
         let mut updated_chunks = Vec::new();
 
-        for chunk in &delta.chunks {
-            // 先检查块是否已存在
-            let chunk_ref = metadata_db
-                .get_chunk_ref(&chunk.chunk_id)
-                .map_err(|e| StorageError::Storage(format!("查询块引用失败: {}", e)))?;
+        // 根据配置决定是否使用去重
+        if self.config.enable_deduplication {
+            // 使用 DedupManager 的内存索引进行去重
+            for chunk in &delta.chunks {
+                let mut chunk_with_compression = chunk.clone();
 
-            let mut chunk_with_compression = chunk.clone();
+                // 检查块是否已存在（内存索引查询，O(1)）
+                let exists = self.dedup_manager.chunk_exists(&chunk.chunk_id).await;
 
-            if let Some(_ref_count) = chunk_ref {
-                // 块已存在，跳过写入，只增加引用计数
-                metadata_db
-                    .increment_chunk_ref(&chunk.chunk_id)
-                    .map_err(|e| StorageError::Storage(format!("增加块引用计数失败: {}", e)))?;
+                if exists {
+                    // 块已存在，跳过写入，只增加引用计数
+                    self.dedup_manager
+                        .increment_chunk_ref(&chunk.chunk_id)
+                        .await
+                        .map_err(|e| StorageError::Storage(format!("增加块引用计数失败: {}", e)))?;
 
-                // 更新去重统计
-                dedup_stats.duplicate_chunks += 1;
+                    // 更新去重统计
+                    dedup_stats.duplicate_chunks += 1;
+                } else {
+                    // 新块，写入磁盘
+                    let compression_algo = self.save_chunk(chunk, data).await?;
 
-                // 对于已存在的块，从元数据读取压缩算法（如果有的话）
-                // 这里我们假设已存在的块使用相同的压缩设置
-                // TODO: 从元数据中读取实际的压缩算法
-            } else {
-                // 新块，写入磁盘并创建引用计数记录
+                    // 更新 chunk 的压缩信息
+                    chunk_with_compression.compression = compression_algo;
+
+                    // 添加到去重索引
+                    let storage_path = self.get_chunk_path(&chunk.chunk_id);
+                    self.dedup_manager
+                        .add_chunk(&chunk.chunk_id, chunk.size, storage_path)
+                        .await
+                        .map_err(|e| StorageError::Storage(format!("添加块到索引失败: {}", e)))?;
+
+                    // 更新去重统计
+                    dedup_stats.new_chunks += 1;
+                    dedup_stats.stored_size += chunk.size as u64;
+                }
+
+                updated_chunks.push(chunk_with_compression);
+            }
+        } else {
+            // 不使用去重，直接保存所有块
+            for chunk in &delta.chunks {
                 let compression_algo = self.save_chunk(chunk, data).await?;
 
-                // 更新 chunk 的压缩信息
+                let mut chunk_with_compression = chunk.clone();
                 chunk_with_compression.compression = compression_algo;
 
-                let ref_count = ChunkRefCount {
-                    chunk_id: chunk.chunk_id.clone(),
-                    ref_count: 1,
-                    size: chunk.size as u64,
-                    path: self.get_chunk_path(&chunk.chunk_id),
-                };
-                metadata_db
-                    .put_chunk_ref(&chunk.chunk_id, &ref_count)
-                    .map_err(|e| StorageError::Storage(format!("保存块引用信息失败: {}", e)))?;
-
-                // 更新去重统计
                 dedup_stats.new_chunks += 1;
                 dedup_stats.stored_size += chunk.size as u64;
-            }
 
-            updated_chunks.push(chunk_with_compression);
+                updated_chunks.push(chunk_with_compression);
+            }
         }
 
         // 用包含压缩信息的 chunks 替换原来的
@@ -627,6 +1050,38 @@ impl StorageManager {
         Ok(algorithm)
     }
 
+    /// 保存块数据（直接根据块内容，不依赖整体文件数据）
+    async fn save_chunk_data(
+        &self,
+        chunk_id: &str,
+        chunk_data: &[u8],
+    ) -> Result<crate::core::compression::CompressionAlgorithm> {
+        let chunk_path = self.get_chunk_path(chunk_id);
+
+        // 创建父目录
+        if let Some(parent) = chunk_path.parent() {
+            fs::create_dir_all(parent).await?;
+        }
+
+        // 应用压缩（如果启用）
+        let compression_result = self.compressor.compress(chunk_data)?;
+        let data_to_write = &compression_result.compressed_data;
+        let algorithm = compression_result.algorithm;
+
+        // 写入块数据（可能已压缩）
+        let mut file = fs::File::create(&chunk_path).await?;
+        file.write_all(data_to_write).await?;
+        file.flush().await?;
+
+        // 更新块索引
+        self.block_index
+            .write()
+            .await
+            .insert(chunk_id.to_string(), chunk_path);
+
+        Ok(algorithm)
+    }
+
     /// 读取块数据
     async fn read_chunk(
         &self,
@@ -875,6 +1330,7 @@ impl StorageManager {
         let mut files = Vec::new();
         let mut subdirs = std::collections::HashSet::new();
 
+        // 1. 从元数据推断目录结构
         for file_id in all_files {
             let normalized_file = file_id.trim_start_matches('/');
 
@@ -897,6 +1353,21 @@ impl StorageManager {
                     } else {
                         // 当前目录下的文件
                         files.push(file_id);
+                    }
+                }
+            }
+        }
+
+        // 2. 从文件系统补充空目录（MKCOL 创建的目录）
+        let storage_path = self.get_full_path(dir_path);
+        if let Ok(mut entries) = fs::read_dir(&storage_path).await {
+            while let Ok(Some(entry)) = entries.next_entry().await {
+                if let Ok(file_type) = entry.file_type().await {
+                    if file_type.is_dir() {
+                        if let Some(name) = entry.file_name().to_str() {
+                            // 添加文件系统中存在的目录（去重）
+                            subdirs.insert(name.to_string());
+                        }
                     }
                 }
             }
@@ -1200,6 +1671,130 @@ impl StorageManager {
         Ok(())
     }
 
+    /// 移动/重命名文件（只更新元数据，不复制块数据）
+    ///
+    /// # 参数
+    /// * `old_file_id` - 原文件ID/路径
+    /// * `new_file_id` - 新文件ID/路径
+    ///
+    /// # 返回
+    /// 返回新文件的元数据
+    pub async fn move_file(&self, old_file_id: &str, new_file_id: &str) -> Result<FileMetadata> {
+        info!("开始移动文件: {} -> {}", old_file_id, new_file_id);
+
+        // 1. 检查目标文件是否已存在
+        if self.file_exists(new_file_id).await {
+            return Err(StorageError::Storage(format!(
+                "目标文件已存在: {}",
+                new_file_id
+            )));
+        }
+
+        // 2. 获取源文件的元数据
+        let old_metadata = self.get_metadata(old_file_id).await?;
+
+        // 3. 获取源文件的所有版本
+        let versions = self.list_file_versions(old_file_id).await?;
+        if versions.is_empty() {
+            return Err(StorageError::FileNotFound(old_file_id.to_string()));
+        }
+
+        let metadata_db = self.get_metadata_db()?;
+
+        // 4. 移动每个版本的元数据和 delta 文件
+        for version in &versions {
+            // 4.1 读取并更新版本信息
+            let mut version_info = self.get_version_info(&version.version_id).await?;
+            version_info.file_id = new_file_id.to_string();
+
+            // 保存到新的文件ID下
+            metadata_db
+                .put_version_info(&version.version_id, &version_info)
+                .map_err(|e| StorageError::Storage(format!("保存版本信息失败: {}", e)))?;
+
+            // 更新内存索引
+            self.version_index
+                .write()
+                .await
+                .insert(version.version_id.clone(), version_info);
+
+            // 4.2 移动 delta 文件
+            let old_delta_path = self.get_delta_path(old_file_id, &version.version_id);
+            let new_delta_path = self.get_delta_path(new_file_id, &version.version_id);
+
+            if old_delta_path.exists() {
+                // 确保新路径的父目录存在
+                if let Some(parent) = new_delta_path.parent() {
+                    fs::create_dir_all(parent)
+                        .await
+                        .map_err(StorageError::Io)?;
+                }
+
+                // 读取并更新 delta 文件中的 file_id
+                let delta_data = fs::read(&old_delta_path).await.map_err(StorageError::Io)?;
+                let mut delta: FileDelta = serde_json::from_slice(&delta_data)
+                    .map_err(|e| StorageError::Storage(format!("反序列化 delta 失败: {}", e)))?;
+
+                delta.file_id = new_file_id.to_string();
+
+                let updated_delta_data = serde_json::to_vec_pretty(&delta)
+                    .map_err(|e| StorageError::Storage(format!("序列化 delta 失败: {}", e)))?;
+
+                fs::write(&new_delta_path, updated_delta_data)
+                    .await
+                    .map_err(StorageError::Io)?;
+
+                // 删除旧的 delta 文件
+                fs::remove_file(&old_delta_path)
+                    .await
+                    .map_err(StorageError::Io)?;
+            }
+        }
+
+        // 5. 移动文件索引
+        if let Ok(Some(mut file_entry)) = metadata_db.get_file_index(old_file_id) {
+            file_entry.file_id = new_file_id.to_string();
+            file_entry.modified_at = Local::now().naive_local();
+
+            metadata_db
+                .put_file_index(new_file_id, &file_entry)
+                .map_err(|e| StorageError::Storage(format!("保存文件索引失败: {}", e)))?;
+
+            // 删除旧的文件索引
+            metadata_db
+                .remove_file_index(old_file_id)
+                .map_err(|e| StorageError::Storage(format!("删除旧文件索引失败: {}", e)))?;
+        }
+
+        // 6. 删除旧的 delta 目录（如果为空）
+        let old_delta_dir = self.version_root.join("deltas").join(old_file_id);
+        if old_delta_dir.exists() {
+            if let Ok(mut entries) = fs::read_dir(&old_delta_dir).await {
+                if entries.next_entry().await.ok().flatten().is_none() {
+                    // 目录为空，删除
+                    let _ = fs::remove_dir(&old_delta_dir).await;
+                }
+            }
+        }
+
+        // 7. 刷新数据库
+        let _ = metadata_db.flush().await;
+
+        // 8. 返回新文件的元数据
+        let new_metadata = FileMetadata {
+            id: new_file_id.to_string(),
+            name: new_file_id.to_string(),
+            path: new_file_id.to_string(),
+            size: old_metadata.size,
+            hash: old_metadata.hash,
+            created_at: old_metadata.created_at,
+            modified_at: Local::now().naive_local(),
+        };
+
+        info!("文件移动完成: {} -> {}", old_file_id, new_file_id);
+        Ok(new_metadata)
+    }
+
     /// 垃圾回收 - 清理引用计数为0的块
     pub async fn garbage_collect(&self) -> Result<GarbageCollectResult> {
         info!("开始垃圾回收...");
@@ -1399,6 +1994,7 @@ impl StorageManagerTrait for StorageManager {
             modified_at: file_version.created_at,
         })
     }
+
 
     async fn save_at_path(
         &self,

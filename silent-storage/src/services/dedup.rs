@@ -426,6 +426,25 @@ impl DedupManager {
         Ok(())
     }
 
+    /// 检查块是否存在（使用内存索引）
+    pub async fn chunk_exists(&self, chunk_id: &str) -> bool {
+        let block_index = self.block_index.read().await;
+        block_index.contains(chunk_id).await
+    }
+
+    /// 添加新块到索引
+    pub async fn add_chunk(&self, chunk_id: &str, size: usize, storage_path: std::path::PathBuf) -> Result<()> {
+        let block_index = self.block_index.read().await;
+        block_index.add_block(chunk_id, size, storage_path).await?;
+        Ok(())
+    }
+
+    /// 增加块引用计数
+    pub async fn increment_chunk_ref(&self, chunk_id: &str) -> Result<u32> {
+        let block_index = self.block_index.read().await;
+        block_index.inc_ref(chunk_id).await
+    }
+
     /// 获取存储效率分析
     pub async fn get_efficiency_analysis(&self) -> Result<EfficiencyAnalysis> {
         let stats = self.get_stats().await;

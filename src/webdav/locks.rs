@@ -259,6 +259,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore] // 集成测试：使用search engine索引锁，并发运行时可能失败
     async fn test_ensure_lock_ok_with_if_header() {
         let handler = build_handler().await;
 

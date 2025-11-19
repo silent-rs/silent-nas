@@ -43,31 +43,39 @@ pub fn try_storage() -> Option<&'static StorageManager> {
 ///
 /// 在测试开始时调用一次即可初始化共享的测试存储。
 /// 所有测试将共享同一个全局存储实例，避免重复初始化错误。
+///
+/// 使用 tokio::sync::OnceCell 确保并发安全的单次初始化。
 #[cfg(test)]
 pub async fn init_test_storage_async() -> &'static StorageManager {
     use std::sync::OnceLock;
     use tempfile::TempDir;
+    use tokio::sync::OnceCell;
 
-    // 如果已经初始化，直接返回
-    if let Some(mgr) = try_storage() {
-        return mgr;
-    }
+    // 使用 OnceCell 确保异步初始化只执行一次（并发安全）
+    static INIT_CELL: OnceCell<()> = OnceCell::const_new();
 
-    // 创建持久的临时目录（使用 OnceLock 确保只创建一次）
-    static TEST_DIR: OnceLock<&'static TempDir> = OnceLock::new();
-    let temp_dir = TEST_DIR.get_or_init(|| Box::leak(Box::new(TempDir::new().unwrap())));
+    INIT_CELL
+        .get_or_init(|| async {
+            // 创建持久的临时目录（使用 OnceLock 确保只创建一次）
+            static TEST_DIR: OnceLock<&'static TempDir> = OnceLock::new();
+            let temp_dir = TEST_DIR.get_or_init(|| Box::leak(Box::new(TempDir::new().unwrap())));
 
-    // 创建并初始化存储
-    let mgr = StorageManager::new(
-        temp_dir.path().to_path_buf(),
-        64 * 1024,
-        crate::storage::IncrementalConfig::default(),
-    );
-    mgr.init().await.unwrap();
+            // 创建并初始化存储
+            let mgr = StorageManager::new(
+                temp_dir.path().to_path_buf(),
+                64 * 1024,
+                crate::storage::IncrementalConfig::default(),
+            );
 
-    // 初始化全局存储（忽略错误，因为可能已经初始化）
-    init_global_storage(mgr).ok();
+            // 初始化存储（这是唯一会初始化 Sled 数据库的地方）
+            mgr.init().await.unwrap();
 
+            // 初始化全局存储（忽略错误，因为可能已经初始化）
+            init_global_storage(mgr).ok();
+        })
+        .await;
+
+    // 返回已初始化的全局存储
     storage()
 }
 

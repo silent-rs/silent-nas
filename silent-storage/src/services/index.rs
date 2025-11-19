@@ -77,35 +77,37 @@ impl BlockIndex {
         size: usize,
         storage_path: PathBuf,
     ) -> Result<BlockIndexEntry> {
-        let mut index = self.hot_index.write().await;
+        let entry = {
+            let mut index = self.hot_index.write().await;
 
-        let now = chrono::Local::now().naive_local();
+            let now = chrono::Local::now().naive_local();
 
-        let entry = if let Some(existing) = index.get_mut(chunk_id) {
-            #[allow(unused_mut)]
-            let mut existing = existing;
-            // 块已存在，增加引用计数
-            existing.ref_count += 1;
-            existing.last_accessed = now;
-            existing.clone()
-        } else {
-            // 新块
-            let entry = BlockIndexEntry {
-                chunk_id: chunk_id.to_string(),
-                size,
-                ref_count: 1,
-                storage_path: storage_path.clone(),
-                last_accessed: now,
-                created_at: now,
-                is_hot: false,
-            };
-            index.insert(chunk_id.to_string(), entry.clone());
-            entry
-        };
+            if let Some(existing) = index.get_mut(chunk_id) {
+                #[allow(unused_mut)]
+                let mut existing = existing;
+                // 块已存在，增加引用计数
+                existing.ref_count += 1;
+                existing.last_accessed = now;
+                existing.clone()
+            } else {
+                // 新块
+                let entry = BlockIndexEntry {
+                    chunk_id: chunk_id.to_string(),
+                    size,
+                    ref_count: 1,
+                    storage_path: storage_path.clone(),
+                    last_accessed: now,
+                    created_at: now,
+                    is_hot: false,
+                };
+                index.insert(chunk_id.to_string(), entry.clone());
+                entry
+            }
+        }; // 释放写锁
 
         // 持久化索引（如果启用）
         if self.config.auto_save {
-            self.save_index().await?;
+            self.save_index_async().await?;
         }
 
         info!("添加块到索引: {}, ref_count: {}", chunk_id, entry.ref_count);
@@ -133,57 +135,72 @@ impl BlockIndex {
 
     /// 增加引用计数
     pub async fn inc_ref(&self, chunk_id: &str) -> Result<u32> {
-        let mut index = self.hot_index.write().await;
+        let (ref_count, need_save) = {
+            let mut index = self.hot_index.write().await;
 
-        if let Some(entry) = index.get_mut(chunk_id) {
-            entry.ref_count += 1;
-            entry.last_accessed = chrono::Local::now().naive_local();
-            if self.config.auto_save {
-                self.save_index().await?;
+            if let Some(entry) = index.get_mut(chunk_id) {
+                entry.ref_count += 1;
+                entry.last_accessed = chrono::Local::now().naive_local();
+                (entry.ref_count, self.config.auto_save)
+            } else {
+                return Err(StorageError::Storage(format!("块不存在: {}", chunk_id)));
             }
-            return Ok(entry.ref_count);
+        }; // 释放写锁
+
+        if need_save {
+            self.save_index_async().await?;
         }
 
-        Err(StorageError::Storage(format!("块不存在: {}", chunk_id)))
+        Ok(ref_count)
     }
 
     /// 减少引用计数
     pub async fn dec_ref(&self, chunk_id: &str) -> Result<u32> {
-        let mut index = self.hot_index.write().await;
+        let (ref_count, need_save) = {
+            let mut index = self.hot_index.write().await;
 
-        if let Some(entry) = index.get_mut(chunk_id)
-            && entry.ref_count > 0
-        {
-            entry.ref_count -= 1;
-            entry.last_accessed = chrono::Local::now().naive_local();
+            if let Some(entry) = index.get_mut(chunk_id)
+                && entry.ref_count > 0
+            {
+                entry.ref_count -= 1;
+                entry.last_accessed = chrono::Local::now().naive_local();
 
-            // 如果引用计数为0，标记为可删除
-            if entry.ref_count == 0 {
-                info!("块引用计数为0: {}", chunk_id);
+                // 如果引用计数为0，标记为可删除
+                if entry.ref_count == 0 {
+                    info!("块引用计数为0: {}", chunk_id);
+                }
+
+                (entry.ref_count, self.config.auto_save)
+            } else {
+                return Err(StorageError::Storage(format!(
+                    "块不存在或引用计数异常: {}",
+                    chunk_id
+                )));
             }
+        }; // 释放写锁
 
-            if self.config.auto_save {
-                self.save_index().await?;
-            }
-            return Ok(entry.ref_count);
+        if need_save {
+            self.save_index_async().await?;
         }
 
-        Err(StorageError::Storage(format!(
-            "块不存在或引用计数异常: {}",
-            chunk_id
-        )))
+        Ok(ref_count)
     }
 
     /// 移除块
     pub async fn remove_block(&self, chunk_id: &str) -> Result<()> {
-        let mut index = self.hot_index.write().await;
+        let need_save = {
+            let mut index = self.hot_index.write().await;
 
-        if let Some(_entry) = index.remove(chunk_id) {
-            // 实际删除文件由调用者处理
-            if self.config.auto_save {
-                self.save_index().await?;
+            if let Some(_entry) = index.remove(chunk_id) {
+                info!("从索引中移除块: {}", chunk_id);
+                self.config.auto_save
+            } else {
+                false
             }
-            info!("从索引中移除块: {}", chunk_id);
+        }; // 释放写锁
+
+        if need_save {
+            self.save_index_async().await?;
         }
 
         Ok(())
@@ -214,23 +231,28 @@ impl BlockIndex {
 
     /// 清理未引用的块
     pub async fn gc_unreferenced(&self) -> Result<Vec<String>> {
-        let mut index = self.hot_index.write().await;
-        let mut unreferenced = Vec::new();
+        let (unreferenced, need_save) = {
+            let mut index = self.hot_index.write().await;
+            let mut unreferenced = Vec::new();
 
-        // 查找引用计数为0的块
-        for (chunk_id, entry) in index.iter() {
-            if entry.ref_count == 0 {
-                unreferenced.push(chunk_id.clone());
+            // 查找引用计数为0的块
+            for (chunk_id, entry) in index.iter() {
+                if entry.ref_count == 0 {
+                    unreferenced.push(chunk_id.clone());
+                }
             }
-        }
 
-        // 移除未引用的块
-        for chunk_id in &unreferenced {
-            index.remove(chunk_id);
-        }
+            // 移除未引用的块
+            for chunk_id in &unreferenced {
+                index.remove(chunk_id);
+            }
 
-        if !unreferenced.is_empty() && self.config.auto_save {
-            self.save_index().await?;
+            let need_save = !unreferenced.is_empty() && self.config.auto_save;
+            (unreferenced, need_save)
+        }; // 释放写锁
+
+        if need_save {
+            self.save_index_async().await?;
             info!("清理了 {} 个未引用的块", unreferenced.len());
         }
 
@@ -271,10 +293,12 @@ impl BlockIndex {
         Ok(())
     }
 
-    /// 保存索引
-    async fn save_index(&self) -> Result<()> {
-        let index = self.hot_index.read().await;
-        let entries: Vec<BlockIndexEntry> = index.values().cloned().collect();
+    /// 保存索引（异步版本，不持有锁）
+    async fn save_index_async(&self) -> Result<()> {
+        let entries: Vec<BlockIndexEntry> = {
+            let index = self.hot_index.read().await;
+            index.values().cloned().collect()
+        }; // 释放读锁
 
         let data = serde_json::to_vec_pretty(&entries)
             .map_err(|e| StorageError::Storage(format!("序列化索引失败: {}", e)))?;
@@ -291,6 +315,12 @@ impl BlockIndex {
         Ok(())
     }
 
+    /// 保存索引（已废弃，保留用于兼容）
+    #[allow(dead_code)]
+    async fn save_index(&self) -> Result<()> {
+        self.save_index_async().await
+    }
+
     /// 获取块存储路径
     pub fn get_block_path(&self, chunk_id: &str) -> PathBuf {
         let prefix = &chunk_id[..2.min(chunk_id.len())];
@@ -300,7 +330,7 @@ impl BlockIndex {
     /// 同步索引到磁盘
     pub async fn sync(&self) -> Result<()> {
         // 将内存中的热索引保存到磁盘
-        self.save_index().await?;
+        self.save_index_async().await?;
         info!("块索引已同步到磁盘");
         Ok(())
     }

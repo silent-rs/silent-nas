@@ -39,7 +39,7 @@ chunk_size = 4194304
 # 启用去重（默认: true）
 # - true:  使用内存索引去重（推荐，节省空间）
 # - false: 禁用去重（最快速度，不节省空间）
-enable_deduplication = false
+enable_deduplication = true
 enable_compression = true
 
 # ==================== NATS 消息队列配置 ====================

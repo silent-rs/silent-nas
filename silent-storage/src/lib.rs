@@ -135,6 +135,10 @@ pub struct IncrementalConfig {
     pub compression_algorithm: String,
     /// 启用去重
     pub enable_deduplication: bool,
+    /// 启用自动GC
+    pub enable_auto_gc: bool,
+    /// GC触发间隔（秒）
+    pub gc_interval_secs: u64,
 }
 
 impl Default for IncrementalConfig {
@@ -149,6 +153,8 @@ impl Default for IncrementalConfig {
             enable_compression: true,
             compression_algorithm: "lz4".to_string(),
             enable_deduplication: true,
+            enable_auto_gc: true,
+            gc_interval_secs: 3600,    // 默认每小时执行一次GC
         }
     }
 }

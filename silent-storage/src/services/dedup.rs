@@ -400,6 +400,12 @@ impl DedupManager {
         stats.clone()
     }
 
+    /// 获取所有块信息（用于统计）
+    pub async fn get_all_blocks(&self) -> Vec<crate::services::index::BlockIndexEntry> {
+        let block_index = self.block_index.read().await;
+        block_index.get_all_blocks().await
+    }
+
     /// 执行GC - 清理未引用的块
     pub async fn gc(&self) -> Result<u32> {
         let block_index = self.block_index.read().await;
@@ -443,6 +449,12 @@ impl DedupManager {
     pub async fn increment_chunk_ref(&self, chunk_id: &str) -> Result<u32> {
         let block_index = self.block_index.read().await;
         block_index.inc_ref(chunk_id).await
+    }
+
+    /// 减少块引用计数
+    pub async fn decrement_chunk_ref(&self, chunk_id: &str) -> Result<u32> {
+        let block_index = self.block_index.read().await;
+        block_index.dec_ref(chunk_id).await
     }
 
     /// 获取存储效率分析

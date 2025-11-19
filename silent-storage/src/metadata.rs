@@ -114,6 +114,22 @@ impl SledMetadataDb {
         Ok(file_ids)
     }
 
+    /// 列出所有文件索引条目
+    pub fn list_all_files(&self) -> Result<Vec<crate::storage::FileIndexEntry>> {
+        let mut files = Vec::new();
+
+        for item in self.file_index_tree.iter() {
+            let (_, value) =
+                item.map_err(|e| StorageError::Database(format!("遍历文件索引失败: {}", e)))?;
+
+            let entry: crate::storage::FileIndexEntry = serde_json::from_slice(&value)
+                .map_err(StorageError::Serialization)?;
+            files.push(entry);
+        }
+
+        Ok(files)
+    }
+
     /// 获取文件索引数量
     pub fn file_index_count(&self) -> usize {
         self.file_index_tree.len()
@@ -338,6 +354,8 @@ mod tests {
             version_count: 1,
             created_at: now,
             modified_at: now,
+            is_deleted: false,
+            deleted_at: None,
         };
 
         // 保存
@@ -434,6 +452,8 @@ mod tests {
             version_count: 1,
             created_at: now,
             modified_at: now,
+            is_deleted: false,
+            deleted_at: None,
         };
 
         db.put_file_index("test", &entry).unwrap();

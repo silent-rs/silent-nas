@@ -83,6 +83,7 @@ pub mod cache;
 pub mod core;
 pub mod metadata;
 pub mod metrics;
+pub mod optimization;
 pub mod reliability;
 pub mod services;
 pub mod storage;
@@ -90,6 +91,9 @@ pub mod storage;
 pub use cache::{CacheConfig, CacheManager, CacheStats};
 pub use error::{Result, StorageError};
 pub use metrics::{HealthStatus, StorageMetrics};
+pub use optimization::{
+    OptimizationScheduler, OptimizationStats, OptimizationStrategy, OptimizationTask,
+};
 pub use reliability::{
     ChunkVerifier, ChunkVerifyReport, CleanupReport, OrphanChunkCleaner, WalEntry, WalManager,
     WalOperation,
@@ -139,6 +143,14 @@ pub struct IncrementalConfig {
     pub enable_auto_gc: bool,
     /// GC触发间隔（秒）
     pub gc_interval_secs: u64,
+    /// 启用异步优化（热存储+后台优化）
+    pub enable_async_optimization: bool,
+    /// 优化延迟（秒）- 上传后多久开始优化
+    pub optimization_delay_secs: u64,
+    /// 是否清理热存储（优化后删除原始文件）
+    pub cleanup_hot_storage: bool,
+    /// 大文件阈值（字节）- 超过此大小的文件直接使用热存储
+    pub large_file_threshold: u64,
 }
 
 impl Default for IncrementalConfig {
@@ -155,6 +167,10 @@ impl Default for IncrementalConfig {
             enable_deduplication: true,
             enable_auto_gc: true,
             gc_interval_secs: 3600, // 默认每小时执行一次GC
+            enable_async_optimization: false, // 默认禁用异步优化（向后兼容）
+            optimization_delay_secs: 300,     // 5分钟后开始优化
+            cleanup_hot_storage: false,       // 保留热存储备份
+            large_file_threshold: 1024 * 1024 * 1024, // 1GB
         }
     }
 }
@@ -166,6 +182,34 @@ pub enum ChunkerType {
     Fixed,
     /// Rabin-Karp滚动哈希
     RabinKarp,
+}
+
+/// 存储模式
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum StorageMode {
+    /// 热存储 - 直接存储完整文件（快速读写）
+    #[default]
+    Hot,
+    /// 压缩存储 - 仅压缩，不分块
+    Compressed,
+    /// 冷存储 - 分块+去重+压缩（节省空间）
+    Cold,
+}
+
+/// 优化状态
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum OptimizationStatus {
+    /// 待优化 - 刚上传，等待后台处理
+    #[default]
+    Pending,
+    /// 优化中 - 正在执行优化任务
+    Optimizing,
+    /// 已完成 - 优化完成或跳过
+    Completed,
+    /// 失败 - 优化失败
+    Failed,
+    /// 已跳过 - 不需要优化
+    Skipped,
 }
 
 /// 块信息

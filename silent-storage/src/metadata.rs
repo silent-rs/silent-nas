@@ -356,6 +356,10 @@ mod tests {
             modified_at: now,
             is_deleted: false,
             deleted_at: None,
+            storage_mode: crate::StorageMode::Cold,
+            optimization_status: crate::OptimizationStatus::Completed,
+            file_size: 0,
+            file_hash: String::new(),
         };
 
         // 保存
@@ -454,6 +458,10 @@ mod tests {
             modified_at: now,
             is_deleted: false,
             deleted_at: None,
+            storage_mode: crate::StorageMode::Cold,
+            optimization_status: crate::OptimizationStatus::Completed,
+            file_size: 0,
+            file_hash: String::new(),
         };
 
         db.put_file_index("test", &entry).unwrap();

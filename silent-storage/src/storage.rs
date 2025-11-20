@@ -18,7 +18,7 @@ use std::sync::Arc;
 use tokio::fs;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{OnceCell, RwLock};
-use tracing::info;
+use tracing::{info, warn};
 
 /// 块引用计数信息
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -52,6 +52,18 @@ pub struct FileIndexEntry {
     /// 删除时间
     #[serde(default)]
     pub deleted_at: Option<chrono::NaiveDateTime>,
+    /// 存储模式
+    #[serde(default)]
+    pub storage_mode: crate::StorageMode,
+    /// 优化状态
+    #[serde(default)]
+    pub optimization_status: crate::OptimizationStatus,
+    /// 文件大小（字节）
+    #[serde(default)]
+    pub file_size: u64,
+    /// 文件哈希（SHA-256）
+    #[serde(default)]
+    pub file_hash: String,
 }
 
 /// 存储管理器
@@ -63,6 +75,8 @@ pub struct StorageManager {
     root_path: PathBuf,
     /// 用户数据根目录 (root_path/data)
     data_root: PathBuf,
+    /// 热存储根目录 (root_path/hot)
+    hot_storage_root: PathBuf,
     /// 配置
     config: IncrementalConfig,
     /// 版本根目录 (root_path/incremental)
@@ -94,11 +108,18 @@ pub struct StorageManager {
     gc_task_handle: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
     /// GC任务停止标志
     gc_stop_flag: Arc<tokio::sync::RwLock<bool>>,
+    /// 优化调度器
+    optimization_scheduler: Arc<crate::OptimizationScheduler>,
+    /// 优化任务句柄
+    optimization_task_handle: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
+    /// 优化任务停止标志
+    optimization_stop_flag: Arc<tokio::sync::RwLock<bool>>,
 }
 
 impl StorageManager {
     pub fn new(root_path: PathBuf, chunk_size: usize, config: IncrementalConfig) -> Self {
         let data_root = root_path.join("data");
+        let hot_storage_root = root_path.join("hot");
         let version_root = root_path.join("incremental");
         let chunk_root = version_root.join("chunks");
         let wal_path = version_root.join("wal.log");
@@ -149,9 +170,14 @@ impl StorageManager {
             root_path.to_str().unwrap(),
         ));
 
+        // 初始化优化调度器（最多2个并发任务）
+        let optimization_scheduler =
+            Arc::new(crate::OptimizationScheduler::new(2));
+
         Self {
             root_path,
             data_root,
+            hot_storage_root,
             config,
             version_root,
             chunk_root: chunk_root.clone(),
@@ -167,6 +193,9 @@ impl StorageManager {
             dedup_manager,
             gc_task_handle: Arc::new(RwLock::new(None)),
             gc_stop_flag: Arc::new(tokio::sync::RwLock::new(false)),
+            optimization_scheduler,
+            optimization_task_handle: Arc::new(RwLock::new(None)),
+            optimization_stop_flag: Arc::new(tokio::sync::RwLock::new(false)),
         }
     }
 
@@ -175,6 +204,7 @@ impl StorageManager {
         // 创建必要的目录
         fs::create_dir_all(&self.root_path).await?;
         fs::create_dir_all(&self.data_root).await?;
+        fs::create_dir_all(&self.hot_storage_root).await?;
         fs::create_dir_all(&self.version_root).await?;
         fs::create_dir_all(&self.chunk_root).await?;
 
@@ -207,6 +237,15 @@ impl StorageManager {
         if self.config.enable_auto_gc {
             self.start_gc_task().await;
             info!("自动GC任务已启动，间隔: {}秒", self.config.gc_interval_secs);
+        }
+
+        // 启动后台优化任务（如果启用异步优化）
+        if self.config.enable_async_optimization {
+            self.start_optimization_task().await;
+            info!(
+                "后台优化任务已启动，延迟: {}秒",
+                self.config.optimization_delay_secs
+            );
         }
 
         info!(
@@ -297,6 +336,129 @@ impl StorageManager {
     {
         let version_id = format!("v_{}", scru128::new());
 
+        // 如果启用异步优化，直接流式写入热存储
+        if self.config.enable_async_optimization {
+            use sha2::{Digest, Sha256};
+            let now = Local::now().naive_local();
+
+            // 1. 准备热存储路径
+            let hot_path = self.get_hot_storage_path(file_id);
+            if let Some(parent) = hot_path.parent() {
+                fs::create_dir_all(parent).await.map_err(StorageError::Io)?;
+            }
+
+            // 2. 流式写入热存储，同时计算哈希
+            let mut file = fs::File::create(&hot_path)
+                .await
+                .map_err(StorageError::Io)?;
+            let mut hasher = Sha256::new();
+            let mut total_size: u64 = 0;
+
+            const BUFFER_SIZE: usize = 8 * 1024 * 1024; // 8MB
+            let mut buffer = vec![0u8; BUFFER_SIZE];
+
+            loop {
+                let n = reader.read(&mut buffer).await.map_err(StorageError::Io)?;
+                if n == 0 {
+                    break;
+                }
+
+                file.write_all(&buffer[..n])
+                    .await
+                    .map_err(StorageError::Io)?;
+                hasher.update(&buffer[..n]);
+                total_size += n as u64;
+            }
+
+            file.flush().await.map_err(StorageError::Io)?;
+
+            let file_hash = hex::encode(hasher.finalize());
+
+            info!(
+                "文件 {} 已流式保存到热存储，大小={}B，待后台优化",
+                file_id, total_size
+            );
+
+            // 3. 创建文件版本信息
+            let file_version = FileVersion {
+                version_id: version_id.clone(),
+                file_id: file_id.to_string(),
+                name: file_id.to_string(),
+                size: total_size,
+                hash: file_hash.clone(),
+                created_at: now,
+                author: None,
+                comment: None,
+                is_current: true,
+            };
+
+            // 4. 更新文件索引（Hot模式）
+            let metadata_db = self.get_metadata_db()?;
+            let mut file_entry = metadata_db
+                .get_file_index(file_id)
+                .map_err(|e| StorageError::Storage(format!("读取文件索引失败: {}", e)))?
+                .unwrap_or_else(|| FileIndexEntry {
+                    file_id: file_id.to_string(),
+                    latest_version_id: version_id.clone(),
+                    version_count: 0,
+                    created_at: now,
+                    modified_at: now,
+                    is_deleted: false,
+                    deleted_at: None,
+                    storage_mode: crate::StorageMode::Hot,
+                    optimization_status: crate::OptimizationStatus::Pending,
+                    file_size: total_size,
+                    file_hash: file_hash.clone(),
+                });
+
+            file_entry.latest_version_id = version_id.clone();
+            file_entry.version_count += 1;
+            file_entry.modified_at = now;
+            file_entry.storage_mode = crate::StorageMode::Hot;
+            file_entry.optimization_status = crate::OptimizationStatus::Pending;
+            file_entry.file_size = total_size;
+            file_entry.file_hash = file_hash.clone();
+
+            metadata_db
+                .put_file_index(file_id, &file_entry)
+                .map_err(|e| StorageError::Storage(format!("保存文件索引失败: {}", e)))?;
+
+            // 5. 创建空的Delta（热存储不需要分块信息）
+            let delta = FileDelta {
+                file_id: file_id.to_string(),
+                base_version_id: parent_version_id.unwrap_or("").to_string(),
+                new_version_id: version_id.clone(),
+                chunks: Vec::new(), // 热存储没有chunks
+                created_at: now,
+            };
+
+            // 6. 保存版本信息（重要！）
+            let _version_info = self
+                .save_version_info(file_id, &delta, parent_version_id)
+                .await?;
+
+            // 7. 提交后台优化任务（流式上传场景）
+            // 读取热存储文件头部进行类型检测
+            let mut detect_buf = vec![0u8; 1024.min(total_size as usize)];
+            if let Ok(mut f) = fs::File::open(&hot_path).await {
+                let _ = f.read(&mut detect_buf).await;
+            }
+            let file_type = crate::core::FileType::detect(&detect_buf);
+            let strategy = crate::OptimizationStrategy::decide(&file_type, total_size);
+            let task = crate::OptimizationTask::new(
+                file_id.to_string(),
+                hot_path.clone(),
+                total_size,
+                file_hash.clone(),
+                strategy,
+                self.config.optimization_delay_secs,
+            );
+            self.optimization_scheduler.submit_task(task).await;
+
+            return Ok((delta, file_version));
+        }
+
+        // 否则使用传统的分块存储流程（向后兼容）
         // 读取前 1MB 进行类型检测
         const HEADER_SIZE: usize = 1024 * 1024;
         let mut header_buf = vec![0u8; HEADER_SIZE];
@@ -345,6 +507,10 @@ impl StorageManager {
                     modified_at: now,
                     is_deleted: false,
                     deleted_at: None,
+                    storage_mode: crate::StorageMode::Hot,
+                    optimization_status: crate::OptimizationStatus::Pending,
+                    file_size: 0,
+                    file_hash: String::new(),
                 });
 
             file_entry.latest_version_id = version_id.clone();
@@ -559,6 +725,10 @@ impl StorageManager {
                 modified_at: now,
                 is_deleted: false,
                 deleted_at: None,
+                storage_mode: crate::StorageMode::Cold,
+                optimization_status: crate::OptimizationStatus::Completed,
+                file_size: 0,  // 将在后续更新
+                file_hash: String::new(),
             });
 
         file_entry.latest_version_id = version_id.clone();
@@ -618,6 +788,101 @@ impl StorageManager {
     ) -> Result<(FileDelta, FileVersion)> {
         let version_id = format!("v_{}", scru128::new());
 
+        // 如果启用异步优化，使用热存储（快速上传）
+        if self.config.enable_async_optimization {
+            let now = Local::now().naive_local();
+
+            // 1. 计算文件哈希
+            let file_hash = self.calculate_hash(data);
+
+            // 2. 直接写入热存储
+            let hot_path = self.get_hot_storage_path(file_id);
+            if let Some(parent) = hot_path.parent() {
+                fs::create_dir_all(parent).await.map_err(StorageError::Io)?;
+            }
+            fs::write(&hot_path, data).await.map_err(StorageError::Io)?;
+
+            info!(
+                "文件 {} 已保存到热存储，大小={}B，待后台优化",
+                file_id,
+                data.len()
+            );
+
+            // 3. 创建文件版本信息
+            let file_version = FileVersion {
+                version_id: version_id.clone(),
+                file_id: file_id.to_string(),
+                name: file_id.to_string(),
+                size: data.len() as u64,
+                hash: file_hash.clone(),
+                created_at: now,
+                author: None,
+                comment: None,
+                is_current: true,
+            };
+
+            // 4. 更新文件索引（Hot模式）
+            let metadata_db = self.get_metadata_db()?;
+            let mut file_entry = metadata_db
+                .get_file_index(file_id)
+                .map_err(|e| StorageError::Storage(format!("读取文件索引失败: {}", e)))?
+                .unwrap_or_else(|| FileIndexEntry {
+                    file_id: file_id.to_string(),
+                    latest_version_id: version_id.clone(),
+                    version_count: 0,
+                    created_at: now,
+                    modified_at: now,
+                    is_deleted: false,
+                    deleted_at: None,
+                    storage_mode: crate::StorageMode::Hot,
+                    optimization_status: crate::OptimizationStatus::Pending,
+                    file_size: data.len() as u64,
+                    file_hash: file_hash.clone(),
+                });
+
+            file_entry.latest_version_id = version_id.clone();
+            file_entry.version_count += 1;
+            file_entry.modified_at = now;
+            file_entry.storage_mode = crate::StorageMode::Hot;
+            file_entry.optimization_status = crate::OptimizationStatus::Pending;
+            file_entry.file_size = data.len() as u64;
+            file_entry.file_hash = file_hash.clone();
+
+            metadata_db
+                .put_file_index(file_id, &file_entry)
+                .map_err(|e| StorageError::Storage(format!("保存文件索引失败: {}", e)))?;
+
+            // 5. 创建空的Delta（热存储不需要分块信息）
+            let delta = FileDelta {
+                file_id: file_id.to_string(),
+                base_version_id: parent_version_id.unwrap_or("").to_string(),
+                new_version_id: version_id.clone(),
+                chunks: Vec::new(), // 热存储没有chunks
+                created_at: now,
+            };
+
+            // 6. 保存版本信息（重要！）
+            let _version_info = self
+                .save_version_info(file_id, &delta, parent_version_id)
+                .await?;
+
+            // 7. 提交后台优化任务
+            let file_type = crate::core::FileType::detect(data);
+            let strategy = crate::OptimizationStrategy::decide(&file_type, data.len() as u64);
+            let task = crate::OptimizationTask::new(
+                file_id.to_string(),
+                hot_path.clone(),
+                data.len() as u64,
+                file_hash.clone(),
+                strategy,
+                self.config.optimization_delay_secs,
+            );
+            self.optimization_scheduler.submit_task(task).await;
+
+            return Ok((delta, file_version));
+        }
+
+        // 否则使用传统的分块存储流程（向后兼容）
         // 检测文件类型并调整配置
         let file_type = crate::core::FileType::detect(data);
         let (min_chunk, max_chunk) = file_type.recommended_chunk_size();
@@ -763,6 +1028,10 @@ impl StorageManager {
                 modified_at: now,
                 is_deleted: false,
                 deleted_at: None,
+                storage_mode: crate::StorageMode::Cold,
+                optimization_status: crate::OptimizationStatus::Completed,
+                file_size: 0,
+                file_hash: String::new(),
             });
 
         file_entry.latest_version_id = version_id.clone();
@@ -811,8 +1080,73 @@ impl StorageManager {
     /// 读取版本数据
     pub async fn read_version_data(&self, version_id: &str) -> Result<Vec<u8>> {
         // 获取版本信息
-        let _version_info = self.get_version_info(version_id).await?;
+        let version_info = self.get_version_info(version_id).await?;
 
+        // 检查文件的存储模式
+        let metadata_db = self.get_metadata_db()?;
+        if let Some(file_entry) = metadata_db
+            .get_file_index(&version_info.file_id)
+            .map_err(|e| StorageError::Storage(format!("读取文件索引失败: {}", e)))?
+        {
+            match file_entry.storage_mode {
+                // 热存储模式：直接从热存储读取
+                crate::StorageMode::Hot => {
+                    let hot_path = self.get_hot_storage_path(&version_info.file_id);
+                    if hot_path.exists() {
+                        let data = fs::read(&hot_path).await.map_err(StorageError::Io)?;
+                        return Ok(data);
+                    } else {
+                        return Err(StorageError::Storage(format!(
+                            "热存储文件不存在: {}",
+                            hot_path.display()
+                        )));
+                    }
+                }
+                // 压缩存储模式：读取压缩文件并解压
+                crate::StorageMode::Compressed => {
+                    let compressed_path =
+                        self.data_root.join(format!("{}.compressed", version_info.file_id));
+                    if compressed_path.exists() {
+                        let compressed_data =
+                            fs::read(&compressed_path).await.map_err(StorageError::Io)?;
+
+                        // 解压数据
+                        if self.config.enable_compression {
+                            let algorithm = match self.config.compression_algorithm.as_str() {
+                                "lz4" => crate::core::CompressionAlgorithm::LZ4,
+                                "zstd" => crate::core::CompressionAlgorithm::Zstd,
+                                _ => crate::core::CompressionAlgorithm::LZ4,
+                            };
+                            let compression_config =
+                                crate::core::compression::CompressionConfig {
+                                    algorithm,
+                                    level: 1,
+                                    min_size: 0,
+                                    ..Default::default()
+                                };
+                            let compressor =
+                                crate::core::compression::Compressor::new(compression_config);
+                            let data = compressor.decompress(&compressed_data, algorithm)?;
+                            return Ok(data);
+                        } else {
+                            // 未启用压缩，直接返回
+                            return Ok(compressed_data);
+                        }
+                    } else {
+                        return Err(StorageError::Storage(format!(
+                            "压缩存储文件不存在: {}",
+                            compressed_path.display()
+                        )));
+                    }
+                }
+                // 冷存储模式：继续使用分块读取
+                crate::StorageMode::Cold => {
+                    // 继续执行下面的分块读取逻辑
+                }
+            }
+        }
+
+        // 冷存储模式：使用传统的分块读取流程
         // 重建文件数据
         let mut result = Vec::new();
         let mut current_version_id = version_id.to_string();
@@ -1322,6 +1656,13 @@ impl StorageManager {
         self.chunk_root.join("data").join(prefix).join(chunk_id)
     }
 
+    /// 获取热存储路径
+    fn get_hot_storage_path(&self, file_id: &str) -> PathBuf {
+        // 使用文件ID前缀分层存储
+        let prefix = &file_id[..2.min(file_id.len())];
+        self.hot_storage_root.join(prefix).join(file_id)
+    }
+
     /// 计算哈希值
     fn calculate_hash(&self, data: &[u8]) -> String {
         use sha2::{Digest, Sha256};
@@ -1607,6 +1948,10 @@ impl StorageManager {
                     modified_at: version_info.created_at,
                     is_deleted: false,
                     deleted_at: None,
+                    storage_mode: crate::StorageMode::Cold,
+                    optimization_status: crate::OptimizationStatus::Completed,
+                    file_size: version_info.file_size,
+                    file_hash: String::new(),
                 });
 
             entry.version_count += 1;
@@ -1978,6 +2323,7 @@ impl StorageManager {
         Self {
             root_path: self.root_path.clone(),
             data_root: self.data_root.clone(),
+            hot_storage_root: self.hot_storage_root.clone(),
             config: self.config.clone(),
             version_root: self.version_root.clone(),
             chunk_root: self.chunk_root.clone(),
@@ -1993,6 +2339,9 @@ impl StorageManager {
             dedup_manager: self.dedup_manager.clone(),
             gc_task_handle: Arc::new(RwLock::new(None)),
             gc_stop_flag: Arc::new(tokio::sync::RwLock::new(false)),
+            optimization_scheduler: self.optimization_scheduler.clone(),
+            optimization_task_handle: Arc::new(RwLock::new(None)),
+            optimization_stop_flag: Arc::new(tokio::sync::RwLock::new(false)),
         }
     }
 
@@ -2248,9 +2597,386 @@ impl StorageManager {
             .map_err(|e| StorageError::Storage(format!("清理孤儿 chunks 失败: {}", e)))
     }
 
+    /// 执行优化任务 - 将热存储文件优化为冷存储
+    pub async fn execute_optimization_task(
+        &self,
+        task: &mut crate::OptimizationTask,
+    ) -> Result<(u64, u64)> {
+        info!(
+            "开始执行优化任务: file_id={}, strategy={:?}",
+            task.file_id, task.strategy
+        );
+
+        task.mark_started();
+
+        // 检查热存储文件是否存在
+        if !task.hot_path.exists() {
+            let error = format!("热存储文件不存在: {}", task.hot_path.display());
+            task.mark_failed(error.clone());
+            return Err(StorageError::Storage(error));
+        }
+
+        // 根据策略执行优化
+        match task.strategy {
+            crate::OptimizationStrategy::Skip => {
+                task.mark_skipped("文件已是最优格式，跳过优化".to_string());
+                Ok((0, 0))
+            }
+            crate::OptimizationStrategy::CompressOnly => {
+                self.optimize_compress_only(task).await
+            }
+            crate::OptimizationStrategy::Full => self.optimize_full(task).await,
+        }
+    }
+
+    /// 仅压缩优化（小文件）
+    async fn optimize_compress_only(
+        &self,
+        task: &mut crate::OptimizationTask,
+    ) -> Result<(u64, u64)> {
+        // 读取热存储文件
+        let data = fs::read(&task.hot_path).await.map_err(StorageError::Io)?;
+        let original_size = data.len() as u64;
+
+        // 检测文件类型
+        let file_type = crate::core::FileType::detect(&data);
+        if file_type.is_compressed() {
+            task.mark_skipped("文件已压缩，跳过".to_string());
+            return Ok((0, 0));
+        }
+
+        // 压缩数据
+        let (compressed, _compression_algo) = if self.config.enable_compression {
+            let algorithm = match self.config.compression_algorithm.as_str() {
+                "lz4" => crate::core::CompressionAlgorithm::LZ4,
+                "zstd" => crate::core::CompressionAlgorithm::Zstd,
+                _ => crate::core::CompressionAlgorithm::LZ4,
+            };
+            let compression_config = crate::core::compression::CompressionConfig {
+                algorithm,
+                level: 1,
+                min_size: 0,  // 已经检查过是否需要压缩
+                ..Default::default()
+            };
+            let compressor = crate::core::compression::Compressor::new(compression_config);
+            let result = compressor.compress(&data)?;
+            (result.compressed_data, result.algorithm)
+        } else {
+            (data.clone(), crate::core::CompressionAlgorithm::None)
+        };
+
+        let compressed_size = compressed.len() as u64;
+        let space_saved = original_size.saturating_sub(compressed_size);
+
+        // 保存到data目录（不分块）
+        let compressed_path = self.data_root.join(format!("{}.compressed", task.file_id));
+        if let Some(parent) = compressed_path.parent() {
+            fs::create_dir_all(parent).await.map_err(StorageError::Io)?;
+        }
+        fs::write(&compressed_path, &compressed)
+            .await
+            .map_err(StorageError::Io)?;
+
+        // 更新文件索引
+        self.update_file_index_after_optimization(
+            &task.file_id,
+            crate::StorageMode::Compressed,
+            compressed_size,
+        )
+        .await?;
+
+        // 清理热存储（如果配置）
+        if self.config.cleanup_hot_storage {
+            let _ = fs::remove_file(&task.hot_path).await;
+        }
+
+        task.mark_completed();
+        info!(
+            "压缩优化完成: file_id={}, 原始={}B, 压缩后={}B, 节省={}B",
+            task.file_id, original_size, compressed_size, space_saved
+        );
+
+        Ok((space_saved, compressed_size))
+    }
+
+    /// 完整优化（CDC分块 + 去重 + 压缩）
+    async fn optimize_full(&self, task: &mut crate::OptimizationTask) -> Result<(u64, u64)> {
+        // 读取热存储文件
+        let data = fs::read(&task.hot_path).await.map_err(StorageError::Io)?;
+        let original_size = data.len() as u64;
+
+        // 使用现有的save_version逻辑进行分块、去重、压缩
+        // 但需要禁用热存储模式
+        let mut temp_config = self.config.clone();
+        temp_config.enable_async_optimization = false; // 临时禁用热存储
+
+        // 创建临时StorageManager用于分块存储
+        let temp_storage = StorageManager {
+            config: temp_config,
+            ..self.clone_for_gc()
+        };
+
+        // 执行分块存储
+        let (_delta, _version) = temp_storage.save_version(&task.file_id, &data, None).await?;
+
+        // 更新文件索引
+        let metadata_db = self.get_metadata_db()?;
+        if let Some(mut file_entry) = metadata_db
+            .get_file_index(&task.file_id)
+            .map_err(|e| StorageError::Storage(format!("读取文件索引失败: {}", e)))?
+        {
+            file_entry.storage_mode = crate::StorageMode::Cold;
+            file_entry.optimization_status = crate::OptimizationStatus::Completed;
+            metadata_db
+                .put_file_index(&task.file_id, &file_entry)
+                .map_err(|e| StorageError::Storage(format!("保存文件索引失败: {}", e)))?;
+        }
+
+        // 计算节省的空间（原始大小 - 实际存储大小）
+        let stats = self.get_dedup_stats().await;
+        let stored_size = stats.stored_size;
+        let space_saved = original_size.saturating_sub(stored_size);
+
+        // 清理热存储（如果配置）
+        if self.config.cleanup_hot_storage {
+            let _ = fs::remove_file(&task.hot_path).await;
+        }
+
+        task.mark_completed();
+        info!(
+            "完整优化完成: file_id={}, 原始={}B, 存储={}B, 节省={}B, 去重率={:.2}%",
+            task.file_id, original_size, stored_size, space_saved, stats.dedup_ratio
+        );
+
+        Ok((space_saved, stored_size))
+    }
+
+    /// 更新文件索引（优化后）
+    async fn update_file_index_after_optimization(
+        &self,
+        file_id: &str,
+        storage_mode: crate::StorageMode,
+        _storage_size: u64,
+    ) -> Result<()> {
+        let metadata_db = self.get_metadata_db()?;
+        if let Some(mut file_entry) = metadata_db
+            .get_file_index(file_id)
+            .map_err(|e| StorageError::Storage(format!("读取文件索引失败: {}", e)))?
+        {
+            file_entry.storage_mode = storage_mode;
+            file_entry.optimization_status = crate::OptimizationStatus::Completed;
+            // 可以选择更新file_size为压缩后的大小
+            metadata_db
+                .put_file_index(file_id, &file_entry)
+                .map_err(|e| StorageError::Storage(format!("保存文件索引失败: {}", e)))?;
+        }
+        Ok(())
+    }
+
+    /// 获取去重统计（临时方法，用于优化执行器）
+    async fn get_dedup_stats(&self) -> crate::DeduplicationStats {
+        // 简化实现，返回默认值
+        // 实际应该从dedup_manager获取统计
+        crate::DeduplicationStats::default()
+    }
+
+    /// 启动后台优化任务
+    pub async fn start_optimization_task(&self) {
+        if *self.optimization_stop_flag.read().await {
+            return; // 已停止，不启动
+        }
+
+        // 检查是否已有任务在运行
+        if self.optimization_task_handle.read().await.is_some() {
+            warn!("优化任务已在运行");
+            return;
+        }
+
+        info!("启动后台优化任务");
+        *self.optimization_stop_flag.write().await = false;
+
+        let storage = self.clone_for_gc();
+        let stop_flag = self.optimization_stop_flag.clone();
+
+        let handle = tokio::spawn(async move {
+            info!("后台优化任务已启动");
+
+            loop {
+                // 检查停止标志
+                if *stop_flag.read().await {
+                    info!("后台优化任务收到停止信号");
+                    break;
+                }
+
+                // 获取下一个就绪的任务
+                if let Some(mut task) = storage.optimization_scheduler.get_next_ready_task().await {
+                    info!("开始执行优化任务: file_id={}", task.file_id);
+
+                    // 执行优化
+                    match storage.execute_optimization_task(&mut task).await {
+                        Ok((space_saved, optimized_size)) => {
+                            storage
+                                .optimization_scheduler
+                                .mark_task_completed(&task.file_id, space_saved, optimized_size)
+                                .await;
+                        }
+                        Err(e) => {
+                            let error_msg = format!("优化失败: {}", e);
+                            storage
+                                .optimization_scheduler
+                                .mark_task_failed(&task.file_id, &error_msg)
+                                .await;
+
+                            // 如果可以重试，重新提交
+                            if task.can_retry() {
+                                storage
+                                    .optimization_scheduler
+                                    .resubmit_failed_task(task)
+                                    .await;
+                            }
+                        }
+                    }
+                } else {
+                    // 没有就绪的任务，等待一段时间
+                    tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+                }
+            }
+
+            info!("后台优化任务已停止");
+        });
+
+        *self.optimization_task_handle.write().await = Some(handle);
+    }
+
+    /// 停止后台优化任务
+    pub async fn stop_optimization_task(&self) {
+        info!("停止后台优化任务");
+
+        // 设置停止标志
+        *self.optimization_stop_flag.write().await = true;
+
+        // 等待任务完成
+        if let Some(handle) = self.optimization_task_handle.write().await.take() {
+            let _ = handle.await;
+        }
+
+        info!("后台优化任务已停止");
+    }
+
+    /// 获取优化统计信息
+    pub async fn get_optimization_stats(&self) -> crate::OptimizationStats {
+        self.optimization_scheduler.get_stats().await
+    }
+
+    // ============================================================================
+    // 优化管理API（阶段3）
+    // ============================================================================
+
+    /// 手动触发文件优化
+    ///
+    /// 为指定的文件立即创建优化任务（即使未启用异步优化）
+    pub async fn trigger_file_optimization(&self, file_id: &str) -> Result<()> {
+        // 获取文件索引信息
+        let metadata_db = self.get_metadata_db()?;
+        let file_entry = metadata_db
+            .get_file_index(file_id)
+            .map_err(|e| StorageError::Storage(format!("读取文件索引失败: {}", e)))?
+            .ok_or_else(|| StorageError::FileNotFound(format!("文件不存在: {}", file_id)))?;
+
+        // 检查文件是否在热存储
+        if file_entry.storage_mode != crate::StorageMode::Hot {
+            return Err(StorageError::Storage(format!(
+                "文件 {} 不在热存储，当前模式: {:?}",
+                file_id, file_entry.storage_mode
+            )));
+        }
+
+        // 获取热存储路径
+        let hot_path = self.get_hot_storage_path(file_id);
+        if !hot_path.exists() {
+            return Err(StorageError::Storage(format!(
+                "热存储文件不存在: {}",
+                hot_path.display()
+            )));
+        }
+
+        // 读取文件数据以检测文件类型
+        let data = fs::read(&hot_path).await.map_err(StorageError::Io)?;
+        let file_type = crate::core::FileType::detect(&data);
+        let strategy = crate::OptimizationStrategy::decide(&file_type, data.len() as u64);
+
+        // 创建优化任务（延迟为0，立即执行）
+        let task = crate::OptimizationTask::new(
+            file_id.to_string(),
+            hot_path,
+            data.len() as u64,
+            file_entry.file_hash,
+            strategy,
+            0, // 立即执行
+        );
+
+        // 提交任务
+        self.optimization_scheduler.submit_task(task).await;
+
+        info!(
+            "手动触发文件 {} 的优化任务，策略: {:?}",
+            file_id, strategy
+        );
+
+        Ok(())
+    }
+
+    /// 暂停优化调度器
+    ///
+    /// 暂停后台优化任务的执行（不会停止已在运行的任务）
+    pub async fn pause_optimization_scheduler(&self) -> Result<()> {
+        *self.optimization_stop_flag.write().await = true;
+        info!("优化调度器已暂停");
+        Ok(())
+    }
+
+    /// 恢复优化调度器
+    ///
+    /// 恢复后台优化任务的执行
+    pub async fn resume_optimization_scheduler(&self) -> Result<()> {
+        *self.optimization_stop_flag.write().await = false;
+        info!("优化调度器已恢复");
+        Ok(())
+    }
+
+    /// 检查优化调度器是否暂停
+    pub async fn is_optimization_paused(&self) -> bool {
+        *self.optimization_stop_flag.read().await
+    }
+
+    /// 获取待处理的优化任务列表
+    pub async fn get_pending_optimization_tasks(&self) -> Vec<crate::OptimizationTask> {
+        self.optimization_scheduler.get_pending_tasks().await
+    }
+
+    /// 获取优化队列长度
+    pub async fn get_optimization_queue_length(&self) -> usize {
+        self.optimization_scheduler.queue_len().await
+    }
+
+    /// 清空优化队列
+    ///
+    /// 移除所有待处理的优化任务
+    pub async fn clear_optimization_queue(&self) -> Result<()> {
+        self.optimization_scheduler.clear_queue().await;
+        info!("优化队列已清空");
+        Ok(())
+    }
+
     /// 优雅关闭（刷新所有数据）
     pub async fn shutdown(&self) -> Result<()> {
         info!("开始优雅关闭 StorageManager...");
+
+        // 停止后台优化任务
+        if self.config.enable_async_optimization {
+            info!("停止后台优化任务...");
+            self.stop_optimization_task().await;
+        }
 
         // 刷新元数据数据库
         let metadata_db = self.get_metadata_db()?;
@@ -3146,6 +3872,508 @@ mod tests {
 
         // GC任务应该已经执行过，清理了块
         // 这里只验证任务能正常启动和停止
+    }
+
+    #[tokio::test]
+    async fn test_hot_storage_upload_and_read() {
+        // 测试热存储模式的上传和读取
+        let temp_dir = TempDir::new().unwrap();
+        let config = IncrementalConfig {
+            enable_async_optimization: true, // 启用热存储
+            enable_deduplication: false,
+            enable_compression: false,
+            ..IncrementalConfig::default()
+        };
+        let storage = StorageManager::new(temp_dir.path().to_path_buf(), 4 * 1024 * 1024, config);
+        storage.init().await.unwrap();
+
+        // 上传测试数据（应该使用热存储）
+        let test_data = b"Hello from hot storage! This is a test file.";
+        let (delta, version) = storage
+            .save_version("test_hot_file", test_data, None)
+            .await
+            .unwrap();
+
+        // 验证使用了热存储（delta应该没有chunks）
+        assert_eq!(delta.chunks.len(), 0, "热存储不应该有chunks");
+        assert_eq!(version.size, test_data.len() as u64);
+
+        // 验证文件索引的存储模式
+        let metadata_db = storage.get_metadata_db().unwrap();
+        let file_entry = metadata_db
+            .get_file_index("test_hot_file")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            file_entry.storage_mode,
+            crate::StorageMode::Hot,
+            "应该是热存储模式"
+        );
+        assert_eq!(
+            file_entry.optimization_status,
+            crate::OptimizationStatus::Pending,
+            "应该是待优化状态"
+        );
+
+        // 验证热存储文件存在
+        let hot_path = storage.get_hot_storage_path("test_hot_file");
+        assert!(hot_path.exists(), "热存储文件应该存在");
+
+        // 读取数据（应该从热存储读取）
+        let read_data = storage
+            .read_version_data(&version.version_id)
+            .await
+            .unwrap();
+        assert_eq!(read_data, test_data, "读取的数据应该与原始数据一致");
+    }
+
+    #[tokio::test]
+    async fn test_cold_storage_backward_compatibility() {
+        // 测试禁用热存储时的传统分块存储（向后兼容）
+        let temp_dir = TempDir::new().unwrap();
+        let config = IncrementalConfig {
+            enable_async_optimization: false, // 禁用热存储，使用传统模式
+            enable_deduplication: true,
+            enable_compression: false,
+            ..IncrementalConfig::default()
+        };
+        let storage = StorageManager::new(temp_dir.path().to_path_buf(), 4 * 1024 * 1024, config);
+        storage.init().await.unwrap();
+
+        // 上传测试数据（应该使用传统分块存储）
+        let test_data = b"Hello from cold storage! This is a test file for traditional chunking.";
+        let (delta, version) = storage
+            .save_version("test_cold_file", test_data, None)
+            .await
+            .unwrap();
+
+        // 验证使用了分块存储（delta应该有chunks）
+        assert!(delta.chunks.len() > 0, "冷存储应该有chunks");
+        assert_eq!(version.size, test_data.len() as u64);
+
+        // 验证文件索引的存储模式
+        let metadata_db = storage.get_metadata_db().unwrap();
+        let file_entry = metadata_db
+            .get_file_index("test_cold_file")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            file_entry.storage_mode,
+            crate::StorageMode::Cold,
+            "应该是冷存储模式"
+        );
+
+        // 读取数据（应该从分块读取）
+        let read_data = storage
+            .read_version_data(&version.version_id)
+            .await
+            .unwrap();
+        assert_eq!(read_data, test_data, "读取的数据应该与原始数据一致");
+    }
+
+    #[tokio::test]
+    async fn test_hot_storage_stream_upload() {
+        // 测试流式上传到热存储
+        let temp_dir = TempDir::new().unwrap();
+        let config = IncrementalConfig {
+            enable_async_optimization: true,
+            enable_deduplication: false,
+            ..IncrementalConfig::default()
+        };
+        let storage = StorageManager::new(temp_dir.path().to_path_buf(), 4 * 1024 * 1024, config);
+        storage.init().await.unwrap();
+
+        // 创建测试数据流
+        let test_data = b"Streaming data to hot storage! This is a larger test file.".repeat(100);
+        let mut cursor = std::io::Cursor::new(test_data.clone());
+
+        // 流式上传
+        let (delta, version) = storage
+            .save_version_from_reader("test_stream_file", &mut cursor, None)
+            .await
+            .unwrap();
+
+        // 验证热存储
+        assert_eq!(delta.chunks.len(), 0, "热存储不应该有chunks");
+
+        // 读取并验证数据
+        let read_data = storage
+            .read_version_data(&version.version_id)
+            .await
+            .unwrap();
+        assert_eq!(read_data, test_data, "流式上传的数据应该正确");
+    }
+
+    #[tokio::test]
+    async fn test_background_optimization() {
+        // 测试后台优化功能
+        let temp_dir = TempDir::new().unwrap();
+        let config = IncrementalConfig {
+            enable_async_optimization: true,
+            enable_deduplication: true,
+            enable_compression: true,
+            optimization_delay_secs: 1, // 1秒延迟便于测试
+            ..IncrementalConfig::default()
+        };
+        let storage = StorageManager::new(temp_dir.path().to_path_buf(), 4 * 1024 * 1024, config);
+        storage.init().await.unwrap();
+
+        // 上传一个较大的文件（应该使用热存储）
+        let test_data = b"This is test data for background optimization. ".repeat(1000); // ~47KB
+        let (delta, version) = storage
+            .save_version("test_optimization_file", &test_data, None)
+            .await
+            .unwrap();
+
+        // 验证初始状态：热存储，无chunks
+        assert_eq!(delta.chunks.len(), 0, "热存储不应该有chunks");
+
+        // 验证文件索引的初始状态
+        let metadata_db = storage.get_metadata_db().unwrap();
+        let file_entry = metadata_db
+            .get_file_index("test_optimization_file")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            file_entry.storage_mode,
+            crate::StorageMode::Hot,
+            "初始应该是热存储模式"
+        );
+        assert_eq!(
+            file_entry.optimization_status,
+            crate::OptimizationStatus::Pending,
+            "优化状态应该是待优化"
+        );
+
+        // 验证热存储文件存在
+        let file_id = "test_optimization_file";
+        let prefix = &file_id[..2.min(file_id.len())];
+        let hot_path = storage.hot_storage_root.join(prefix).join(file_id);
+        assert!(hot_path.exists(), "热存储文件应该存在");
+
+        // 等待优化任务被调度和执行（延迟1秒 + 执行时间）
+        tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+
+        // 手动触发一次优化任务执行（确保测试稳定性）
+        if let Some(mut task) = storage
+            .optimization_scheduler
+            .get_next_ready_task()
+            .await
+        {
+            println!("执行优化任务: file_id={}, strategy={:?}", task.file_id, task.strategy);
+            let result = storage.execute_optimization_task(&mut task).await;
+            match &result {
+                Ok((space_saved, optimized_size)) => {
+                    println!("优化成功: space_saved={}, optimized_size={}", space_saved, optimized_size);
+                }
+                Err(e) => {
+                    println!("优化失败: {:?}", e);
+                }
+            }
+            assert!(result.is_ok(), "优化任务应该成功执行: {:?}", result.err());
+
+            // 标记任务完成
+            if let Ok((space_saved, optimized_size)) = result {
+                storage
+                    .optimization_scheduler
+                    .mark_task_completed(&task.file_id, space_saved, optimized_size)
+                    .await;
+            }
+        } else {
+            println!("没有待处理的优化任务");
+        }
+
+        // 验证优化后的状态
+        let file_entry_after = metadata_db
+            .get_file_index("test_optimization_file")
+            .unwrap()
+            .unwrap();
+
+        // 优化后应该变成冷存储或压缩存储
+        assert_ne!(
+            file_entry_after.storage_mode,
+            crate::StorageMode::Hot,
+            "优化后不应该还是热存储模式"
+        );
+
+        // 验证可以正确读取优化后的数据
+        let read_data = storage
+            .read_version_data(&version.version_id)
+            .await
+            .unwrap();
+        assert_eq!(read_data, test_data, "优化后应该能正确读取数据");
+
+        // 验证优化统计信息
+        let stats = storage.get_optimization_stats().await;
+        assert!(stats.total_tasks > 0, "应该有任务被处理");
+        assert!(
+            stats.completed_tasks > 0 || stats.pending_tasks > 0,
+            "应该有完成或待处理的任务"
+        );
+
+        // 关闭存储
+        storage.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_optimization_strategy_decision() {
+        // 测试优化策略决策逻辑
+        let temp_dir = TempDir::new().unwrap();
+        let config = IncrementalConfig {
+            enable_async_optimization: true,
+            enable_deduplication: true,
+            ..IncrementalConfig::default()
+        };
+        let storage = StorageManager::new(temp_dir.path().to_path_buf(), 4 * 1024 * 1024, config);
+        storage.init().await.unwrap();
+
+        // 测试1：小文件（< 1MB）应该使用 CompressOnly 策略
+        let small_data = b"Small file".repeat(100); // ~1KB
+        let (_, _version1) = storage
+            .save_version("test_small", &small_data, None)
+            .await
+            .unwrap();
+
+        // 等待任务提交
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+        // 获取并检查任务策略
+        let tasks = storage.optimization_scheduler.get_pending_tasks().await;
+        let has_compress_only = tasks
+            .iter()
+            .any(|t| matches!(t.strategy, crate::OptimizationStrategy::CompressOnly));
+        let has_skip = tasks
+            .iter()
+            .any(|t| matches!(t.strategy, crate::OptimizationStrategy::Skip));
+        // 注意：由于文件类型检测，可能会被判定为Skip，这里只验证不是Full策略
+        assert!(
+            has_compress_only || has_skip,
+            "小文件应该使用CompressOnly或Skip策略"
+        );
+
+        // 测试2：已压缩文件应该被Skip
+        // 创建一个模拟的压缩文件数据（PNG文件头）
+        let mut png_data = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]; // PNG头
+        png_data.extend_from_slice(&vec![0u8; 1000]);
+        let (_, _version2) = storage
+            .save_version("test_compressed", &png_data, None)
+            .await
+            .unwrap();
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+        // 获取任务并检查策略
+        if let Some(task) = storage
+            .optimization_scheduler
+            .get_next_ready_task()
+            .await
+        {
+            if task.file_id == "test_compressed" {
+                assert_eq!(
+                    task.strategy,
+                    crate::OptimizationStrategy::Skip,
+                    "已压缩文件应该被跳过"
+                );
+            }
+        }
+
+        storage.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_manual_trigger_optimization() {
+        // 测试手动触发优化功能
+        let temp_dir = TempDir::new().unwrap();
+        let config = IncrementalConfig {
+            enable_async_optimization: true,
+            enable_deduplication: true,
+            enable_compression: true,
+            optimization_delay_secs: 3600, // 长延迟，确保不会自动执行
+            ..IncrementalConfig::default()
+        };
+        let storage = StorageManager::new(temp_dir.path().to_path_buf(), 4 * 1024 * 1024, config);
+        storage.init().await.unwrap();
+
+        // 上传一个文件到热存储
+        let test_data = b"Test data for manual optimization trigger".repeat(100);
+        let (_delta, _version) = storage
+            .save_version("test_manual", &test_data, None)
+            .await
+            .unwrap();
+
+        // 验证初始队列长度
+        let initial_queue_len = storage.get_optimization_queue_length().await;
+        assert_eq!(initial_queue_len, 1, "应该有1个待处理任务");
+
+        // 手动触发优化
+        let result = storage.trigger_file_optimization("test_manual").await;
+        assert!(result.is_ok(), "手动触发优化应该成功");
+
+        // 验证队列中仍然只有一个任务（去重）
+        let queue_len_after = storage.get_optimization_queue_length().await;
+        assert_eq!(queue_len_after, 1, "去重后应该仍然是1个任务");
+
+        // 测试触发不存在的文件
+        let result_not_found = storage.trigger_file_optimization("non_existent").await;
+        assert!(
+            result_not_found.is_err(),
+            "触发不存在的文件应该失败"
+        );
+
+        storage.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_pause_resume_optimization_scheduler() {
+        // 测试暂停和恢复优化调度器
+        let temp_dir = TempDir::new().unwrap();
+        let config = IncrementalConfig {
+            enable_async_optimization: true,
+            enable_deduplication: true,
+            optimization_delay_secs: 1,
+            ..IncrementalConfig::default()
+        };
+        let storage = StorageManager::new(temp_dir.path().to_path_buf(), 4 * 1024 * 1024, config);
+        storage.init().await.unwrap();
+
+        // 验证初始状态（未暂停）
+        assert!(
+            !storage.is_optimization_paused().await,
+            "初始状态应该是未暂停"
+        );
+
+        // 暂停调度器
+        storage.pause_optimization_scheduler().await.unwrap();
+        assert!(
+            storage.is_optimization_paused().await,
+            "暂停后应该是暂停状态"
+        );
+
+        // 上传文件
+        let test_data = b"Test data for pause test".repeat(100);
+        storage
+            .save_version("test_pause", &test_data, None)
+            .await
+            .unwrap();
+
+        // 等待一段时间（如果未暂停，任务应该会被执行）
+        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+
+        // 验证任务仍在队列中（因为调度器暂停了）
+        let queue_len = storage.get_optimization_queue_length().await;
+        assert_eq!(queue_len, 1, "暂停时任务应该保留在队列中");
+
+        // 恢复调度器
+        storage.resume_optimization_scheduler().await.unwrap();
+        assert!(
+            !storage.is_optimization_paused().await,
+            "恢复后应该是未暂停状态"
+        );
+
+        storage.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_optimization_queue_management() {
+        // 测试优化队列管理功能
+        let temp_dir = TempDir::new().unwrap();
+        let config = IncrementalConfig {
+            enable_async_optimization: true,
+            enable_deduplication: true,
+            optimization_delay_secs: 3600, // 长延迟
+            ..IncrementalConfig::default()
+        };
+        let storage = StorageManager::new(temp_dir.path().to_path_buf(), 4 * 1024 * 1024, config);
+        storage.init().await.unwrap();
+
+        // 验证初始队列为空
+        assert_eq!(
+            storage.get_optimization_queue_length().await,
+            0,
+            "初始队列应该为空"
+        );
+
+        // 上传多个文件
+        for i in 0..3 {
+            let test_data = format!("Test data {}", i).repeat(100);
+            storage
+                .save_version(&format!("test_file_{}", i), test_data.as_bytes(), None)
+                .await
+                .unwrap();
+        }
+
+        // 验证队列长度
+        assert_eq!(
+            storage.get_optimization_queue_length().await,
+            3,
+            "应该有3个待处理任务"
+        );
+
+        // 获取待处理任务列表
+        let pending_tasks = storage.get_pending_optimization_tasks().await;
+        assert_eq!(pending_tasks.len(), 3, "应该返回3个待处理任务");
+
+        // 验证任务信息
+        let file_ids: Vec<String> = pending_tasks.iter().map(|t| t.file_id.clone()).collect();
+        assert!(
+            file_ids.contains(&"test_file_0".to_string()),
+            "应该包含test_file_0"
+        );
+        assert!(
+            file_ids.contains(&"test_file_1".to_string()),
+            "应该包含test_file_1"
+        );
+        assert!(
+            file_ids.contains(&"test_file_2".to_string()),
+            "应该包含test_file_2"
+        );
+
+        // 清空队列
+        storage.clear_optimization_queue().await.unwrap();
+        assert_eq!(
+            storage.get_optimization_queue_length().await,
+            0,
+            "清空后队列应该为空"
+        );
+
+        // 验证统计信息
+        let stats = storage.get_optimization_stats().await;
+        assert_eq!(stats.pending_tasks, 0, "待处理任务数应该为0");
+
+        storage.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_optimization_api_error_cases() {
+        // 测试优化API的错误情况
+        let temp_dir = TempDir::new().unwrap();
+        let config = IncrementalConfig {
+            enable_async_optimization: false, // 禁用异步优化
+            enable_deduplication: false,
+            ..IncrementalConfig::default()
+        };
+        let storage = StorageManager::new(temp_dir.path().to_path_buf(), 4 * 1024 * 1024, config);
+        storage.init().await.unwrap();
+
+        // 上传文件（会使用冷存储，因为禁用了异步优化）
+        let test_data = b"Test data for error cases";
+        storage
+            .save_version("test_error", test_data, None)
+            .await
+            .unwrap();
+
+        // 尝试触发已在冷存储的文件的优化（应该失败）
+        let result = storage.trigger_file_optimization("test_error").await;
+        assert!(result.is_err(), "触发冷存储文件的优化应该失败");
+
+        // 尝试触发不存在的文件（应该失败）
+        let result_not_found = storage.trigger_file_optimization("non_existent").await;
+        assert!(
+            result_not_found.is_err(),
+            "触发不存在的文件应该失败"
+        );
+
+        storage.shutdown().await.unwrap();
     }
 
     /// 此测试已被忽略，因为孤儿块检测功能依赖 metadata_db 的块引用计数

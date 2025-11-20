@@ -143,14 +143,6 @@ pub struct IncrementalConfig {
     pub enable_auto_gc: bool,
     /// GC触发间隔（秒）
     pub gc_interval_secs: u64,
-    /// 启用异步优化（热存储+后台优化）
-    pub enable_async_optimization: bool,
-    /// 优化延迟（秒）- 上传后多久开始优化
-    pub optimization_delay_secs: u64,
-    /// 是否清理热存储（优化后删除原始文件）
-    pub cleanup_hot_storage: bool,
-    /// 大文件阈值（字节）- 超过此大小的文件直接使用热存储
-    pub large_file_threshold: u64,
 }
 
 impl Default for IncrementalConfig {
@@ -167,10 +159,6 @@ impl Default for IncrementalConfig {
             enable_deduplication: true,
             enable_auto_gc: true,
             gc_interval_secs: 3600, // 默认每小时执行一次GC
-            enable_async_optimization: false, // 默认禁用异步优化（向后兼容）
-            optimization_delay_secs: 300,     // 5分钟后开始优化
-            cleanup_hot_storage: false,       // 保留热存储备份
-            large_file_threshold: 1024 * 1024 * 1024, // 1GB
         }
     }
 }

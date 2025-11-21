@@ -393,29 +393,17 @@ fn state_injector(state: AppState) -> StateInjector {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::StorageManager;
     use crate::sync::crdt::SyncManager;
     use silent::extractor::Configs as CfgExtractor;
     use tempfile::TempDir;
 
-    pub(crate) async fn create_test_storage() -> (StorageManager, TempDir) {
-        let temp_dir = TempDir::new().unwrap();
-        let storage = StorageManager::new(
-            temp_dir.path().to_path_buf(),
-            64 * 1024, // 64KB chunk size for tests
-            crate::storage::IncrementalConfig::default(),
-        );
-        storage.init().await.unwrap();
-        (storage, temp_dir)
-    }
-
     pub(crate) async fn create_test_app_state() -> (AppState, TempDir) {
-        let (storage, temp_dir) = create_test_storage().await;
+        // 使用共享的测试存储（并发安全）
+        let storage = crate::storage::init_test_storage_async().await;
+        let storage_arc = Arc::new(storage.clone());
 
-        // 初始化全局 storage（测试环境）
-        let _ = crate::storage::init_global_storage(storage.clone());
-
-        let storage_arc = Arc::new(storage);
+        // 为 SearchEngine 创建独立的临时目录
+        let temp_dir = TempDir::new().unwrap();
 
         let sync_manager = SyncManager::new("test-node".to_string(), None);
         let search_engine = Arc::new(

@@ -651,28 +651,31 @@ impl StorageManager {
     /// 获取版本信息
     pub async fn get_version_info(&self, version_id: &str) -> Result<VersionInfo> {
         // 首先尝试从内存缓存读取
-        if let Some(info) = self.version_index.read().await.get(version_id) {
-            return Ok(info.clone());
-        }
+        {
+            let cache = self.version_index.read().await;
+            if let Some(info) = cache.get(version_id) {
+                return Ok(info.clone());
+            }
+        } // 释放读锁
 
         // 从 Sled 读取
         let metadata_db = self.get_metadata_db()?;
-        if let Some(version_info) = metadata_db
+        let version_info = metadata_db
             .get_version_info(version_id)
             .map_err(|e| StorageError::Storage(format!("从 Sled 读取版本信息失败: {}", e)))?
-        {
-            // 更新内存缓存
-            self.version_index
-                .write()
-                .await
-                .insert(version_id.to_string(), version_info.clone());
-            return Ok(version_info);
-        }
+            .ok_or_else(|| {
+                StorageError::Storage(format!("版本信息不存在: {}", version_id))
+            })?;
 
-        Err(StorageError::Storage(format!(
-            "版本信息不存在: {}",
-            version_id
-        )))
+        // 双重检查锁定：获取写锁前再次检查缓存
+        let mut cache = self.version_index.write().await;
+        if let Some(info) = cache.get(version_id) {
+            // 另一个线程已经更新了缓存
+            return Ok(info.clone());
+        }
+        // 更新内存缓存
+        cache.insert(version_id.to_string(), version_info.clone());
+        Ok(version_info)
     }
 
     /// 列出文件的所有版本
@@ -768,15 +771,22 @@ impl StorageManager {
         drop(version_index);
 
         // 计算唯一块数量
+        // 先收集所有 chunk 路径，然后释放锁，最后再执行 I/O 操作
+        let chunk_paths: Vec<(String, PathBuf)> = {
+            let block_index = self.block_index.read().await;
+            block_index
+                .iter()
+                .map(|(id, path)| (id.clone(), path.clone()))
+                .collect()
+        }; // 锁在这里自动释放
+
         let mut chunk_sizes: HashMap<String, u64> = HashMap::new();
-        let block_index = self.block_index.read().await;
-        for (chunk_id, chunk_path) in block_index.iter() {
+        for (chunk_id, chunk_path) in chunk_paths {
             if let Ok(metadata) = fs::metadata(chunk_path).await {
-                chunk_sizes.insert(chunk_id.clone(), metadata.len());
+                chunk_sizes.insert(chunk_id, metadata.len());
                 unique_chunks += 1;
             }
         }
-        drop(block_index);
 
         let total_chunk_size: u64 = chunk_sizes.values().sum();
 
@@ -1829,10 +1839,10 @@ impl StorageManager {
             compressor: self.compressor.clone(),
             dedup_manager: self.dedup_manager.clone(),
             gc_task_handle: Arc::new(RwLock::new(None)),
-            gc_stop_flag: Arc::new(tokio::sync::RwLock::new(false)),
+            gc_stop_flag: self.gc_stop_flag.clone(),
             optimization_scheduler: self.optimization_scheduler.clone(),
             optimization_task_handle: Arc::new(RwLock::new(None)),
-            optimization_stop_flag: Arc::new(tokio::sync::RwLock::new(false)),
+            optimization_stop_flag: self.optimization_stop_flag.clone(),
         }
     }
 

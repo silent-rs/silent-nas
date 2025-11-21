@@ -266,32 +266,30 @@ impl IncrementalSyncHandler {
 mod tests {
     use super::*;
     use silent_storage::StorageManager;
-    use std::path::PathBuf;
     use tempfile::TempDir;
 
     // 为每个测试创建独立的存储实例（避免并行测试时的锁竞争）
     async fn create_test_storage() -> (StorageManager, TempDir) {
+        // 使用共享的测试存储（并发安全，返回引用）
+        let _storage = crate::storage::init_test_storage_async().await;
+
+        // 创建一个临时目录用于返回
         let temp_dir = TempDir::new().unwrap();
-        let config = crate::storage::IncrementalConfig {
-            enable_compression: false,
-            enable_deduplication: false,
-            ..crate::storage::IncrementalConfig::default()
-        };
-        let storage = StorageManager::new(PathBuf::from(temp_dir.path()), 64 * 1024, config);
-        storage.init().await.unwrap();
 
-        // 设置为全局存储（这样handler中的 storage::storage() 调用才能工作）
-        let _ = crate::storage::init_global_storage(storage.clone());
-
-        (storage, temp_dir)
+        // 注意：测试中应该使用 crate::storage::storage() 获取全局存储
+        // 而不是使用这里返回的storage实例
+        (_storage.clone(), temp_dir)
     }
 
     // 已删除 test_handler_creation - 测试价值不大，创建handler是trivial操作
 
     #[tokio::test]
     async fn test_calculate_local_signature() {
-        // 使用独立的测试存储
-        let (storage, _temp_dir) = create_test_storage().await;
+        // 确保全局存储已初始化
+        let _temp_dir = create_test_storage().await.1;
+
+        // 使用全局存储（handler内部也使用全局存储）
+        let storage = crate::storage::storage();
 
         // 创建测试文件
         let file_id = "test_calc_sig";

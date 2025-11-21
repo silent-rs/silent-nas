@@ -1537,29 +1537,24 @@ impl WebDavHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use silent_storage::StorageManager;
-    use std::path::PathBuf;
     use std::sync::Arc;
     use tempfile::TempDir;
 
     // 为每个测试创建独立的存储和handler（避免并行测试时的锁竞争）
     async fn build_handler_with_独立storage() -> (WebDavHandler, TempDir) {
+        // 使用共享的测试存储（并发安全）
+        let _storage = crate::storage::init_test_storage_async().await;
+
+        // 为 SearchEngine 创建独立的临时目录
         let temp_dir = TempDir::new().unwrap();
-        let config = crate::storage::IncrementalConfig {
-            enable_compression: false,
-            enable_deduplication: false,
-            ..crate::storage::IncrementalConfig::default()
-        };
-        let storage = StorageManager::new(PathBuf::from(temp_dir.path()), 64 * 1024, config);
-        storage.init().await.unwrap();
 
-        // 设置为全局存储
-        let _ = crate::storage::init_global_storage(storage.clone());
-
-        let dir = storage.root_dir();
         let syncm = crate::sync::crdt::SyncManager::new("node-test".to_string(), None);
         let search_engine = Arc::new(
-            crate::search::SearchEngine::new(dir.join("search_index"), dir.to_path_buf()).unwrap(),
+            crate::search::SearchEngine::new(
+                temp_dir.path().join("search_index"),
+                temp_dir.path().to_path_buf(),
+            )
+            .unwrap(),
         );
         let handler = WebDavHandler::new(
             None,

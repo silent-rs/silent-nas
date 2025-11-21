@@ -9,11 +9,13 @@ use crate::reliability::{ChunkVerifier, OrphanChunkCleaner, WalManager};
 use crate::{ChunkInfo, FileDelta, IncrementalConfig, VersionInfo};
 use async_trait::async_trait;
 use chrono::Local;
+use moka::future::Cache;
 use serde::{Deserialize, Serialize};
 use silent_nas_core::{FileMetadata, FileVersion, S3CompatibleStorageTrait, StorageManagerTrait};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::fs;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{OnceCell, RwLock};
@@ -87,10 +89,10 @@ pub struct StorageManager {
     chunk_size: usize,
     /// Sled 元数据数据库（在 init() 中初始化）
     metadata_db: Arc<OnceCell<SledMetadataDb>>,
-    /// 版本索引缓存（使用内部可变性）
-    version_index: Arc<RwLock<HashMap<String, VersionInfo>>>,
-    /// 块索引缓存（使用内部可变性）
-    block_index: Arc<RwLock<HashMap<String, PathBuf>>>,
+    /// 版本索引 LRU 缓存（有界缓存，防止 OOM）
+    version_cache: Cache<String, VersionInfo>,
+    /// 块索引 LRU 缓存（有界缓存，防止 OOM）
+    block_cache: Cache<String, PathBuf>,
     /// 缓存管理器（Phase 5 Step 3）
     cache_manager: Arc<CacheManager>,
     /// WAL 管理器（Phase 5 Step 4）
@@ -172,6 +174,21 @@ impl StorageManager {
         // 初始化优化调度器（最多2个并发任务）
         let optimization_scheduler = Arc::new(crate::OptimizationScheduler::new(2));
 
+        // 初始化 LRU 缓存（有界，防止 OOM）
+        // version_cache: 10,000 个版本，TTL 1小时，空闲5分钟淘汰
+        let version_cache = Cache::builder()
+            .max_capacity(10_000)
+            .time_to_live(Duration::from_secs(3600))
+            .time_to_idle(Duration::from_secs(300))
+            .build();
+
+        // block_cache: 50,000 个块，TTL 1小时，空闲5分钟淘汰
+        let block_cache = Cache::builder()
+            .max_capacity(50_000)
+            .time_to_live(Duration::from_secs(3600))
+            .time_to_idle(Duration::from_secs(300))
+            .build();
+
         Self {
             root_path,
             data_root,
@@ -181,8 +198,8 @@ impl StorageManager {
             chunk_root: chunk_root.clone(),
             chunk_size,
             metadata_db: Arc::new(OnceCell::new()),
-            version_index: Arc::new(RwLock::new(HashMap::new())),
-            block_index: Arc::new(RwLock::new(HashMap::new())),
+            version_cache,
+            block_cache,
             cache_manager: Arc::new(CacheManager::with_default()),
             wal_manager: Arc::new(RwLock::new(WalManager::new(wal_path))),
             chunk_verifier: Arc::new(ChunkVerifier::new(chunk_root.clone())),
@@ -648,29 +665,22 @@ impl StorageManager {
 
     /// 获取版本信息
     pub async fn get_version_info(&self, version_id: &str) -> Result<VersionInfo> {
-        // 首先尝试从内存缓存读取
-        {
-            let cache = self.version_index.read().await;
-            if let Some(info) = cache.get(version_id) {
-                return Ok(info.clone());
-            }
-        } // 释放读锁
+        // 首先尝试从 LRU 缓存读取（无锁并发安全）
+        if let Some(info) = self.version_cache.get(version_id).await {
+            return Ok(info);
+        }
 
-        // 从 Sled 读取
+        // 缓存未命中，从 Sled 读取
         let metadata_db = self.get_metadata_db()?;
         let version_info = metadata_db
             .get_version_info(version_id)
             .map_err(|e| StorageError::Storage(format!("从 Sled 读取版本信息失败: {}", e)))?
             .ok_or_else(|| StorageError::Storage(format!("版本信息不存在: {}", version_id)))?;
 
-        // 双重检查锁定：获取写锁前再次检查缓存
-        let mut cache = self.version_index.write().await;
-        if let Some(info) = cache.get(version_id) {
-            // 另一个线程已经更新了缓存
-            return Ok(info.clone());
-        }
-        // 更新内存缓存
-        cache.insert(version_id.to_string(), version_info.clone());
+        // 更新 LRU 缓存（无锁并发安全，自动淘汰）
+        self.version_cache
+            .insert(version_id.to_string(), version_info.clone())
+            .await;
         Ok(version_info)
     }
 
@@ -720,8 +730,8 @@ impl StorageManager {
             .remove_version_info(version_id)
             .map_err(|e| StorageError::Storage(format!("删除版本信息失败: {}", e)))?;
 
-        // 从内存索引中删除
-        self.version_index.write().await.remove(version_id);
+        // 从 LRU 缓存中删除
+        self.version_cache.invalidate(version_id).await;
 
         info!("删除版本: {}", version_id);
         Ok(())
@@ -758,33 +768,61 @@ impl StorageManager {
         let mut total_size = 0u64;
         let mut unique_chunks = 0;
 
-        let version_index = self.version_index.read().await;
-        for version in version_index.values() {
-            total_versions += 1;
-            total_size += version.storage_size;
-            total_chunks += version.chunk_count;
-        }
-        drop(version_index);
+        // 从 Sled 读取所有文件和版本信息
+        let metadata_db = self.get_metadata_db()?;
+        let all_files = metadata_db
+            .list_all_files()
+            .map_err(|e| StorageError::Storage(format!("读取文件列表失败: {}", e)))?;
 
-        // 计算唯一块数量
-        // 先收集所有 chunk 路径，然后释放锁，最后再执行 I/O 操作
-        let chunk_paths: Vec<(String, PathBuf)> = {
-            let block_index = self.block_index.read().await;
-            block_index
-                .iter()
-                .map(|(id, path)| (id.clone(), path.clone()))
-                .collect()
-        }; // 锁在这里自动释放
+        // 遍历所有文件的所有版本
+        for file_entry in all_files {
+            let versions = metadata_db
+                .list_file_versions(&file_entry.file_id)
+                .map_err(|e| StorageError::Storage(format!("读取版本列表失败: {}", e)))?;
 
-        let mut chunk_sizes: HashMap<String, u64> = HashMap::new();
-        for (chunk_id, chunk_path) in chunk_paths {
-            if let Ok(metadata) = fs::metadata(chunk_path).await {
-                chunk_sizes.insert(chunk_id, metadata.len());
-                unique_chunks += 1;
+            for version in versions {
+                total_versions += 1;
+                total_size += version.storage_size;
+                total_chunks += version.chunk_count;
             }
         }
 
-        let total_chunk_size: u64 = chunk_sizes.values().sum();
+        // 统计唯一块数量（扫描chunks目录）
+        let chunks_dir = self.chunk_root.join("data");
+        if chunks_dir.exists() {
+            let mut entries = fs::read_dir(&chunks_dir).await.map_err(StorageError::Io)?;
+            let mut total_chunk_size = 0u64;
+
+            while let Some(entry) = entries.next_entry().await? {
+                if entry.path().is_file() {
+                    unique_chunks += 1;
+                    if let Ok(metadata) = entry.metadata().await {
+                        total_chunk_size += metadata.len();
+                    }
+                }
+            }
+
+            return Ok(StorageStats {
+                total_versions,
+                total_chunks,
+                unique_chunks,
+                total_size,
+                total_chunk_size,
+                compression_ratio: if total_size > 0 {
+                    total_chunk_size as f64 / total_size as f64
+                } else {
+                    0.0
+                },
+                avg_chunk_size: if unique_chunks > 0 {
+                    total_chunk_size as f64 / unique_chunks as f64
+                } else {
+                    0.0
+                },
+            });
+        }
+
+        // 如果chunks目录不存在，返回基础统计
+        let total_chunk_size = 0;
 
         Ok(StorageStats {
             total_versions,
@@ -903,11 +941,10 @@ impl StorageManager {
         file.write_all(data_to_write).await?;
         file.flush().await?;
 
-        // 更新块索引
-        self.block_index
-            .write()
-            .await
-            .insert(chunk.chunk_id.clone(), chunk_path);
+        // 更新块索引 LRU 缓存
+        self.block_cache
+            .insert(chunk.chunk_id.clone(), chunk_path)
+            .await;
 
         Ok(algorithm)
     }
@@ -935,11 +972,10 @@ impl StorageManager {
         file.write_all(data_to_write).await?;
         file.flush().await?;
 
-        // 更新块索引
-        self.block_index
-            .write()
-            .await
-            .insert(chunk_id.to_string(), chunk_path);
+        // 更新块索引 LRU 缓存
+        self.block_cache
+            .insert(chunk_id.to_string(), chunk_path)
+            .await;
 
         Ok(algorithm)
     }
@@ -997,11 +1033,10 @@ impl StorageManager {
             .put_version_info(&version_info.version_id, &version_info)
             .map_err(|e| StorageError::Storage(format!("保存版本信息到 Sled 失败: {}", e)))?;
 
-        // 更新内存索引
-        self.version_index
-            .write()
-            .await
-            .insert(version_info.version_id.clone(), version_info.clone());
+        // 更新 LRU 缓存
+        self.version_cache
+            .insert(version_info.version_id.clone(), version_info.clone())
+            .await;
 
         Ok(version_info)
     }
@@ -1045,11 +1080,10 @@ impl StorageManager {
                         .put_version_info(version_id, &version_info)
                         .map_err(|e| StorageError::Storage(format!("迁移版本信息失败: {}", e)))?;
 
-                    // 更新内存索引
-                    self.version_index
-                        .write()
-                        .await
-                        .insert(version_id.to_string(), version_info);
+                    // 可选：预热缓存（迁移的数据可能会立即被访问）
+                    self.version_cache
+                        .insert(version_id.to_string(), version_info)
+                        .await;
 
                     migrated_count += 1;
                 }
@@ -1074,30 +1108,27 @@ impl StorageManager {
         Ok(())
     }
 
-    /// 加载块索引
+    /// 加载块索引（已改为按需加载模式）
     async fn load_block_index(&self) -> Result<()> {
+        // 块索引已改为按需加载 + LRU 缓存模式，不再在启动时全量加载
+        // 只统计块数量用于日志
         let chunks_dir = self.chunk_root.join("data");
 
         if !chunks_dir.exists() {
+            info!("块索引目录不存在，采用按需加载模式");
             return Ok(());
         }
 
+        // 可选：统计块数量（不加载到内存）
+        let mut count = 0;
         let mut entries = fs::read_dir(&chunks_dir).await.map_err(StorageError::Io)?;
-
         while let Some(entry) = entries.next_entry().await? {
-            let path = entry.path();
-            if path.is_file()
-                && let Some(file_name) = path.file_name().and_then(|s| s.to_str())
-            {
-                self.block_index
-                    .write()
-                    .await
-                    .insert(file_name.to_string(), path);
+            if entry.path().is_file() {
+                count += 1;
             }
         }
 
-        let index_len = self.block_index.read().await.len();
-        info!("加载了 {} 个块索引", index_len);
+        info!("发现 {} 个数据块，采用按需加载 + LRU 缓存模式", count);
         Ok(())
     }
 
@@ -1325,33 +1356,40 @@ impl StorageManager {
     async fn rebuild_chunk_ref_count(&self) -> Result<()> {
         info!("开始重建块引用计数...");
         let mut ref_counts: HashMap<String, ChunkRefCount> = HashMap::new();
+        let metadata_db = self.get_metadata_db()?;
 
-        // 遍历所有版本，统计块引用
-        let version_index = self.version_index.read().await;
-        for version_info in version_index.values() {
-            // 读取该版本的 delta
-            if let Ok(delta) = self
-                .read_delta(&version_info.file_id, &version_info.version_id)
-                .await
-            {
-                for chunk in &delta.chunks {
-                    let entry =
-                        ref_counts
-                            .entry(chunk.chunk_id.clone())
-                            .or_insert_with(|| ChunkRefCount {
-                                chunk_id: chunk.chunk_id.clone(),
-                                ref_count: 0,
-                                size: chunk.size as u64,
-                                path: self.get_chunk_path(&chunk.chunk_id),
-                            });
-                    entry.ref_count += 1;
+        // 从 Sled 遍历所有文件和版本，统计块引用
+        let all_files = metadata_db
+            .list_all_files()
+            .map_err(|e| StorageError::Storage(format!("列出所有文件失败: {}", e)))?;
+
+        for file_entry in all_files {
+            // 获取该文件的所有版本
+            let versions = metadata_db
+                .list_file_versions(&file_entry.file_id)
+                .map_err(|e| StorageError::Storage(format!("列出文件版本失败: {}", e)))?;
+
+            for version_info in versions {
+                // 读取该版本的 delta
+                if let Ok(delta) = self
+                    .read_delta(&version_info.file_id, &version_info.version_id)
+                    .await
+                {
+                    for chunk in &delta.chunks {
+                        let entry =
+                            ref_counts
+                                .entry(chunk.chunk_id.clone())
+                                .or_insert_with(|| ChunkRefCount {
+                                    chunk_id: chunk.chunk_id.clone(),
+                                    ref_count: 0,
+                                    size: chunk.size as u64,
+                                    path: self.get_chunk_path(&chunk.chunk_id),
+                                });
+                        entry.ref_count += 1;
+                    }
                 }
             }
         }
-        drop(version_index);
-
-        // 获取 metadata_db 引用
-        let metadata_db = self.get_metadata_db()?;
 
         // 直接保存到 Sled
         for (chunk_id, ref_count) in ref_counts.iter() {
@@ -1432,33 +1470,42 @@ impl StorageManager {
         let mut file_index: HashMap<String, FileIndexEntry> = HashMap::new();
         let metadata_db = self.get_metadata_db()?;
 
-        // 遍历所有版本，构建文件索引
-        let version_index = self.version_index.read().await;
-        for version_info in version_index.values() {
-            let entry = file_index
-                .entry(version_info.file_id.clone())
-                .or_insert_with(|| FileIndexEntry {
-                    file_id: version_info.file_id.clone(),
-                    latest_version_id: version_info.version_id.clone(),
-                    version_count: 0,
-                    created_at: version_info.created_at,
-                    modified_at: version_info.created_at,
-                    is_deleted: false,
-                    deleted_at: None,
-                    storage_mode: crate::StorageMode::Cold,
-                    optimization_status: crate::OptimizationStatus::Completed,
-                    file_size: version_info.file_size,
-                    file_hash: String::new(),
-                });
+        // 从 Sled 遍历所有文件和版本，构建文件索引
+        let all_files = metadata_db
+            .list_all_files()
+            .map_err(|e| StorageError::Storage(format!("列出所有文件失败: {}", e)))?;
 
-            entry.version_count += 1;
-            // 更新最新版本（假设版本ID可比较，或使用时间戳）
-            if version_info.created_at > entry.modified_at {
-                entry.latest_version_id = version_info.version_id.clone();
-                entry.modified_at = version_info.created_at;
+        for file_entry in all_files {
+            // 获取该文件的所有版本
+            let versions = metadata_db
+                .list_file_versions(&file_entry.file_id)
+                .map_err(|e| StorageError::Storage(format!("列出文件版本失败: {}", e)))?;
+
+            for version_info in versions {
+                let entry = file_index
+                    .entry(version_info.file_id.clone())
+                    .or_insert_with(|| FileIndexEntry {
+                        file_id: version_info.file_id.clone(),
+                        latest_version_id: version_info.version_id.clone(),
+                        version_count: 0,
+                        created_at: version_info.created_at,
+                        modified_at: version_info.created_at,
+                        is_deleted: false,
+                        deleted_at: None,
+                        storage_mode: crate::StorageMode::Cold,
+                        optimization_status: crate::OptimizationStatus::Completed,
+                        file_size: version_info.file_size,
+                        file_hash: String::new(),
+                    });
+
+                entry.version_count += 1;
+                // 更新最新版本（假设版本ID可比较，或使用时间戳）
+                if version_info.created_at > entry.modified_at {
+                    entry.latest_version_id = version_info.version_id.clone();
+                    entry.modified_at = version_info.created_at;
+                }
             }
         }
-        drop(version_index);
 
         // 直接保存到 Sled
         for (file_id, entry) in file_index.iter() {
@@ -1569,12 +1616,13 @@ impl StorageManager {
                     .map_err(StorageError::Io)?;
             }
 
-            // 从 Sled 和内存索引中移除版本信息
+            // 从 Sled 和缓存中移除版本信息
             let metadata_db = self.get_metadata_db()?;
             if let Err(e) = metadata_db.remove_version_info(&version.version_id) {
                 info!("从 Sled 移除版本信息失败: {}", e);
             }
-            self.version_index.write().await.remove(&version.version_id);
+            // 从缓存中移除
+            self.version_cache.invalidate(&version.version_id).await;
         }
 
         // 3. 如果启用了去重，使用 dedup_manager 减少块引用计数
@@ -1826,8 +1874,8 @@ impl StorageManager {
             chunk_root: self.chunk_root.clone(),
             chunk_size: self.chunk_size,
             metadata_db: self.metadata_db.clone(),
-            version_index: self.version_index.clone(),
-            block_index: self.block_index.clone(),
+            version_cache: self.version_cache.clone(),
+            block_cache: self.block_cache.clone(),
             cache_manager: self.cache_manager.clone(),
             wal_manager: self.wal_manager.clone(),
             chunk_verifier: self.chunk_verifier.clone(),
@@ -1883,11 +1931,10 @@ impl StorageManager {
                 .put_version_info(&version.version_id, &version_info)
                 .map_err(|e| StorageError::Storage(format!("保存版本信息失败: {}", e)))?;
 
-            // 更新内存索引
-            self.version_index
-                .write()
-                .await
-                .insert(version.version_id.clone(), version_info);
+            // 更新缓存
+            self.version_cache
+                .insert(version.version_id.clone(), version_info)
+                .await;
 
             // 4.2 移动 delta 文件
             let old_delta_path = self.get_delta_path(old_file_id, &version.version_id);
@@ -2014,8 +2061,8 @@ impl StorageManager {
                                             chunk_id, e
                                         ));
                                     }
-                                    // 从块索引移除
-                                    self.block_index.write().await.remove(&chunk_id);
+                                    // 从缓存中移除
+                                    self.block_cache.invalidate(&chunk_id).await;
                                 }
                                 Err(e) => {
                                     errors.push(format!("删除块 {} 失败: {}", chunk_id, e));
@@ -2031,7 +2078,8 @@ impl StorageManager {
                     if let Err(e) = metadata_db.remove_chunk_ref(&chunk_id) {
                         errors.push(format!("从 Sled 移除块 {} 失败: {}", chunk_id, e));
                     }
-                    self.block_index.write().await.remove(&chunk_id);
+                    // 从缓存中移除
+                    self.block_cache.invalidate(&chunk_id).await;
                 }
             }
         }

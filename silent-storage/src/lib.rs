@@ -143,6 +143,14 @@ pub struct IncrementalConfig {
     pub enable_auto_gc: bool,
     /// GC触发间隔（秒）
     pub gc_interval_secs: u64,
+    /// 单次可优化的最大文件大小（字节），0 表示无限制
+    /// 默认 1GB，防止大文件导致 OOM
+    #[serde(default = "default_max_file_size")]
+    pub max_file_size_for_optimization: u64,
+}
+
+fn default_max_file_size() -> u64 {
+    1024 * 1024 * 1024 // 1GB
 }
 
 impl Default for IncrementalConfig {
@@ -159,6 +167,7 @@ impl Default for IncrementalConfig {
             enable_deduplication: true,
             enable_auto_gc: true,
             gc_interval_secs: 3600, // 默认每小时执行一次GC
+            max_file_size_for_optimization: default_max_file_size(),
         }
     }
 }

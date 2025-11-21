@@ -108,11 +108,11 @@ impl OptimizationTask {
     /// - 完整优化策略优先级更高
     fn calculate_priority(file_size: u64, strategy: OptimizationStrategy) -> u8 {
         let size_priority = match file_size {
-            0..=1_048_576 => 1,              // < 1MB: 低优先级
-            1_048_577..=10_485_760 => 3,     // 1-10MB: 中优先级
-            10_485_761..=104_857_600 => 5,   // 10-100MB: 高优先级
+            0..=1_048_576 => 1,               // < 1MB: 低优先级
+            1_048_577..=10_485_760 => 3,      // 1-10MB: 中优先级
+            10_485_761..=104_857_600 => 5,    // 10-100MB: 高优先级
             104_857_601..=1_073_741_824 => 7, // 100MB-1GB: 很高优先级
-            _ => 9,                          // > 1GB: 最高优先级
+            _ => 9,                           // > 1GB: 最高优先级
         };
 
         let strategy_priority = match strategy {
@@ -265,9 +265,7 @@ impl OptimizationScheduler {
 
         // 添加到队列
         let mut queue = self.task_queue.write().await;
-        queue.push(PrioritizedTask {
-            task: task.clone(),
-        });
+        queue.push(PrioritizedTask { task: task.clone() });
         task_map.insert(file_id, task_id);
 
         // 更新统计
@@ -330,10 +328,7 @@ impl OptimizationScheduler {
         stats.space_saved += space_saved;
         stats.optimized_size += optimized_size;
 
-        info!(
-            "任务完成: file_id={}, 节省空间={}B",
-            file_id, space_saved
-        );
+        info!("任务完成: file_id={}, 节省空间={}B", file_id, space_saved);
     }
 
     /// 标记任务失败
@@ -357,10 +352,7 @@ impl OptimizationScheduler {
     /// 重新提交失败的任务
     pub async fn resubmit_failed_task(&self, mut task: OptimizationTask) {
         if !task.can_retry() {
-            warn!(
-                "任务 {} 已超过最大重试次数，不再重试",
-                task.file_id
-            );
+            warn!("任务 {} 已超过最大重试次数，不再重试", task.file_id);
             return;
         }
 

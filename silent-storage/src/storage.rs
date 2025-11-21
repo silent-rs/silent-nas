@@ -170,8 +170,7 @@ impl StorageManager {
         ));
 
         // 初始化优化调度器（最多2个并发任务）
-        let optimization_scheduler =
-            Arc::new(crate::OptimizationScheduler::new(2));
+        let optimization_scheduler = Arc::new(crate::OptimizationScheduler::new(2));
 
         Self {
             root_path,
@@ -437,13 +436,12 @@ impl StorageManager {
             total_size,
             file_hash.clone(),
             crate::OptimizationStrategy::Full, // 统一策略
-            0, // 立即执行
+            0,                                 // 立即执行
         );
         self.optimization_scheduler.submit_task(task).await;
 
         Ok((delta, file_version))
     }
-
 
     /// 保存文件版本（使用增量存储）
     pub async fn save_version(
@@ -570,8 +568,9 @@ impl StorageManager {
                 }
                 // 压缩存储模式：读取压缩文件并解压
                 crate::StorageMode::Compressed => {
-                    let compressed_path =
-                        self.data_root.join(format!("{}.compressed", version_info.file_id));
+                    let compressed_path = self
+                        .data_root
+                        .join(format!("{}.compressed", version_info.file_id));
                     if compressed_path.exists() {
                         let compressed_data =
                             fs::read(&compressed_path).await.map_err(StorageError::Io)?;
@@ -583,13 +582,12 @@ impl StorageManager {
                                 "zstd" => crate::core::CompressionAlgorithm::Zstd,
                                 _ => crate::core::CompressionAlgorithm::LZ4,
                             };
-                            let compression_config =
-                                crate::core::compression::CompressionConfig {
-                                    algorithm,
-                                    level: 1,
-                                    min_size: 0,
-                                    ..Default::default()
-                                };
+                            let compression_config = crate::core::compression::CompressionConfig {
+                                algorithm,
+                                level: 1,
+                                min_size: 0,
+                                ..Default::default()
+                            };
                             let compressor =
                                 crate::core::compression::Compressor::new(compression_config);
                             let data = compressor.decompress(&compressed_data, algorithm)?;
@@ -663,9 +661,7 @@ impl StorageManager {
         let version_info = metadata_db
             .get_version_info(version_id)
             .map_err(|e| StorageError::Storage(format!("从 Sled 读取版本信息失败: {}", e)))?
-            .ok_or_else(|| {
-                StorageError::Storage(format!("版本信息不存在: {}", version_id))
-            })?;
+            .ok_or_else(|| StorageError::Storage(format!("版本信息不存在: {}", version_id)))?;
 
         // 双重检查锁定：获取写锁前再次检查缓存
         let mut cache = self.version_index.write().await;
@@ -2141,9 +2137,7 @@ impl StorageManager {
                 task.mark_skipped("文件已是最优格式，跳过优化".to_string());
                 Ok((0, 0))
             }
-            crate::OptimizationStrategy::CompressOnly => {
-                self.optimize_compress_only(task).await
-            }
+            crate::OptimizationStrategy::CompressOnly => self.optimize_compress_only(task).await,
             crate::OptimizationStrategy::Full => self.optimize_full(task).await,
         }
     }
@@ -2153,6 +2147,25 @@ impl StorageManager {
         &self,
         task: &mut crate::OptimizationTask,
     ) -> Result<(u64, u64)> {
+        // 检查文件大小，防止 OOM
+        if self.config.max_file_size_for_optimization > 0 {
+            let file_size = fs::metadata(&task.hot_path)
+                .await
+                .map_err(StorageError::Io)?
+                .len();
+
+            if file_size > self.config.max_file_size_for_optimization {
+                let msg = format!(
+                    "文件过大 ({} MB)，超过限制 ({} MB)，跳过优化",
+                    file_size / 1024 / 1024,
+                    self.config.max_file_size_for_optimization / 1024 / 1024
+                );
+                warn!("{}: file_id={}", msg, task.file_id);
+                task.mark_skipped(msg);
+                return Ok((0, 0));
+            }
+        }
+
         // 读取热存储文件
         let data = fs::read(&task.hot_path).await.map_err(StorageError::Io)?;
         let original_size = data.len() as u64;
@@ -2174,7 +2187,7 @@ impl StorageManager {
             let compression_config = crate::core::compression::CompressionConfig {
                 algorithm,
                 level: 1,
-                min_size: 0,  // 已经检查过是否需要压缩
+                min_size: 0, // 已经检查过是否需要压缩
                 ..Default::default()
             };
             let compressor = crate::core::compression::Compressor::new(compression_config);
@@ -2218,6 +2231,25 @@ impl StorageManager {
 
     /// 完整优化（CDC分块 + 去重 + 压缩）
     async fn optimize_full(&self, task: &mut crate::OptimizationTask) -> Result<(u64, u64)> {
+        // 检查文件大小，防止 OOM
+        if self.config.max_file_size_for_optimization > 0 {
+            let file_size = fs::metadata(&task.hot_path)
+                .await
+                .map_err(StorageError::Io)?
+                .len();
+
+            if file_size > self.config.max_file_size_for_optimization {
+                let msg = format!(
+                    "文件过大 ({} MB)，超过限制 ({} MB)，跳过优化",
+                    file_size / 1024 / 1024,
+                    self.config.max_file_size_for_optimization / 1024 / 1024
+                );
+                warn!("{}: file_id={}", msg, task.file_id);
+                task.mark_skipped(msg);
+                return Ok((0, 0));
+            }
+        }
+
         // 读取热存储文件
         let data = fs::read(&task.hot_path).await.map_err(StorageError::Io)?;
         let original_size = data.len() as u64;
@@ -2334,7 +2366,8 @@ impl StorageManager {
         };
 
         self.save_delta(&task.file_id, &file_delta).await?;
-        self.save_version_info(&task.file_id, &file_delta, None).await?;
+        self.save_version_info(&task.file_id, &file_delta, None)
+            .await?;
 
         // 6. 更新文件索引（重用已获取的metadata_db）
         if let Some(mut file_entry) = metadata_db
@@ -2532,10 +2565,7 @@ impl StorageManager {
         // 提交任务
         self.optimization_scheduler.submit_task(task).await;
 
-        info!(
-            "手动触发文件 {} 的优化任务，策略: {:?}",
-            file_id, strategy
-        );
+        info!("手动触发文件 {} 的优化任务，策略: {:?}", file_id, strategy);
 
         Ok(())
     }
@@ -2866,7 +2896,11 @@ mod tests {
     }
 
     // 等待文件优化完成的helper函数
-    async fn wait_for_optimization(storage: &StorageManager, file_id: &str, timeout_secs: u64) -> Result<()> {
+    async fn wait_for_optimization(
+        storage: &StorageManager,
+        file_id: &str,
+        timeout_secs: u64,
+    ) -> Result<()> {
         let start = std::time::Instant::now();
         loop {
             let metadata_db = storage.get_metadata_db()?;
@@ -2880,10 +2914,7 @@ mod tests {
             }
 
             if start.elapsed().as_secs() > timeout_secs {
-                return Err(StorageError::Storage(format!(
-                    "等待优化超时: {}",
-                    file_id
-                )));
+                return Err(StorageError::Storage(format!("等待优化超时: {}", file_id)));
             }
 
             tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
@@ -2952,7 +2983,11 @@ mod tests {
 
         let stats = storage.get_storage_stats().await.unwrap();
         // 优化过程可能创建额外版本，所以至少应该有2个版本
-        assert!(stats.total_versions >= 2, "至少应该有2个版本，实际: {}", stats.total_versions);
+        assert!(
+            stats.total_versions >= 2,
+            "至少应该有2个版本，实际: {}",
+            stats.total_versions
+        );
         assert!(stats.total_chunks > 0, "优化完成后应该有chunks");
 
         storage.shutdown().await.unwrap();
@@ -3220,7 +3255,9 @@ mod tests {
         storage.save_version("test_file", data, None).await.unwrap();
 
         // 等待优化完成才会有chunks
-        wait_for_optimization(&storage, "test_file", 10).await.unwrap();
+        wait_for_optimization(&storage, "test_file", 10)
+            .await
+            .unwrap();
 
         // 验证所有 chunks
         let report = storage.verify_all_chunks().await.unwrap();
@@ -3603,7 +3640,9 @@ mod tests {
             .unwrap();
 
         // 等待优化完成（从热存储转为冷存储）
-        wait_for_optimization(&storage, "test_cold_file", 10).await.unwrap();
+        wait_for_optimization(&storage, "test_cold_file", 10)
+            .await
+            .unwrap();
 
         // 验证文件索引的存储模式（优化完成后重新获取metadata_db）
         let metadata_db = storage.get_metadata_db().unwrap();
@@ -3787,17 +3826,15 @@ mod tests {
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
         // 获取任务并检查策略
-        if let Some(task) = storage
-            .optimization_scheduler
-            .get_next_ready_task()
-            .await
-            && task.file_id == "test_compressed" {
-                assert_eq!(
-                    task.strategy,
-                    crate::OptimizationStrategy::Skip,
-                    "已压缩文件应该被跳过"
-                );
-            }
+        if let Some(task) = storage.optimization_scheduler.get_next_ready_task().await
+            && task.file_id == "test_compressed"
+        {
+            assert_eq!(
+                task.strategy,
+                crate::OptimizationStrategy::Skip,
+                "已压缩文件应该被跳过"
+            );
+        }
 
         storage.shutdown().await.unwrap();
     }
@@ -3835,10 +3872,7 @@ mod tests {
 
         // 测试触发不存在的文件
         let result_not_found = storage.trigger_file_optimization("non_existent").await;
-        assert!(
-            result_not_found.is_err(),
-            "触发不存在的文件应该失败"
-        );
+        assert!(result_not_found.is_err(), "触发不存在的文件应该失败");
 
         storage.shutdown().await.unwrap();
     }
@@ -3978,7 +4012,9 @@ mod tests {
             .unwrap();
 
         // 等待优化完成（变成冷存储）
-        wait_for_optimization(&storage, "test_error", 10).await.unwrap();
+        wait_for_optimization(&storage, "test_error", 10)
+            .await
+            .unwrap();
 
         // 尝试触发已在冷存储的文件的优化（应该失败或者已经是Completed状态）
         let result = storage.trigger_file_optimization("test_error").await;
@@ -3989,10 +4025,7 @@ mod tests {
 
         // 尝试触发不存在的文件（应该失败）
         let result_not_found = storage.trigger_file_optimization("non_existent").await;
-        assert!(
-            result_not_found.is_err(),
-            "触发不存在的文件应该失败"
-        );
+        assert!(result_not_found.is_err(), "触发不存在的文件应该失败");
 
         storage.shutdown().await.unwrap();
     }

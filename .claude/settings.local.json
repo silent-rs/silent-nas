@@ -21,7 +21,8 @@
       "Bash(git add:*)",
       "Bash(git commit:*)",
       "Bash(pkill:*)",
-      "Bash(chmod:*)"
+      "Bash(chmod:*)",
+      "Bash(RUST_BACKTRACE=1 timeout 30 cargo test:*)"
     ],
     "deny": [],
     "ask": []

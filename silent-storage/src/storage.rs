@@ -1141,9 +1141,17 @@ impl StorageManager {
 
     /// 获取热存储路径
     fn get_hot_storage_path(&self, file_id: &str) -> PathBuf {
-        // 使用文件ID前缀分层存储
-        let prefix = &file_id[..2.min(file_id.len())];
-        self.hot_storage_root.join(prefix).join(file_id)
+        // 移除开头的 / 以确保是相对路径
+        let cleaned_id = file_id.trim_start_matches('/');
+
+        // 如果文件ID包含目录结构（有 /），直接使用整个路径
+        // 否则使用前2个字符作为前缀进行分层存储
+        if cleaned_id.contains('/') {
+            self.hot_storage_root.join(cleaned_id)
+        } else {
+            let prefix = &cleaned_id[..2.min(cleaned_id.len())];
+            self.hot_storage_root.join(prefix).join(cleaned_id)
+        }
     }
 
     /// 计算哈希值
@@ -1931,10 +1939,28 @@ impl StorageManager {
             let _ = fs::remove_dir(&old_delta_dir).await;
         }
 
-        // 7. 刷新数据库
+        // 7. 移动热存储文件（如果存在）
+        let old_hot_path = self.get_hot_storage_path(old_file_id);
+        let new_hot_path = self.get_hot_storage_path(new_file_id);
+
+        if old_hot_path.exists() {
+            // 确保新路径的父目录存在
+            if let Some(parent) = new_hot_path.parent() {
+                fs::create_dir_all(parent).await.map_err(StorageError::Io)?;
+            }
+
+            // 移动热存储文件
+            fs::rename(&old_hot_path, &new_hot_path)
+                .await
+                .map_err(StorageError::Io)?;
+
+            info!("热存储文件已移动: {:?} -> {:?}", old_hot_path, new_hot_path);
+        }
+
+        // 8. 刷新数据库
         let _ = metadata_db.flush().await;
 
-        // 8. 返回新文件的元数据
+        // 9. 返回新文件的元数据
         let new_metadata = FileMetadata {
             id: new_file_id.to_string(),
             name: new_file_id.to_string(),

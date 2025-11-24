@@ -711,6 +711,81 @@ impl StorageManager {
         Ok(result)
     }
 
+    /// 流式读取版本数据（用于大文件，避免将整个文件加载到内存）
+    ///
+    /// 返回一个实现了 `AsyncRead` 的文件句柄，适用于流式传输场景。
+    /// 目前仅支持热存储模式；其他模式会回退到内存读取。
+    ///
+    /// # 返回值
+    /// - `Ok(Some(file))`: 热存储模式，返回文件句柄
+    /// - `Ok(None)`: 非热存储模式，调用者应使用 `read_version_data()` 代替
+    /// - `Err(_)`: 发生错误
+    ///
+    /// # 示例
+    /// ```rust,ignore
+    /// match storage.read_version_stream(version_id).await? {
+    ///     Some(file) => {
+    ///         // 流式处理 file
+    ///         tokio::io::copy(&mut file, &mut writer).await?;
+    ///     }
+    ///     None => {
+    ///         // 回退到内存读取
+    ///         let data = storage.read_version_data(version_id).await?;
+    ///         writer.write_all(&data).await?;
+    ///     }
+    /// }
+    /// ```
+    pub async fn read_version_stream(
+        &self,
+        version_id: &str,
+    ) -> Result<Option<tokio::fs::File>> {
+        // 获取版本信息
+        let version_info = self.get_version_info(version_id).await?;
+
+        // 检查文件的存储模式
+        let metadata_db = self.get_metadata_db()?;
+        if let Some(file_entry) = metadata_db
+            .get_file_index(&version_info.file_id)
+            .map_err(|e| StorageError::Storage(format!("读取文件索引失败: {}", e)))?
+        {
+            if file_entry.storage_mode == crate::StorageMode::Hot {
+                let hot_path = self.get_hot_storage_path(&version_info.file_id);
+                if hot_path.exists() {
+                    let file = fs::File::open(&hot_path).await.map_err(StorageError::Io)?;
+                    return Ok(Some(file));
+                } else {
+                    return Err(StorageError::Storage(format!(
+                        "热存储文件不存在: {}",
+                        hot_path.display()
+                    )));
+                }
+            }
+        }
+
+        // 非热存储模式，返回 None，调用者应使用 read_version_data()
+        Ok(None)
+    }
+
+    /// 获取文件的流式读取路径（如果可用）
+    ///
+    /// 对于热存储模式，返回文件的实际路径，可用于零拷贝发送（如 sendfile）。
+    /// 对于其他模式，返回 None。
+    pub async fn get_file_path(&self, file_id: &str) -> Result<Option<PathBuf>> {
+        let metadata_db = self.get_metadata_db()?;
+        if let Some(file_entry) = metadata_db
+            .get_file_index(file_id)
+            .map_err(|e| StorageError::Storage(format!("读取文件索引失败: {}", e)))?
+        {
+            if file_entry.storage_mode == crate::StorageMode::Hot {
+                let hot_path = self.get_hot_storage_path(file_id);
+                if hot_path.exists() {
+                    return Ok(Some(hot_path));
+                }
+            }
+        }
+        Ok(None)
+    }
+
     /// 获取版本信息
     pub async fn get_version_info(&self, version_id: &str) -> Result<VersionInfo> {
         // 首先尝试从 LRU 缓存读取（无锁并发安全）

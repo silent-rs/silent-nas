@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use silent_nas_core::{FileMetadata, FileVersion, S3CompatibleStorageTrait, StorageManagerTrait};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::fs;
@@ -107,14 +108,14 @@ pub struct StorageManager {
     dedup_manager: Arc<crate::services::dedup::DedupManager>,
     /// GC任务句柄
     gc_task_handle: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
-    /// GC任务停止标志
-    gc_stop_flag: Arc<tokio::sync::RwLock<bool>>,
+    /// GC任务停止标志（无锁原子操作）
+    gc_stop_flag: Arc<AtomicBool>,
     /// 优化调度器
     optimization_scheduler: Arc<crate::OptimizationScheduler>,
     /// 优化任务句柄
     optimization_task_handle: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
-    /// 优化任务停止标志
-    optimization_stop_flag: Arc<tokio::sync::RwLock<bool>>,
+    /// 优化任务停止标志（无锁原子操作）
+    optimization_stop_flag: Arc<AtomicBool>,
 }
 
 impl StorageManager {
@@ -207,10 +208,10 @@ impl StorageManager {
             compressor,
             dedup_manager,
             gc_task_handle: Arc::new(RwLock::new(None)),
-            gc_stop_flag: Arc::new(tokio::sync::RwLock::new(false)),
+            gc_stop_flag: Arc::new(AtomicBool::new(false)),
             optimization_scheduler,
             optimization_task_handle: Arc::new(RwLock::new(None)),
-            optimization_stop_flag: Arc::new(tokio::sync::RwLock::new(false)),
+            optimization_stop_flag: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -1796,7 +1797,7 @@ impl StorageManager {
         self.stop_gc_task().await;
 
         // 重置停止标志
-        *self.gc_stop_flag.write().await = false;
+        self.gc_stop_flag.store(false, Ordering::Relaxed);
 
         let storage = self.clone_for_gc();
         let interval_secs = self.config.gc_interval_secs;
@@ -1810,7 +1811,7 @@ impl StorageManager {
                 tokio::time::sleep(tokio::time::Duration::from_secs(interval_secs)).await;
 
                 // 检查停止标志
-                if *stop_flag.read().await {
+                if stop_flag.load(Ordering::Relaxed) {
                     info!("GC后台任务收到停止信号");
                     break;
                 }
@@ -1838,7 +1839,7 @@ impl StorageManager {
     /// 该方法会停止正在运行的GC后台任务
     pub async fn stop_gc_task(&self) {
         // 设置停止标志
-        *self.gc_stop_flag.write().await = true;
+        self.gc_stop_flag.store(true, Ordering::Relaxed);
 
         // 等待任务结束
         if let Some(handle) = self.gc_task_handle.write().await.take() {
@@ -2477,7 +2478,7 @@ impl StorageManager {
 
     /// 启动后台优化任务
     pub async fn start_optimization_task(&self) {
-        if *self.optimization_stop_flag.read().await {
+        if self.optimization_stop_flag.load(Ordering::Relaxed) {
             return; // 已停止，不启动
         }
 
@@ -2488,7 +2489,7 @@ impl StorageManager {
         }
 
         info!("启动后台优化任务");
-        *self.optimization_stop_flag.write().await = false;
+        self.optimization_stop_flag.store(false, Ordering::Relaxed);
 
         let storage = self.clone_for_gc();
         let stop_flag = self.optimization_stop_flag.clone();
@@ -2497,8 +2498,8 @@ impl StorageManager {
             info!("后台优化任务已启动");
 
             loop {
-                // 检查停止标志
-                if *stop_flag.read().await {
+                // 检查停止标志（无锁原子操作）
+                if stop_flag.load(Ordering::Relaxed) {
                     info!("后台优化任务收到停止信号");
                     break;
                 }
@@ -2547,8 +2548,8 @@ impl StorageManager {
     pub async fn stop_optimization_task(&self) {
         info!("停止后台优化任务");
 
-        // 设置停止标志
-        *self.optimization_stop_flag.write().await = true;
+        // 设置停止标志（无锁原子操作）
+        self.optimization_stop_flag.store(true, Ordering::Relaxed);
 
         // 等待任务完成
         if let Some(handle) = self.optimization_task_handle.write().await.take() {
@@ -2622,7 +2623,7 @@ impl StorageManager {
     ///
     /// 暂停后台优化任务的执行（不会停止已在运行的任务）
     pub async fn pause_optimization_scheduler(&self) -> Result<()> {
-        *self.optimization_stop_flag.write().await = true;
+        self.optimization_stop_flag.store(true, Ordering::Relaxed);
         info!("优化调度器已暂停");
         Ok(())
     }
@@ -2631,14 +2632,14 @@ impl StorageManager {
     ///
     /// 恢复后台优化任务的执行
     pub async fn resume_optimization_scheduler(&self) -> Result<()> {
-        *self.optimization_stop_flag.write().await = false;
+        self.optimization_stop_flag.store(false, Ordering::Relaxed);
         info!("优化调度器已恢复");
         Ok(())
     }
 
     /// 检查优化调度器是否暂停
-    pub async fn is_optimization_paused(&self) -> bool {
-        *self.optimization_stop_flag.read().await
+    pub fn is_optimization_paused(&self) -> bool {
+        self.optimization_stop_flag.load(Ordering::Relaxed)
     }
 
     /// 获取待处理的优化任务列表
@@ -3938,14 +3939,14 @@ mod tests {
 
         // 验证初始状态（未暂停）
         assert!(
-            !storage.is_optimization_paused().await,
+            !storage.is_optimization_paused(),
             "初始状态应该是未暂停"
         );
 
         // 暂停调度器
         storage.pause_optimization_scheduler().await.unwrap();
         assert!(
-            storage.is_optimization_paused().await,
+            storage.is_optimization_paused(),
             "暂停后应该是暂停状态"
         );
 
@@ -3966,7 +3967,7 @@ mod tests {
         // 恢复调度器
         storage.resume_optimization_scheduler().await.unwrap();
         assert!(
-            !storage.is_optimization_paused().await,
+            !storage.is_optimization_paused(),
             "恢复后应该是未暂停状态"
         );
 

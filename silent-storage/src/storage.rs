@@ -1,6 +1,47 @@
 //! 增量存储后端
 //!
-//! 实现版本链式存储和块级存储功能
+//! 实现版本链式存储和块级存储功能。
+//!
+//! # 架构
+//!
+//! `StorageManager` 是存储系统的核心管理器，提供以下功能模块：
+//!
+//! ## 核心存储 (Lines 121-1298)
+//! - 初始化和配置管理
+//! - 版本保存和读取 (`save_version`, `read_version_data`)
+//! - 版本管理 (`list_file_versions`, `delete_file_version`)
+//! - 存储统计 (`get_storage_stats`, `get_deduplication_stats`)
+//! - 块操作 (`save_chunk`, `read_chunk`)
+//! - 路径管理和辅助方法
+//!
+//! ## 索引和文件管理 (Lines 1300-1733)
+//! - 引用计数管理 (`load_chunk_ref_count`, `save_chunk_ref_count`)
+//! - 文件索引 (`load_file_index`, `save_file_index`, `rebuild_file_index`)
+//! - 文件列表和删除 (`list_files`, `delete_file`, `permanently_delete_file`)
+//! - 回收站管理 (`list_deleted_files`, `restore_file`, `empty_recycle_bin`)
+//!
+//! ## 垃圾回收 (Lines 1736-1901)
+//! - 块级垃圾回收 (`garbage_collect_blocks`)
+//! - 后台 GC 任务 (`start_gc_task`, `stop_gc_task`)
+//! - 完整 GC (`garbage_collect`)
+//!
+//! ## 文件操作 (Lines 1902-2107)
+//! - 文件移动 (`move_file`)
+//! - 文件信息查询 (`get_file_info`)
+//!
+//! ## 可靠性 (Lines 2119-2163)
+//! - 块校验 (`verify_all_chunks`, `verify_chunks`)
+//! - 孤儿块检测和清理 (`detect_orphan_chunks`, `cleanup_orphan_chunks`)
+//!
+//! ## 后台优化 (Lines 2165-2663)
+//! - 优化任务执行 (`execute_optimization_task`)
+//! - 优化策略 (`optimize_compress_only`, `optimize_full`)
+//! - 后台优化任务 (`start_optimization_task`, `stop_optimization_task`)
+//! - 优化调度器控制 (`pause/resume_optimization_scheduler`)
+//!
+//! ## Trait 实现 (Lines 2708-2931)
+//! - `StorageManagerTrait` 实现
+//! - `S3CompatibleStorageTrait` 实现
 
 use crate::cache::CacheManager;
 use crate::error::{Result, StorageError};
@@ -117,6 +158,12 @@ pub struct StorageManager {
     /// 优化任务停止标志（无锁原子操作）
     optimization_stop_flag: Arc<AtomicBool>,
 }
+
+// ============================================================================
+// 核心存储实现
+// ============================================================================
+// 包含：初始化、版本管理、块操作、存储统计、路径管理
+// ============================================================================
 
 impl StorageManager {
     pub fn new(root_path: PathBuf, chunk_size: usize, config: IncrementalConfig) -> Self {
@@ -1296,6 +1343,12 @@ impl StorageManager {
         Ok((files, subdirs.into_iter().collect()))
     }
 }
+
+// ============================================================================
+// 索引和文件管理实现
+// ============================================================================
+// 包含：引用计数管理、文件索引、文件列表、删除、回收站、GC、文件操作
+// ============================================================================
 
 impl StorageManager {
     /// 加载块引用计数
@@ -2703,6 +2756,12 @@ pub struct StorageStats {
     pub compression_ratio: f64,
     pub avg_chunk_size: f64,
 }
+
+// ============================================================================
+// Trait 实现
+// ============================================================================
+// 包含：StorageManagerTrait、S3CompatibleStorageTrait
+// ============================================================================
 
 /// 实现 StorageManagerTrait 以提供标准存储接口
 #[async_trait]

@@ -16,8 +16,12 @@ pub struct DeltaGenerator {
 }
 
 impl DeltaGenerator {
-    pub fn new(config: IncrementalConfig) -> Self {
-        let chunker = RabinKarpChunker::new(config.clone());
+    /// 创建差异生成器
+    ///
+    /// chunk_size: 目标分块大小
+    /// config: 增量存储配置
+    pub fn new(chunk_size: usize, config: IncrementalConfig) -> Self {
+        let chunker = RabinKarpChunker::new(chunk_size, &config);
         Self { config, chunker }
     }
 
@@ -259,7 +263,8 @@ mod tests {
 
     fn create_test_generator() -> DeltaGenerator {
         let config = IncrementalConfig::default();
-        DeltaGenerator::new(config)
+        let chunk_size = 4 * 1024 * 1024; // 4MB
+        DeltaGenerator::new(chunk_size, config)
     }
 
     fn create_test_applier() -> DeltaApplier {

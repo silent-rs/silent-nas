@@ -344,15 +344,8 @@ mod tests {
     #[tokio::test]
     async fn test_event_listener_creation() {
         // 测试可以创建 EventListener（不启动）
-        let temp_dir = TempDir::new().unwrap();
-        let storage = StorageManager::new(
-            PathBuf::from(temp_dir.path()),
-            64 * 1024,
-            crate::storage::IncrementalConfig::default(),
-        );
-
-        // 初始化全局storage
-        let _ = crate::storage::init_global_storage(storage.clone());
+        // 使用共享的测试存储初始化，避免临时目录被删除导致的问题
+        let _storage = crate::storage::init_test_storage_async().await;
 
         let _sync_manager = Arc::new(SyncManager::new("test-node".to_string(), None));
 
@@ -398,7 +391,6 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let config = crate::storage::IncrementalConfig {
             enable_compression: false,
-            enable_deduplication: false,
             ..crate::storage::IncrementalConfig::default()
         };
 

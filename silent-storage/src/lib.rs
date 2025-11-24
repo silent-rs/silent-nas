@@ -177,16 +177,17 @@ pub mod prelude {
 use serde::{Deserialize, Serialize};
 
 /// 增量存储配置
+///
+/// 注意：分块大小（chunk_size）在 StorageManager::new() 中单独传入，
+/// 最小/最大分块大小根据 chunk_size 自动计算：
+/// - min_chunk_size = chunk_size / 2
+/// - max_chunk_size = chunk_size * 2
+///
+/// 去重功能已内置于存储策略中，无需单独配置。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IncrementalConfig {
     /// 分块算法类型
     pub chunker_type: ChunkerType,
-    /// 平均分块大小（字节）
-    pub avg_chunk_size: usize,
-    /// 最小分块大小（字节）
-    pub min_chunk_size: usize,
-    /// 最大分块大小（字节）
-    pub max_chunk_size: usize,
     /// 滚动哈希多项式（Rabin-Karp）
     pub rabin_poly: u64,
     /// 弱哈希模数
@@ -195,37 +196,22 @@ pub struct IncrementalConfig {
     pub enable_compression: bool,
     /// 压缩算法 (lz4, zstd)
     pub compression_algorithm: String,
-    /// 启用去重
-    pub enable_deduplication: bool,
     /// 启用自动GC
     pub enable_auto_gc: bool,
     /// GC触发间隔（秒）
     pub gc_interval_secs: u64,
-    /// 单次可优化的最大文件大小（字节），0 表示无限制
-    /// 默认 1GB，防止大文件导致 OOM
-    #[serde(default = "default_max_file_size")]
-    pub max_file_size_for_optimization: u64,
-}
-
-fn default_max_file_size() -> u64 {
-    1024 * 1024 * 1024 // 1GB
 }
 
 impl Default for IncrementalConfig {
     fn default() -> Self {
         Self {
             chunker_type: ChunkerType::RabinKarp,
-            avg_chunk_size: 8 * 1024,  // 8KB
-            min_chunk_size: 4 * 1024,  // 4KB
-            max_chunk_size: 16 * 1024, // 16KB
             rabin_poly: 0x3b9aca07,    // 常用质数
             weak_hash_mod: 2048,       // 2^11
             enable_compression: true,
             compression_algorithm: "lz4".to_string(),
-            enable_deduplication: true,
             enable_auto_gc: true,
             gc_interval_secs: 3600, // 默认每小时执行一次GC
-            max_file_size_for_optimization: default_max_file_size(),
         }
     }
 }
@@ -242,12 +228,18 @@ pub enum ChunkerType {
 /// 存储模式
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum StorageMode {
-    /// 热存储 - 直接存储完整文件（快速读写）
+    /// 分块存储 - 分块+去重+压缩（默认模式）
     #[default]
-    Hot,
-    /// 压缩存储 - 仅压缩，不分块
+    Chunked,
+    /// 压缩存储 - 仅压缩，不分块（小文件优化）
     Compressed,
-    /// 冷存储 - 分块+去重+压缩（节省空间）
+    /// 旧版热存储兼容（已弃用，仅用于读取旧数据）
+    #[serde(alias = "Hot")]
+    #[deprecated(note = "热存储已移除，使用 Chunked 模式")]
+    Hot,
+    /// 旧版冷存储兼容（已弃用）
+    #[serde(alias = "Cold")]
+    #[deprecated(note = "冷存储已重命名为 Chunked")]
     Cold,
 }
 

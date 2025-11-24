@@ -12,7 +12,14 @@ use sha2::{Digest, Sha256};
 
 /// Rabin-Karp 滚动哈希分块器
 pub struct RabinKarpChunker {
-    config: IncrementalConfig,
+    /// Rabin 多项式
+    rabin_poly: u64,
+    /// 弱哈希模数
+    weak_hash_mod: usize,
+    /// 最小分块大小
+    min_chunk_size: usize,
+    /// 最大分块大小
+    max_chunk_size: usize,
     /// 当前弱哈希值
     weak_hash: u64,
     /// 滑动窗口（使用环形缓冲区）
@@ -24,12 +31,23 @@ pub struct RabinKarpChunker {
 }
 
 impl RabinKarpChunker {
-    pub fn new(config: IncrementalConfig) -> Self {
+    /// 创建分块器
+    ///
+    /// chunk_size: 目标分块大小
+    /// config: 增量存储配置（用于获取 rabin_poly 和 weak_hash_mod）
+    ///
+    /// 分块大小边界自动计算:
+    /// - min_chunk_size = chunk_size / 2
+    /// - max_chunk_size = chunk_size * 2
+    pub fn new(chunk_size: usize, config: &IncrementalConfig) -> Self {
         let window_size = 48; // 常用窗口大小
         let hash_power = calculate_power(config.rabin_poly, window_size - 1);
 
         Self {
-            config,
+            rabin_poly: config.rabin_poly,
+            weak_hash_mod: config.weak_hash_mod,
+            min_chunk_size: chunk_size / 2,
+            max_chunk_size: chunk_size * 2,
             weak_hash: 0,
             window: CircularBuffer::new(window_size),
             window_size,
@@ -40,15 +58,15 @@ impl RabinKarpChunker {
     /// 计算块的边界检查
     fn is_chunk_boundary(&self, weak_hash: u64, bytes_processed: usize) -> bool {
         // 弱哈希值满足边界条件且已达到最小分块大小
-        (weak_hash as usize).is_multiple_of(self.config.weak_hash_mod)
-            && bytes_processed >= self.config.min_chunk_size
+        (weak_hash as usize).is_multiple_of(self.weak_hash_mod)
+            && bytes_processed >= self.min_chunk_size
     }
 
     /// 滚动计算哈希值（优化版本）
     ///
     /// 公式: hash = (hash - outgoing * base^(k-1)) * base + incoming
     fn roll_hash(&self, outgoing: u8, incoming: u8, old_hash: u64) -> u64 {
-        let base = self.config.rabin_poly;
+        let base = self.rabin_poly;
 
         // 移除最旧字节的贡献
         let remove_contrib = (outgoing as u64).wrapping_mul(self.hash_power);
@@ -65,7 +83,7 @@ impl RabinKarpChunker {
         let mut hash: u64 = 0;
         for &byte in data {
             hash = hash
-                .wrapping_mul(self.config.rabin_poly)
+                .wrapping_mul(self.rabin_poly)
                 .wrapping_add(byte as u64);
         }
         hash
@@ -99,7 +117,7 @@ impl RabinKarpChunker {
         while i < data.len() {
             // 检查是否达到最大块大小
             let current_chunk_size = i - chunk_start;
-            if current_chunk_size >= self.config.max_chunk_size {
+            if current_chunk_size >= self.max_chunk_size {
                 // 强制分块
                 let chunk_data = &data[chunk_start..i];
                 let chunk = ChunkInfo {
@@ -119,7 +137,7 @@ impl RabinKarpChunker {
             }
 
             // 检查是否满足分块边界
-            if bytes_processed >= self.config.min_chunk_size
+            if bytes_processed >= self.min_chunk_size
                 && self.is_chunk_boundary(self.weak_hash, bytes_processed)
             {
                 // 生成分块
@@ -296,7 +314,8 @@ mod tests {
     #[test]
     fn test_rabinkarp_chunker_basic() {
         let config = IncrementalConfig::default();
-        let mut chunker = RabinKarpChunker::new(config);
+        let chunk_size = 4 * 1024 * 1024; // 4MB
+        let mut chunker = RabinKarpChunker::new(chunk_size, &config);
 
         let data = b"Hello, World! This is a test of the chunker.";
         let chunks = chunker.chunk_data(data).unwrap();

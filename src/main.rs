@@ -46,8 +46,8 @@ async fn main() -> Result<()> {
     // 初始化全局存储管理器
     let storage = storage::create_storage(&config.storage).await?;
     info!(
-        "存储引擎初始化完成: compression={}, dedup={}",
-        config.storage.enable_compression, config.storage.enable_deduplication
+        "存储引擎初始化完成: compression={}",
+        config.storage.enable_compression
     );
 
     // 将存储设置为全局实例

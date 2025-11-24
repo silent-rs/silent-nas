@@ -82,23 +82,20 @@ pub async fn init_test_storage_async() -> &'static StorageManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::StorageManagerTrait;
 
+    /// 此测试验证全局存储初始化API的正确性
+    /// 注意：此测试使用 init_test_storage_async() 来避免与其他测试的竞争条件
     #[tokio::test]
     async fn test_global_storage_initialization() {
-        use tempfile::TempDir;
+        // 使用共享的测试存储初始化（这会正确初始化存储并保持临时目录）
+        let storage = init_test_storage_async().await;
 
-        let temp_dir = TempDir::new().unwrap();
-        let storage = StorageManager::new(
-            temp_dir.path().to_path_buf(),
-            64 * 1024,
-            crate::storage::IncrementalConfig::default(),
-        );
+        // 验证全局存储已正确初始化
+        assert!(try_storage().is_some());
 
-        // 注意：这个测试只能运行一次，因为全局变量只能初始化一次
-        // 在实际测试中，应该使用独立的测试进程或者避免依赖全局状态
-        if try_storage().is_none() {
-            assert!(init_global_storage(storage).is_ok());
-            assert!(try_storage().is_some());
-        }
+        // 验证存储可以正常工作
+        let root = storage.root_dir();
+        assert!(root.exists());
     }
 }

@@ -40,11 +40,6 @@ enable_compression = true
 # - zstd: 压缩率高，速度稍慢
 compression_algorithm = "lz4"
 
-# 是否启用去重
-# true: 启用块级去重，大幅节省存储空间
-# false: 禁用去重，提高写入性能
-enable_deduplication = true
-
 # 是否启用自动垃圾回收（GC）
 # true: 自动清理未引用的数据块
 # false: 需要手动触发GC

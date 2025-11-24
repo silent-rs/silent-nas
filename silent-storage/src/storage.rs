@@ -196,9 +196,9 @@ impl StorageManager {
             compression_config,
         ));
 
-        // 初始化去重管理器
+        // 初始化去重管理器（去重功能始终启用，已内置于存储策略）
         let dedup_config = crate::services::dedup::DedupConfig {
-            enable_dedup: config.enable_deduplication,
+            enable_dedup: true, // 始终启用去重
             min_dedup_size: 1024, // 1KB
             batch_size: 1000,
             concurrent_threads: 4,
@@ -383,6 +383,8 @@ impl StorageManager {
     }
 
     /// 从异步读取器流式保存文件版本（用于 WebDAV 等场景）
+    ///
+    /// 流式读取数据后进行即时分块+去重存储
     pub async fn save_version_from_reader<R>(
         &self,
         file_id: &str,
@@ -392,26 +394,9 @@ impl StorageManager {
     where
         R: AsyncRead + Unpin,
     {
-        let version_id = format!("v_{}", scru128::new());
-
-        // 直接流式写入热存储（统一流程）
-        use sha2::{Digest, Sha256};
-        let now = Local::now().naive_local();
-
-        // 1. 准备热存储路径
-        let hot_path = self.get_hot_storage_path(file_id);
-        if let Some(parent) = hot_path.parent() {
-            fs::create_dir_all(parent).await.map_err(StorageError::Io)?;
-        }
-
-        // 2. 流式写入热存储，同时计算哈希
-        let mut file = fs::File::create(&hot_path)
-            .await
-            .map_err(StorageError::Io)?;
-        let mut hasher = Sha256::new();
-        let mut total_size: u64 = 0;
-
+        // 流式读取所有数据到内存
         const BUFFER_SIZE: usize = 8 * 1024 * 1024; // 8MB
+        let mut data = Vec::new();
         let mut buffer = vec![0u8; BUFFER_SIZE];
 
         loop {
@@ -419,93 +404,17 @@ impl StorageManager {
             if n == 0 {
                 break;
             }
-
-            file.write_all(&buffer[..n])
-                .await
-                .map_err(StorageError::Io)?;
-            hasher.update(&buffer[..n]);
-            total_size += n as u64;
+            data.extend_from_slice(&buffer[..n]);
         }
 
-        file.flush().await.map_err(StorageError::Io)?;
-
-        let file_hash = hex::encode(hasher.finalize());
-
         info!(
-            "文件 {} 已流式保存到热存储，大小={}B，待后台优化",
-            file_id, total_size
+            "文件 {} 流式读取完成，大小={}B，开始分块存储",
+            file_id,
+            data.len()
         );
 
-        // 3. 创建文件版本信息
-        let file_version = FileVersion {
-            version_id: version_id.clone(),
-            file_id: file_id.to_string(),
-            name: file_id.to_string(),
-            size: total_size,
-            hash: file_hash.clone(),
-            created_at: now,
-            author: None,
-            comment: None,
-            is_current: true,
-        };
-
-        // 4. 更新文件索引（Hot模式）
-        let metadata_db = self.get_metadata_db()?;
-        let mut file_entry = metadata_db
-            .get_file_index(file_id)
-            .map_err(|e| StorageError::Storage(format!("读取文件索引失败: {}", e)))?
-            .unwrap_or_else(|| FileIndexEntry {
-                file_id: file_id.to_string(),
-                latest_version_id: version_id.clone(),
-                version_count: 0,
-                created_at: now,
-                modified_at: now,
-                is_deleted: false,
-                deleted_at: None,
-                storage_mode: crate::StorageMode::Hot,
-                optimization_status: crate::OptimizationStatus::Pending,
-                file_size: total_size,
-                file_hash: file_hash.clone(),
-            });
-
-        file_entry.latest_version_id = version_id.clone();
-        file_entry.version_count += 1;
-        file_entry.modified_at = now;
-        file_entry.storage_mode = crate::StorageMode::Hot;
-        file_entry.optimization_status = crate::OptimizationStatus::Pending;
-        file_entry.file_size = total_size;
-        file_entry.file_hash = file_hash.clone();
-
-        metadata_db
-            .put_file_index(file_id, &file_entry)
-            .map_err(|e| StorageError::Storage(format!("保存文件索引失败: {}", e)))?;
-
-        // 5. 创建空的Delta（热存储不需要分块信息）
-        let delta = FileDelta {
-            file_id: file_id.to_string(),
-            base_version_id: parent_version_id.unwrap_or("").to_string(),
-            new_version_id: version_id.clone(),
-            chunks: Vec::new(), // 热存储没有chunks
-            created_at: now,
-        };
-
-        // 6. 保存版本信息（重要！）
-        let _version_info = self
-            .save_version_info(file_id, &delta, parent_version_id)
-            .await?;
-
-        // 7. 提交后台优化任务（统一使用Full策略）
-        let task = crate::OptimizationTask::new(
-            file_id.to_string(),
-            hot_path.clone(),
-            total_size,
-            file_hash.clone(),
-            crate::OptimizationStrategy::Full, // 统一策略
-            0,                                 // 立即执行
-        );
-        self.optimization_scheduler.submit_task(task).await;
-
-        Ok((delta, file_version))
+        // 调用统一的 save_version 进行分块+去重存储
+        self.save_version(file_id, &data, parent_version_id).await
     }
 
     /// 保存文件版本（使用增量存储）
@@ -521,20 +430,84 @@ impl StorageManager {
         // 1. 计算文件哈希
         let file_hash = self.calculate_hash(data);
 
-        // 2. 直接写入热存储（统一流程：先快速上传，后台优化）
-        let hot_path = self.get_hot_storage_path(file_id);
-        if let Some(parent) = hot_path.parent() {
-            fs::create_dir_all(parent).await.map_err(StorageError::Io)?;
+        // 2. CDC 分块
+        let mut generator =
+            crate::core::delta::DeltaGenerator::new(self.chunk_size, self.config.clone());
+        let delta_result = generator
+            .generate_full_delta(data, file_id)
+            .map_err(|e| StorageError::Storage(format!("生成分块失败: {}", e)))?;
+
+        // 3. 对每个块执行去重检查 + 写入（去重功能始终启用）
+        let mut dedup_stats = crate::DeduplicationStats {
+            total_chunks: delta_result.chunks.len(),
+            original_size: data.len() as u64,
+            ..Default::default()
+        };
+
+        let mut updated_chunks = Vec::with_capacity(delta_result.chunks.len());
+        for chunk in &delta_result.chunks {
+            let start = chunk.offset;
+            let end = start + chunk.size;
+            if end > data.len() {
+                return Err(StorageError::Storage("分块范围越界".to_string()));
+            }
+            let chunk_data = &data[start..end];
+
+            // 检查块是否已存在
+            let exists = self.dedup_manager.chunk_exists(&chunk.chunk_id).await;
+            let compression_algo = if exists {
+                // 块已存在，增加引用计数，跳过写入
+                self.dedup_manager
+                    .increment_chunk_ref(&chunk.chunk_id)
+                    .await
+                    .map_err(|e| StorageError::Storage(format!("增加块引用计数失败: {}", e)))?;
+                dedup_stats.duplicate_chunks += 1;
+                // 使用已存储块的压缩算法
+                if self.config.enable_compression {
+                    crate::core::compression::CompressionAlgorithm::LZ4
+                } else {
+                    crate::core::compression::CompressionAlgorithm::None
+                }
+            } else {
+                // 块不存在，写入磁盘
+                let algo = self.save_chunk_data(&chunk.chunk_id, chunk_data).await?;
+                let storage_path = self.get_chunk_path(&chunk.chunk_id);
+                self.dedup_manager
+                    .add_chunk(&chunk.chunk_id, chunk.size, storage_path)
+                    .await
+                    .map_err(|e| StorageError::Storage(format!("添加块到索引失败: {}", e)))?;
+                dedup_stats.new_chunks += 1;
+                dedup_stats.stored_size += chunk.size as u64;
+                algo
+            };
+
+            // 更新块信息（包含压缩算法）
+            let mut updated_chunk = chunk.clone();
+            updated_chunk.compression = compression_algo;
+            updated_chunks.push(updated_chunk);
         }
-        fs::write(&hot_path, data).await.map_err(StorageError::Io)?;
+
+        dedup_stats.calculate_dedup_ratio();
 
         info!(
-            "文件 {} 已保存到热存储，大小={}B，待后台优化",
+            "文件 {} 分块完成: {} 块, 新块 {}, 重复块 {}, 去重率 {:.1}%",
             file_id,
-            data.len()
+            dedup_stats.total_chunks,
+            dedup_stats.new_chunks,
+            dedup_stats.duplicate_chunks,
+            dedup_stats.dedup_ratio
         );
 
-        // 3. 创建文件版本信息
+        // 4. 创建 Delta（包含块列表）
+        let delta = FileDelta {
+            file_id: file_id.to_string(),
+            base_version_id: parent_version_id.unwrap_or("").to_string(),
+            new_version_id: version_id.clone(),
+            chunks: updated_chunks,
+            created_at: now,
+        };
+
+        // 5. 创建文件版本信息
         let file_version = FileVersion {
             version_id: version_id.clone(),
             file_id: file_id.to_string(),
@@ -547,7 +520,7 @@ impl StorageManager {
             is_current: true,
         };
 
-        // 4. 更新文件索引（Hot模式）
+        // 6. 更新文件索引（Chunked模式，已完成优化）
         let metadata_db = self.get_metadata_db()?;
         let mut file_entry = metadata_db
             .get_file_index(file_id)
@@ -560,8 +533,8 @@ impl StorageManager {
                 modified_at: now,
                 is_deleted: false,
                 deleted_at: None,
-                storage_mode: crate::StorageMode::Hot,
-                optimization_status: crate::OptimizationStatus::Pending,
+                storage_mode: crate::StorageMode::Chunked,
+                optimization_status: crate::OptimizationStatus::Completed,
                 file_size: data.len() as u64,
                 file_hash: file_hash.clone(),
             });
@@ -569,8 +542,8 @@ impl StorageManager {
         file_entry.latest_version_id = version_id.clone();
         file_entry.version_count += 1;
         file_entry.modified_at = now;
-        file_entry.storage_mode = crate::StorageMode::Hot;
-        file_entry.optimization_status = crate::OptimizationStatus::Pending;
+        file_entry.storage_mode = crate::StorageMode::Chunked;
+        file_entry.optimization_status = crate::OptimizationStatus::Completed;
         file_entry.file_size = data.len() as u64;
         file_entry.file_hash = file_hash.clone();
 
@@ -578,30 +551,11 @@ impl StorageManager {
             .put_file_index(file_id, &file_entry)
             .map_err(|e| StorageError::Storage(format!("保存文件索引失败: {}", e)))?;
 
-        // 5. 创建空的Delta（热存储不需要分块信息）
-        let delta = FileDelta {
-            file_id: file_id.to_string(),
-            base_version_id: parent_version_id.unwrap_or("").to_string(),
-            new_version_id: version_id.clone(),
-            chunks: Vec::new(), // 热存储没有chunks
-            created_at: now,
-        };
-
-        // 6. 保存版本信息（重要！）
+        // 7. 保存 Delta 和版本信息
+        self.save_delta(file_id, &delta).await?;
         let _version_info = self
             .save_version_info(file_id, &delta, parent_version_id)
             .await?;
-
-        // 7. 提交后台优化任务（统一使用Full策略，立即执行）
-        let task = crate::OptimizationTask::new(
-            file_id.to_string(),
-            hot_path.clone(),
-            data.len() as u64,
-            file_hash.clone(),
-            crate::OptimizationStrategy::Full,
-            0, // 立即执行，无延迟
-        );
-        self.optimization_scheduler.submit_task(task).await;
 
         Ok((delta, file_version))
     }
@@ -617,18 +571,21 @@ impl StorageManager {
             .get_file_index(&version_info.file_id)
             .map_err(|e| StorageError::Storage(format!("读取文件索引失败: {}", e)))?
         {
+            #[allow(deprecated)]
             match file_entry.storage_mode {
-                // 热存储模式：直接从热存储读取
+                // 分块存储模式：使用分块读取（默认模式）
+                crate::StorageMode::Chunked | crate::StorageMode::Cold => {
+                    // 继续执行下面的分块读取逻辑
+                }
+                // 热存储模式（已弃用，仅用于读取旧数据）
                 crate::StorageMode::Hot => {
                     let hot_path = self.get_hot_storage_path(&version_info.file_id);
                     if hot_path.exists() {
                         let data = fs::read(&hot_path).await.map_err(StorageError::Io)?;
                         return Ok(data);
                     } else {
-                        return Err(StorageError::Storage(format!(
-                            "热存储文件不存在: {}",
-                            hot_path.display()
-                        )));
+                        // 热存储文件不存在，回退到分块读取
+                        // 可能是旧数据已被优化迁移
                     }
                 }
                 // 压缩存储模式：读取压缩文件并解压
@@ -667,10 +624,6 @@ impl StorageManager {
                             compressed_path.display()
                         )));
                     }
-                }
-                // 冷存储模式：继续使用分块读取
-                crate::StorageMode::Cold => {
-                    // 继续执行下面的分块读取逻辑
                 }
             }
         }
@@ -742,40 +695,38 @@ impl StorageManager {
         // 获取版本信息
         let version_info = self.get_version_info(version_id).await?;
 
-        // 检查文件的存储模式
+        // 检查文件的存储模式（仅用于旧热存储数据的兼容性读取）
         let metadata_db = self.get_metadata_db()?;
         if let Some(file_entry) = metadata_db
             .get_file_index(&version_info.file_id)
             .map_err(|e| StorageError::Storage(format!("读取文件索引失败: {}", e)))?
         {
+            #[allow(deprecated)]
             if file_entry.storage_mode == crate::StorageMode::Hot {
                 let hot_path = self.get_hot_storage_path(&version_info.file_id);
                 if hot_path.exists() {
                     let file = fs::File::open(&hot_path).await.map_err(StorageError::Io)?;
                     return Ok(Some(file));
-                } else {
-                    return Err(StorageError::Storage(format!(
-                        "热存储文件不存在: {}",
-                        hot_path.display()
-                    )));
                 }
+                // 热存储文件不存在，回退到分块读取（返回 None）
             }
         }
 
-        // 非热存储模式，返回 None，调用者应使用 read_version_data()
+        // Chunked 模式或热存储文件不存在，返回 None，调用者应使用 read_version_data()
         Ok(None)
     }
 
     /// 获取文件的流式读取路径（如果可用）
     ///
-    /// 对于热存储模式，返回文件的实际路径，可用于零拷贝发送（如 sendfile）。
-    /// 对于其他模式，返回 None。
+    /// 对于旧的热存储模式数据，返回文件的实际路径，可用于零拷贝发送（如 sendfile）。
+    /// 对于 Chunked 模式（默认），返回 None。
     pub async fn get_file_path(&self, file_id: &str) -> Result<Option<PathBuf>> {
         let metadata_db = self.get_metadata_db()?;
         if let Some(file_entry) = metadata_db
             .get_file_index(file_id)
             .map_err(|e| StorageError::Storage(format!("读取文件索引失败: {}", e)))?
         {
+            #[allow(deprecated)]
             if file_entry.storage_mode == crate::StorageMode::Hot {
                 let hot_path = self.get_hot_storage_path(file_id);
                 if hot_path.exists() {
@@ -966,77 +917,38 @@ impl StorageManager {
         })
     }
 
-    /// 获取全局去重统计
+    /// 获取全局去重统计（去重功能始终启用）
     pub async fn get_deduplication_stats(&self) -> Result<crate::DeduplicationStats> {
-        // 如果启用了去重，从 dedup_manager 获取统计
-        if self.config.enable_deduplication {
-            // 从 DedupManager 获取所有块信息
-            let all_blocks = self.dedup_manager.get_all_blocks().await;
+        // 从 DedupManager 获取所有块信息
+        let all_blocks = self.dedup_manager.get_all_blocks().await;
 
-            let mut total_original_size = 0u64;
-            let mut total_stored_size = 0u64;
-            let mut total_ref_count = 0usize;
+        let mut total_original_size = 0u64;
+        let mut total_stored_size = 0u64;
+        let mut total_ref_count = 0usize;
 
-            for block in &all_blocks {
-                // 原始大小 = 块大小 × 引用次数
-                total_original_size += block.size as u64 * block.ref_count as u64;
-                // 存储大小 = 块大小（只存储一次）
-                total_stored_size += block.size as u64;
-                total_ref_count += block.ref_count as usize;
-            }
-
-            let unique_chunks = all_blocks.len();
-            let duplicate_chunks = total_ref_count.saturating_sub(unique_chunks);
-
-            let mut stats = crate::DeduplicationStats {
-                total_chunks: total_ref_count,
-                new_chunks: unique_chunks,
-                duplicate_chunks,
-                original_size: total_original_size,
-                stored_size: total_stored_size,
-                space_saved: 0,
-                dedup_ratio: 0.0,
-            };
-
-            stats.calculate_dedup_ratio();
-            Ok(stats)
-        } else {
-            // 未启用去重，从 metadata_db 获取（旧逻辑）
-            let metadata_db = self.get_metadata_db()?;
-
-            // 统计所有块
-            let all_chunks = metadata_db
-                .list_all_chunks()
-                .map_err(|e| StorageError::Storage(format!("获取块列表失败: {}", e)))?;
-
-            let mut total_original_size = 0u64;
-            let mut total_stored_size = 0u64;
-            let mut total_ref_count = 0usize;
-
-            for (_chunk_id, ref_count_info) in &all_chunks {
-                // 原始大小 = 块大小 × 引用次数
-                total_original_size += ref_count_info.size * ref_count_info.ref_count as u64;
-                // 存储大小 = 块大小（只存储一次）
-                total_stored_size += ref_count_info.size;
-                total_ref_count += ref_count_info.ref_count;
-            }
-
-            let unique_chunks = all_chunks.len();
-            let duplicate_chunks = total_ref_count.saturating_sub(unique_chunks);
-
-            let mut stats = crate::DeduplicationStats {
-                total_chunks: total_ref_count,
-                new_chunks: unique_chunks,
-                duplicate_chunks,
-                original_size: total_original_size,
-                stored_size: total_stored_size,
-                space_saved: 0,
-                dedup_ratio: 0.0,
-            };
-
-            stats.calculate_dedup_ratio();
-            Ok(stats)
+        for block in &all_blocks {
+            // 原始大小 = 块大小 × 引用次数
+            total_original_size += block.size as u64 * block.ref_count as u64;
+            // 存储大小 = 块大小（只存储一次）
+            total_stored_size += block.size as u64;
+            total_ref_count += block.ref_count as usize;
         }
+
+        let unique_chunks = all_blocks.len();
+        let duplicate_chunks = total_ref_count.saturating_sub(unique_chunks);
+
+        let mut stats = crate::DeduplicationStats {
+            total_chunks: total_ref_count,
+            new_chunks: unique_chunks,
+            duplicate_chunks,
+            original_size: total_original_size,
+            stored_size: total_stored_size,
+            space_saved: 0,
+            dedup_ratio: 0.0,
+        };
+
+        stats.calculate_dedup_ratio();
+        Ok(stats)
     }
 
     /// 保存块数据，返回使用的压缩算法
@@ -1621,7 +1533,7 @@ impl StorageManager {
                         modified_at: version_info.created_at,
                         is_deleted: false,
                         deleted_at: None,
-                        storage_mode: crate::StorageMode::Cold,
+                        storage_mode: crate::StorageMode::Chunked,
                         optimization_status: crate::OptimizationStatus::Completed,
                         file_size: version_info.file_size,
                         file_hash: String::new(),
@@ -1754,21 +1666,11 @@ impl StorageManager {
             self.version_cache.invalidate(&version.version_id).await;
         }
 
-        // 3. 如果启用了去重，使用 dedup_manager 减少块引用计数
-        if self.config.enable_deduplication {
-            for chunk_id in &chunks_to_decrement {
-                // 减少 dedup_manager 中的引用计数
-                if let Err(e) = self.dedup_manager.decrement_chunk_ref(chunk_id).await {
-                    info!("递减块 {} 引用计数失败: {}", chunk_id, e);
-                }
-            }
-        } else {
-            // 否则使用 metadata_db
-            let metadata_db = self.get_metadata_db()?;
-            for chunk_id in chunks_to_decrement {
-                if let Err(e) = metadata_db.decrement_chunk_ref(&chunk_id) {
-                    info!("递减块 {} 引用计数失败: {}", chunk_id, e);
-                }
+        // 3. 使用 dedup_manager 减少块引用计数（去重功能始终启用）
+        for chunk_id in &chunks_to_decrement {
+            // 减少 dedup_manager 中的引用计数
+            if let Err(e) = self.dedup_manager.decrement_chunk_ref(chunk_id).await {
+                info!("递减块 {} 引用计数失败: {}", chunk_id, e);
             }
         }
 
@@ -1860,56 +1762,27 @@ impl StorageManager {
     }
 
     /// 垃圾回收（清理引用计数为 0 的块）
-    /// 删除没有任何文件引用的块，释放存储空间
+    /// 删除没有任何文件引用的块，释放存储空间（去重功能始终启用）
     pub async fn garbage_collect_blocks(&self) -> Result<usize> {
         info!("开始垃圾回收");
 
-        let mut deleted_count = 0;
+        // 使用 dedup_manager 的 GC 功能
+        let deleted_count = self.dedup_manager.gc().await? as usize;
 
-        if self.config.enable_deduplication {
-            // 使用 dedup_manager 的 GC 功能
-            deleted_count = self.dedup_manager.gc().await? as usize;
-
-            // 还需要删除物理块文件
-            let all_blocks = self.dedup_manager.get_all_blocks().await;
-            for block in all_blocks {
-                if block.ref_count == 0 {
-                    // 删除块文件
-                    let chunk_path = self.get_chunk_path(&block.chunk_id);
-                    if chunk_path.exists() {
-                        if let Err(e) = fs::remove_file(&chunk_path).await {
-                            info!("删除块文件 {} 失败: {}", block.chunk_id, e);
-                        } else {
-                            info!("删除未引用的块文件: {}", block.chunk_id);
-                        }
+        // 还需要删除物理块文件
+        let all_blocks = self.dedup_manager.get_all_blocks().await;
+        for block in all_blocks {
+            if block.ref_count == 0 {
+                // 删除块文件
+                let chunk_path = self.get_chunk_path(&block.chunk_id);
+                if chunk_path.exists() {
+                    if let Err(e) = fs::remove_file(&chunk_path).await {
+                        info!("删除块文件 {} 失败: {}", block.chunk_id, e);
+                    } else {
+                        info!("删除未引用的块文件: {}", block.chunk_id);
                     }
                 }
             }
-        } else {
-            // 使用 metadata_db 查找引用计数为 0 的块
-            let metadata_db = self.get_metadata_db()?;
-            let all_chunks = metadata_db.list_all_chunks()?;
-
-            for (chunk_id, ref_count_info) in all_chunks {
-                if ref_count_info.ref_count == 0 {
-                    // 删除块文件
-                    let chunk_path = self.get_chunk_path(&chunk_id);
-                    if chunk_path.exists() {
-                        if let Err(e) = fs::remove_file(&chunk_path).await {
-                            info!("删除块文件 {} 失败: {}", chunk_id, e);
-                        } else {
-                            deleted_count += 1;
-                            info!("删除未引用的块文件: {}", chunk_id);
-                        }
-                    }
-
-                    // 从 metadata_db 中移除
-                    let _ = metadata_db.remove_chunk_ref(&chunk_id);
-                }
-            }
-
-            // 持久化
-            metadata_db.flush().await?;
         }
 
         info!("垃圾回收完成，清理了 {} 个未引用的块", deleted_count);
@@ -2324,25 +2197,6 @@ impl StorageManager {
         &self,
         task: &mut crate::OptimizationTask,
     ) -> Result<(u64, u64)> {
-        // 检查文件大小，防止 OOM
-        if self.config.max_file_size_for_optimization > 0 {
-            let file_size = fs::metadata(&task.hot_path)
-                .await
-                .map_err(StorageError::Io)?
-                .len();
-
-            if file_size > self.config.max_file_size_for_optimization {
-                let msg = format!(
-                    "文件过大 ({} MB)，超过限制 ({} MB)，跳过优化",
-                    file_size / 1024 / 1024,
-                    self.config.max_file_size_for_optimization / 1024 / 1024
-                );
-                warn!("{}: file_id={}", msg, task.file_id);
-                task.mark_skipped(msg);
-                return Ok((0, 0));
-            }
-        }
-
         // 读取热存储文件
         let data = fs::read(&task.hot_path).await.map_err(StorageError::Io)?;
         let original_size = data.len() as u64;
@@ -2408,52 +2262,29 @@ impl StorageManager {
 
     /// 完整优化（CDC分块 + 去重 + 压缩）
     async fn optimize_full(&self, task: &mut crate::OptimizationTask) -> Result<(u64, u64)> {
-        // 检查文件大小，防止 OOM
-        if self.config.max_file_size_for_optimization > 0 {
-            let file_size = fs::metadata(&task.hot_path)
-                .await
-                .map_err(StorageError::Io)?
-                .len();
-
-            if file_size > self.config.max_file_size_for_optimization {
-                let msg = format!(
-                    "文件过大 ({} MB)，超过限制 ({} MB)，跳过优化",
-                    file_size / 1024 / 1024,
-                    self.config.max_file_size_for_optimization / 1024 / 1024
-                );
-                warn!("{}: file_id={}", msg, task.file_id);
-                task.mark_skipped(msg);
-                return Ok((0, 0));
-            }
-        }
-
         // 读取热存储文件
         let data = fs::read(&task.hot_path).await.map_err(StorageError::Io)?;
         let original_size = data.len() as u64;
 
-        // 1. 检测文件类型并调整分块配置
+        // 1. 检测文件类型并调整压缩配置
         let file_type = crate::core::FileType::detect(&data);
-        let (min_chunk, max_chunk) = file_type.recommended_chunk_size();
 
         let mut adjusted_config = self.config.clone();
-        adjusted_config.min_chunk_size = min_chunk;
-        adjusted_config.max_chunk_size = max_chunk;
-
         if file_type.is_compressed() {
             adjusted_config.enable_compression = false;
         }
 
         info!(
-            "开始完整优化: file_id={}, 大小={}B, 类型={}, 块大小={}KB-{}KB",
+            "开始完整优化: file_id={}, 大小={}B, 类型={}, 块大小={}KB",
             task.file_id,
             original_size,
             file_type.as_str(),
-            min_chunk / 1024,
-            max_chunk / 1024
+            self.chunk_size / 1024
         );
 
         // 2. 使用Delta生成器进行CDC分块
-        let mut generator = crate::core::delta::DeltaGenerator::new(adjusted_config);
+        let mut generator =
+            crate::core::delta::DeltaGenerator::new(self.chunk_size, adjusted_config);
         let delta = generator
             .generate_full_delta(&data, &task.file_id)
             .map_err(|e| StorageError::Storage(format!("生成分块失败: {}", e)))?;
@@ -2476,34 +2307,27 @@ impl StorageManager {
             }
             let chunk_data = &data[start..end];
 
-            let compression_algo = if self.config.enable_deduplication {
-                let exists = self.dedup_manager.chunk_exists(&chunk.chunk_id).await;
-                if exists {
-                    self.dedup_manager
-                        .increment_chunk_ref(&chunk.chunk_id)
-                        .await
-                        .map_err(|e| StorageError::Storage(format!("增加块引用计数失败: {}", e)))?;
-                    dedup_stats.duplicate_chunks += 1;
-                    // 对于重复的chunk，从已存储的chunk读取compression信息
-                    // 这里假设使用相同的压缩算法，使用当前配置的算法
-                    if self.config.enable_compression {
-                        crate::core::compression::CompressionAlgorithm::LZ4
-                    } else {
-                        crate::core::compression::CompressionAlgorithm::None
-                    }
+            // 去重检查（去重功能始终启用）
+            let exists = self.dedup_manager.chunk_exists(&chunk.chunk_id).await;
+            let compression_algo = if exists {
+                self.dedup_manager
+                    .increment_chunk_ref(&chunk.chunk_id)
+                    .await
+                    .map_err(|e| StorageError::Storage(format!("增加块引用计数失败: {}", e)))?;
+                dedup_stats.duplicate_chunks += 1;
+                // 对于重复的chunk，使用当前配置的压缩算法
+                if self.config.enable_compression {
+                    crate::core::compression::CompressionAlgorithm::LZ4
                 } else {
-                    let algo = self.save_chunk_data(&chunk.chunk_id, chunk_data).await?;
-                    let storage_path = self.get_chunk_path(&chunk.chunk_id);
-                    self.dedup_manager
-                        .add_chunk(&chunk.chunk_id, chunk.size, storage_path)
-                        .await
-                        .map_err(|e| StorageError::Storage(format!("添加块到索引失败: {}", e)))?;
-                    dedup_stats.new_chunks += 1;
-                    dedup_stats.stored_size += chunk.size as u64;
-                    algo
+                    crate::core::compression::CompressionAlgorithm::None
                 }
             } else {
                 let algo = self.save_chunk_data(&chunk.chunk_id, chunk_data).await?;
+                let storage_path = self.get_chunk_path(&chunk.chunk_id);
+                self.dedup_manager
+                    .add_chunk(&chunk.chunk_id, chunk.size, storage_path)
+                    .await
+                    .map_err(|e| StorageError::Storage(format!("添加块到索引失败: {}", e)))?;
                 dedup_stats.new_chunks += 1;
                 dedup_stats.stored_size += chunk.size as u64;
                 algo
@@ -2551,7 +2375,7 @@ impl StorageManager {
             .get_file_index(&task.file_id)
             .map_err(|e| StorageError::Storage(format!("读取文件索引失败: {}", e)))?
         {
-            file_entry.storage_mode = crate::StorageMode::Cold;
+            file_entry.storage_mode = crate::StorageMode::Chunked;
             file_entry.optimization_status = crate::OptimizationStatus::Completed;
             metadata_db
                 .put_file_index(&task.file_id, &file_entry)
@@ -2696,9 +2520,10 @@ impl StorageManager {
     // 优化管理API（阶段3）
     // ============================================================================
 
-    /// 手动触发文件优化
+    /// 手动触发文件优化（用于旧热存储数据迁移）
     ///
-    /// 为指定的文件立即创建优化任务（即使未启用异步优化）
+    /// 为指定的热存储文件立即创建优化任务，将其转换为分块存储。
+    /// 注意：新版本中文件直接使用分块存储，此函数仅用于迁移旧数据。
     pub async fn trigger_file_optimization(&self, file_id: &str) -> Result<()> {
         // 获取文件索引信息
         let metadata_db = self.get_metadata_db()?;
@@ -2707,10 +2532,11 @@ impl StorageManager {
             .map_err(|e| StorageError::Storage(format!("读取文件索引失败: {}", e)))?
             .ok_or_else(|| StorageError::FileNotFound(format!("文件不存在: {}", file_id)))?;
 
-        // 检查文件是否在热存储
+        // 检查文件是否在热存储（仅用于迁移旧数据）
+        #[allow(deprecated)]
         if file_entry.storage_mode != crate::StorageMode::Hot {
             return Err(StorageError::Storage(format!(
-                "文件 {} 不在热存储，当前模式: {:?}",
+                "文件 {} 不在热存储（已使用分块存储），当前模式: {:?}",
                 file_id, file_entry.storage_mode
             )));
         }
@@ -3393,41 +3219,6 @@ mod tests {
         );
     }
 
-    /// 此测试已被忽略，因为块引用计数功能已由 DedupManager 的 BlockIndex 替代
-    /// metadata_db 的块引用计数已不再使用
-    #[ignore]
-    #[tokio::test]
-    async fn test_chunk_ref_count() {
-        // 此测试需要禁用去重，因为它依赖 metadata_db 中的块引用计数
-        let temp_dir = TempDir::new().unwrap();
-        let config = IncrementalConfig {
-            enable_deduplication: false,
-            ..IncrementalConfig::default()
-        };
-        let storage = StorageManager::new(temp_dir.path().to_path_buf(), 4 * 1024 * 1024, config);
-        storage.init().await.unwrap();
-
-        // 保存同一个文件的多个版本(会产生重复的块)
-        let data = b"Hello, World!";
-        let (_delta1, version1) = storage.save_version("test_file", data, None).await.unwrap();
-
-        // 保存相同数据(应该复用块)
-        let data2 = b"Hello, World! Extra";
-        let (_delta2, _version2) = storage
-            .save_version("test_file", data2, Some(&version1.version_id))
-            .await
-            .unwrap();
-
-        // 从 Sled 检查引用计数
-        let metadata_db = storage.get_metadata_db().unwrap();
-        let orphaned = metadata_db.list_orphaned_chunks().unwrap();
-
-        // 确保有正常引用的块
-        let total_chunks = metadata_db.chunk_ref_count();
-        assert!(total_chunks > 0);
-        assert!(orphaned.len() < total_chunks); // 不是所有块都是孤立的
-    }
-
     #[tokio::test]
     async fn test_verify_chunks() {
         let (storage, _temp) = create_test_storage().await;
@@ -3548,7 +3339,6 @@ mod tests {
     async fn test_garbage_collect_blocks_with_dedup() {
         let temp_dir = TempDir::new().unwrap();
         let config = IncrementalConfig {
-            enable_deduplication: true,
             enable_compression: false,
             ..IncrementalConfig::default()
         };
@@ -3576,7 +3366,6 @@ mod tests {
     async fn test_garbage_collect_blocks_without_dedup() {
         let temp_dir = TempDir::new().unwrap();
         let config = IncrementalConfig {
-            enable_deduplication: false,
             enable_compression: false,
             ..IncrementalConfig::default()
         };
@@ -3651,7 +3440,6 @@ mod tests {
             enable_auto_gc: false, // 手动控制GC任务
             gc_interval_secs: 1,   // 1秒间隔用于快速测试
             enable_compression: false,
-            enable_deduplication: false,
             ..IncrementalConfig::default()
         };
         let storage = StorageManager::new(temp_dir.path().to_path_buf(), 4 * 1024 * 1024, config);
@@ -3677,7 +3465,6 @@ mod tests {
             enable_auto_gc: true, // 自动启动GC
             gc_interval_secs: 1,  // 1秒间隔用于快速测试
             enable_compression: false,
-            enable_deduplication: false,
             ..IncrementalConfig::default()
         };
         let storage = StorageManager::new(temp_dir.path().to_path_buf(), 4 * 1024 * 1024, config);
@@ -3696,7 +3483,6 @@ mod tests {
         let config = IncrementalConfig {
             enable_auto_gc: false,
             enable_compression: false,
-            enable_deduplication: false,
             ..IncrementalConfig::default()
         };
         let storage = StorageManager::new(temp_dir.path().to_path_buf(), 4 * 1024 * 1024, config);
@@ -3725,7 +3511,6 @@ mod tests {
             enable_auto_gc: false,
             gc_interval_secs: 1, // 1秒间隔用于快速测试
             enable_compression: false,
-            enable_deduplication: false,
             ..IncrementalConfig::default()
         };
         let storage = StorageManager::new(temp_dir.path().to_path_buf(), 4 * 1024 * 1024, config);
@@ -3752,50 +3537,45 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_hot_storage_upload_and_read() {
-        // 测试热存储模式的上传和读取
+    async fn test_chunked_storage_upload_and_read() {
+        // 测试分块存储模式的上传和读取（新架构，直接分块+去重）
         let temp_dir = TempDir::new().unwrap();
         let config = IncrementalConfig {
-            enable_deduplication: false,
             enable_compression: false,
             ..IncrementalConfig::default()
         };
         let storage = StorageManager::new(temp_dir.path().to_path_buf(), 4 * 1024 * 1024, config);
         storage.init().await.unwrap();
 
-        // 上传测试数据（应该使用热存储）
-        let test_data = b"Hello from hot storage! This is a test file.";
+        // 上传测试数据（直接分块存储）
+        let test_data = b"Hello from chunked storage! This is a test file.";
         let (delta, version) = storage
-            .save_version("test_hot_file", test_data, None)
+            .save_version("test_chunked_file", test_data, None)
             .await
             .unwrap();
 
-        // 验证使用了热存储（delta应该没有chunks）
-        assert_eq!(delta.chunks.len(), 0, "热存储不应该有chunks");
+        // 验证有分块（即时分块存储）
+        assert!(!delta.chunks.is_empty(), "分块存储应该有chunks");
         assert_eq!(version.size, test_data.len() as u64);
 
         // 验证文件索引的存储模式
         let metadata_db = storage.get_metadata_db().unwrap();
         let file_entry = metadata_db
-            .get_file_index("test_hot_file")
+            .get_file_index("test_chunked_file")
             .unwrap()
             .unwrap();
         assert_eq!(
             file_entry.storage_mode,
-            crate::StorageMode::Hot,
-            "应该是热存储模式"
+            crate::StorageMode::Chunked,
+            "应该是分块存储模式"
         );
         assert_eq!(
             file_entry.optimization_status,
-            crate::OptimizationStatus::Pending,
-            "应该是待优化状态"
+            crate::OptimizationStatus::Completed,
+            "应该是已完成状态"
         );
 
-        // 验证热存储文件存在
-        let hot_path = storage.get_hot_storage_path("test_hot_file");
-        assert!(hot_path.exists(), "热存储文件应该存在");
-
-        // 读取数据（应该从热存储读取）
+        // 读取数据（从分块存储读取）
         let read_data = storage
             .read_version_data(&version.version_id)
             .await
@@ -3804,42 +3584,39 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_cold_storage_backward_compatibility() {
-        // 测试禁用热存储时的传统分块存储（向后兼容）
+    async fn test_chunked_storage_with_deduplication() {
+        // 测试启用去重的分块存储（新架构）
         let temp_dir = TempDir::new().unwrap();
         let config = IncrementalConfig {
-            enable_deduplication: true,
             enable_compression: false,
             ..IncrementalConfig::default()
         };
         let storage = StorageManager::new(temp_dir.path().to_path_buf(), 4 * 1024 * 1024, config);
         storage.init().await.unwrap();
 
-        // 上传测试数据（先到热存储，然后优化为冷存储）
-        let test_data = b"Hello from cold storage! This is a test file for traditional chunking.";
-        let (_delta, version) = storage
-            .save_version("test_cold_file", test_data, None)
+        // 上传测试数据（直接分块+去重存储）
+        let test_data = b"Hello from chunked storage! This is a test file for chunking with dedup.";
+        let (delta, version) = storage
+            .save_version("test_dedup_file", test_data, None)
             .await
             .unwrap();
 
-        // 等待优化完成（从热存储转为冷存储）
-        wait_for_optimization(&storage, "test_cold_file", 10)
-            .await
-            .unwrap();
+        // 验证有分块
+        assert!(!delta.chunks.is_empty(), "应该有分块");
 
-        // 验证文件索引的存储模式（优化完成后重新获取metadata_db）
+        // 验证文件索引的存储模式
         let metadata_db = storage.get_metadata_db().unwrap();
         let file_entry = metadata_db
-            .get_file_index("test_cold_file")
+            .get_file_index("test_dedup_file")
             .unwrap()
             .unwrap();
         assert_eq!(
             file_entry.storage_mode,
-            crate::StorageMode::Cold,
-            "应该是冷存储模式"
+            crate::StorageMode::Chunked,
+            "应该是分块存储模式"
         );
 
-        // 读取数据（应该从分块读取）
+        // 读取数据（从分块读取）
         let read_data = storage
             .read_version_data(&version.version_id)
             .await
@@ -3848,18 +3625,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_hot_storage_stream_upload() {
-        // 测试流式上传到热存储
+    async fn test_stream_upload() {
+        // 测试流式上传到分块存储
         let temp_dir = TempDir::new().unwrap();
         let config = IncrementalConfig {
-            enable_deduplication: false,
             ..IncrementalConfig::default()
         };
         let storage = StorageManager::new(temp_dir.path().to_path_buf(), 4 * 1024 * 1024, config);
         storage.init().await.unwrap();
 
         // 创建测试数据流
-        let test_data = b"Streaming data to hot storage! This is a larger test file.".repeat(100);
+        let test_data = b"Streaming data to chunked storage! This is a larger test file.".repeat(100);
         let mut cursor = std::io::Cursor::new(test_data.clone());
 
         // 流式上传
@@ -3868,8 +3644,8 @@ mod tests {
             .await
             .unwrap();
 
-        // 验证热存储
-        assert_eq!(delta.chunks.len(), 0, "热存储不应该有chunks");
+        // 验证分块存储
+        assert!(!delta.chunks.is_empty(), "分块存储应该有chunks");
 
         // 读取并验证数据
         let read_data = storage
@@ -3880,299 +3656,51 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_background_optimization() {
-        // 测试后台优化功能
+    async fn test_immediate_chunked_storage() {
+        // 测试即时分块存储功能（新架构：直接分块+去重，无需后台优化）
         let temp_dir = TempDir::new().unwrap();
         let config = IncrementalConfig {
-            enable_deduplication: true,
             enable_compression: true,
             ..IncrementalConfig::default()
         };
         let storage = StorageManager::new(temp_dir.path().to_path_buf(), 4 * 1024 * 1024, config);
         storage.init().await.unwrap();
 
-        // 上传一个较大的文件（应该使用热存储）
-        let test_data = b"This is test data for background optimization. ".repeat(1000); // ~47KB
+        // 上传一个较大的文件（直接分块存储）
+        let test_data = b"This is test data for immediate chunked storage. ".repeat(1000); // ~50KB
         let (delta, version) = storage
-            .save_version("test_optimization_file", &test_data, None)
+            .save_version("test_chunked_file", &test_data, None)
             .await
             .unwrap();
 
-        // 验证初始状态：热存储，无chunks
-        assert_eq!(delta.chunks.len(), 0, "热存储不应该有chunks");
+        // 验证直接使用分块存储（有chunks）
+        assert!(!delta.chunks.is_empty(), "分块存储应该有chunks");
 
-        // 验证文件索引的初始状态
+        // 验证文件索引的状态
         let metadata_db = storage.get_metadata_db().unwrap();
         let file_entry = metadata_db
-            .get_file_index("test_optimization_file")
+            .get_file_index("test_chunked_file")
             .unwrap()
             .unwrap();
         assert_eq!(
             file_entry.storage_mode,
-            crate::StorageMode::Hot,
-            "初始应该是热存储模式"
+            crate::StorageMode::Chunked,
+            "应该是分块存储模式"
         );
         assert_eq!(
             file_entry.optimization_status,
-            crate::OptimizationStatus::Pending,
-            "优化状态应该是待优化"
+            crate::OptimizationStatus::Completed,
+            "优化状态应该是已完成（即时分块不需要后台优化）"
         );
 
-        // 验证热存储文件存在
-        let file_id = "test_optimization_file";
-        let prefix = &file_id[..2.min(file_id.len())];
-        let hot_path = storage.hot_storage_root.join(prefix).join(file_id);
-        assert!(hot_path.exists(), "热存储文件应该存在");
-
-        // 等待优化完成
-        wait_for_optimization(&storage, file_id, 10).await.unwrap();
-
-        // 验证优化后的状态（重新获取metadata_db）
-        let metadata_db = storage.get_metadata_db().unwrap();
-        let file_entry_after = metadata_db
-            .get_file_index("test_optimization_file")
-            .unwrap()
-            .unwrap();
-
-        // 优化后应该变成冷存储或压缩存储
-        assert_ne!(
-            file_entry_after.storage_mode,
-            crate::StorageMode::Hot,
-            "优化后不应该还是热存储模式"
-        );
-
-        // 验证可以正确读取优化后的数据
+        // 验证可以正确读取数据
         let read_data = storage
             .read_version_data(&version.version_id)
             .await
             .unwrap();
-        assert_eq!(read_data, test_data, "优化后应该能正确读取数据");
-
-        // 验证优化统计信息
-        let stats = storage.get_optimization_stats().await;
-        assert!(stats.total_tasks > 0, "应该有任务被处理");
-        assert!(
-            stats.completed_tasks > 0 || stats.pending_tasks > 0,
-            "应该有完成或待处理的任务"
-        );
+        assert_eq!(read_data, test_data, "应该能正确读取数据");
 
         // 关闭存储
-        storage.shutdown().await.unwrap();
-    }
-
-    /// 此测试已被忽略，因为优化策略决策逻辑已被移除，现在统一使用Full策略
-    #[ignore]
-    #[tokio::test]
-    async fn test_optimization_strategy_decision() {
-        // 测试优化策略决策逻辑
-        let temp_dir = TempDir::new().unwrap();
-        let config = IncrementalConfig {
-            enable_deduplication: true,
-            ..IncrementalConfig::default()
-        };
-        let storage = StorageManager::new(temp_dir.path().to_path_buf(), 4 * 1024 * 1024, config);
-        storage.init().await.unwrap();
-
-        // 测试1：小文件（< 1MB）应该使用 CompressOnly 策略
-        let small_data = b"Small file".repeat(100); // ~1KB
-        let (_, _version1) = storage
-            .save_version("test_small", &small_data, None)
-            .await
-            .unwrap();
-
-        // 等待任务提交
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-        // 获取并检查任务策略
-        let tasks = storage.optimization_scheduler.get_pending_tasks().await;
-        let has_compress_only = tasks
-            .iter()
-            .any(|t| matches!(t.strategy, crate::OptimizationStrategy::CompressOnly));
-        let has_skip = tasks
-            .iter()
-            .any(|t| matches!(t.strategy, crate::OptimizationStrategy::Skip));
-        // 注意：由于文件类型检测，可能会被判定为Skip，这里只验证不是Full策略
-        assert!(
-            has_compress_only || has_skip,
-            "小文件应该使用CompressOnly或Skip策略"
-        );
-
-        // 测试2：已压缩文件应该被Skip
-        // 创建一个模拟的压缩文件数据（PNG文件头）
-        let mut png_data = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]; // PNG头
-        png_data.extend_from_slice(&vec![0u8; 1000]);
-        let (_, _version2) = storage
-            .save_version("test_compressed", &png_data, None)
-            .await
-            .unwrap();
-
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-        // 获取任务并检查策略
-        if let Some(task) = storage.optimization_scheduler.get_next_ready_task().await
-            && task.file_id == "test_compressed"
-        {
-            assert_eq!(
-                task.strategy,
-                crate::OptimizationStrategy::Skip,
-                "已压缩文件应该被跳过"
-            );
-        }
-
-        storage.shutdown().await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn test_manual_trigger_optimization() {
-        // 测试手动触发优化功能
-        let temp_dir = TempDir::new().unwrap();
-        let config = IncrementalConfig {
-            enable_deduplication: true,
-            enable_compression: true,
-            ..IncrementalConfig::default()
-        };
-        let storage = StorageManager::new(temp_dir.path().to_path_buf(), 4 * 1024 * 1024, config);
-        storage.init().await.unwrap();
-
-        // 上传一个文件到热存储
-        let test_data = b"Test data for manual optimization trigger".repeat(100);
-        let (_delta, _version) = storage
-            .save_version("test_manual", &test_data, None)
-            .await
-            .unwrap();
-
-        // 验证初始队列长度
-        let initial_queue_len = storage.get_optimization_queue_length().await;
-        assert_eq!(initial_queue_len, 1, "应该有1个待处理任务");
-
-        // 手动触发优化
-        let result = storage.trigger_file_optimization("test_manual").await;
-        assert!(result.is_ok(), "手动触发优化应该成功");
-
-        // 验证队列中仍然只有一个任务（去重）
-        let queue_len_after = storage.get_optimization_queue_length().await;
-        assert_eq!(queue_len_after, 1, "去重后应该仍然是1个任务");
-
-        // 测试触发不存在的文件
-        let result_not_found = storage.trigger_file_optimization("non_existent").await;
-        assert!(result_not_found.is_err(), "触发不存在的文件应该失败");
-
-        storage.shutdown().await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn test_pause_resume_optimization_scheduler() {
-        // 测试暂停和恢复优化调度器
-        let temp_dir = TempDir::new().unwrap();
-        let config = IncrementalConfig {
-            enable_deduplication: true,
-            ..IncrementalConfig::default()
-        };
-        let storage = StorageManager::new(temp_dir.path().to_path_buf(), 4 * 1024 * 1024, config);
-        storage.init().await.unwrap();
-
-        // 验证初始状态（未暂停）
-        assert!(
-            !storage.is_optimization_paused(),
-            "初始状态应该是未暂停"
-        );
-
-        // 暂停调度器
-        storage.pause_optimization_scheduler().await.unwrap();
-        assert!(
-            storage.is_optimization_paused(),
-            "暂停后应该是暂停状态"
-        );
-
-        // 上传文件
-        let test_data = b"Test data for pause test".repeat(100);
-        storage
-            .save_version("test_pause", &test_data, None)
-            .await
-            .unwrap();
-
-        // 等待一段时间（如果未暂停，任务应该会被执行）
-        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-
-        // 验证任务仍在队列中（因为调度器暂停了）
-        let queue_len = storage.get_optimization_queue_length().await;
-        assert_eq!(queue_len, 1, "暂停时任务应该保留在队列中");
-
-        // 恢复调度器
-        storage.resume_optimization_scheduler().await.unwrap();
-        assert!(
-            !storage.is_optimization_paused(),
-            "恢复后应该是未暂停状态"
-        );
-
-        storage.shutdown().await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn test_optimization_queue_management() {
-        // 测试优化队列管理功能
-        let temp_dir = TempDir::new().unwrap();
-        let config = IncrementalConfig {
-            enable_deduplication: true,
-            ..IncrementalConfig::default()
-        };
-        let storage = StorageManager::new(temp_dir.path().to_path_buf(), 4 * 1024 * 1024, config);
-        storage.init().await.unwrap();
-
-        // 验证初始队列为空
-        assert_eq!(
-            storage.get_optimization_queue_length().await,
-            0,
-            "初始队列应该为空"
-        );
-
-        // 上传多个文件
-        for i in 0..3 {
-            let test_data = format!("Test data {}", i).repeat(100);
-            storage
-                .save_version(&format!("test_file_{}", i), test_data.as_bytes(), None)
-                .await
-                .unwrap();
-        }
-
-        // 验证队列长度
-        assert_eq!(
-            storage.get_optimization_queue_length().await,
-            3,
-            "应该有3个待处理任务"
-        );
-
-        // 获取待处理任务列表
-        let pending_tasks = storage.get_pending_optimization_tasks().await;
-        assert_eq!(pending_tasks.len(), 3, "应该返回3个待处理任务");
-
-        // 验证任务信息
-        let file_ids: Vec<String> = pending_tasks.iter().map(|t| t.file_id.clone()).collect();
-        assert!(
-            file_ids.contains(&"test_file_0".to_string()),
-            "应该包含test_file_0"
-        );
-        assert!(
-            file_ids.contains(&"test_file_1".to_string()),
-            "应该包含test_file_1"
-        );
-        assert!(
-            file_ids.contains(&"test_file_2".to_string()),
-            "应该包含test_file_2"
-        );
-
-        // 清空队列
-        storage.clear_optimization_queue().await.unwrap();
-        assert_eq!(
-            storage.get_optimization_queue_length().await,
-            0,
-            "清空后队列应该为空"
-        );
-
-        // 验证统计信息
-        let stats = storage.get_optimization_stats().await;
-        assert_eq!(stats.pending_tasks, 0, "待处理任务数应该为0");
-
         storage.shutdown().await.unwrap();
     }
 
@@ -4181,7 +3709,6 @@ mod tests {
         // 测试优化API的错误情况
         let temp_dir = TempDir::new().unwrap();
         let config = IncrementalConfig {
-            enable_deduplication: false,
             ..IncrementalConfig::default()
         };
         let storage = StorageManager::new(temp_dir.path().to_path_buf(), 4 * 1024 * 1024, config);
@@ -4213,29 +3740,6 @@ mod tests {
         storage.shutdown().await.unwrap();
     }
 
-    /// 此测试已被忽略，因为孤儿块检测功能依赖 metadata_db 的块引用计数
-    /// 该功能已由 DedupManager 的 BlockIndex 和 GC 机制替代
-    #[ignore]
-    #[tokio::test]
-    async fn test_orphan_cleanup() {
-        // 此测试需要禁用去重，因为它依赖 metadata_db 中的块引用计数
-        let temp_dir = TempDir::new().unwrap();
-        let config = IncrementalConfig {
-            enable_deduplication: false,
-            ..IncrementalConfig::default()
-        };
-        let storage = StorageManager::new(temp_dir.path().to_path_buf(), 4 * 1024 * 1024, config);
-        storage.init().await.unwrap();
-
-        // 创建测试数据
-        let data = b"Test orphan cleanup";
-        storage.save_version("test_file", data, None).await.unwrap();
-
-        // 检测孤儿 chunks（正常情况下应该没有）
-        let orphans = storage.detect_orphan_chunks().await.unwrap();
-        // 正常情况下，所有 chunks 都应该被引用，没有孤儿
-        assert_eq!(orphans.len(), 0, "不应该有孤儿 chunks");
-    }
 }
 // 性能对比测试：原版存储 vs v0.7.0增量存储
 // 使用方法：cargo test --lib bench_comparison

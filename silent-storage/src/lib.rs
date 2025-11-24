@@ -78,6 +78,10 @@
 
 mod error;
 
+// ============================================================================
+// 公共模块
+// ============================================================================
+
 pub mod bench;
 pub mod cache;
 pub mod core;
@@ -88,33 +92,87 @@ pub mod reliability;
 pub mod services;
 pub mod storage;
 
-pub use cache::{CacheConfig, CacheManager, CacheStats};
+// ============================================================================
+// 核心 API（最常用）
+// ============================================================================
+
+/// 存储管理器 - 主要入口点
+pub use storage::StorageManager;
+
+/// 错误处理
 pub use error::{Result, StorageError};
+
+// ============================================================================
+// 存储类型和统计
+// ============================================================================
+
+pub use storage::{ChunkRefCount, FileIndexEntry, GarbageCollectResult, StorageStats};
+
+// ============================================================================
+// 缓存系统
+// ============================================================================
+
+pub use cache::{CacheConfig, CacheManager, CacheStats};
+
+// ============================================================================
+// 监控和指标
+// ============================================================================
+
 pub use metrics::{HealthStatus, StorageMetrics};
+
+// ============================================================================
+// 后台优化
+// ============================================================================
+
 pub use optimization::{
     OptimizationScheduler, OptimizationStats, OptimizationStrategy, OptimizationTask,
 };
+
+// ============================================================================
+// 可靠性组件
+// ============================================================================
+
 pub use reliability::{
     ChunkVerifier, ChunkVerifyReport, CleanupReport, OrphanChunkCleaner, WalEntry, WalManager,
     WalOperation,
 };
 
-// 重新导出 storage 模块的公共类型
-pub use storage::{
-    ChunkRefCount, FileIndexEntry, GarbageCollectResult, StorageManager, StorageStats,
-};
+// ============================================================================
+// 核心算法（CDC、压缩、增量）
+// ============================================================================
 
-// 重新导出核心模块
 pub use core::chunker::*;
 pub use core::compression::*;
 pub use core::delta::*;
 pub use core::engine::*;
 
-// 重新导出服务模块
+// ============================================================================
+// 服务模块（去重、索引、生命周期、分层）
+// ============================================================================
+
 pub use services::dedup::*;
 pub use services::index::*;
 pub use services::lifecycle::*;
 pub use services::tiering::*;
+
+// ============================================================================
+// Prelude - 便捷导入
+// ============================================================================
+
+/// 预加载模块，包含最常用的类型
+///
+/// 使用方式:
+/// ```rust
+/// use silent_storage::prelude::*;
+/// ```
+pub mod prelude {
+    pub use crate::error::{Result, StorageError};
+    pub use crate::storage::{FileIndexEntry, StorageManager, StorageStats};
+    pub use crate::{
+        ChunkInfo, ChunkerType, DeduplicationStats, FileDelta, IncrementalConfig,
+        OptimizationStatus, StorageMode, VersionInfo,
+    };
+}
 
 use serde::{Deserialize, Serialize};
 

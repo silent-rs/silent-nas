@@ -145,8 +145,6 @@ pub struct StorageManager {
     orphan_cleaner: Arc<OrphanChunkCleaner>,
     /// 压缩器
     compressor: Arc<crate::core::compression::Compressor>,
-    /// 去重管理器（使用内存索引）
-    dedup_manager: Arc<crate::services::dedup::DedupManager>,
     /// GC任务句柄
     gc_task_handle: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
     /// GC任务停止标志（无锁原子操作）
@@ -196,29 +194,6 @@ impl StorageManager {
             compression_config,
         ));
 
-        // 初始化去重管理器（去重功能始终启用，已内置于存储策略）
-        let dedup_config = crate::services::dedup::DedupConfig {
-            enable_dedup: true, // 始终启用去重
-            min_dedup_size: 1024, // 1KB
-            batch_size: 1000,
-            concurrent_threads: 4,
-            max_memory_index: 100000,
-            sync_interval_secs: 300,
-            enable_cow: true,
-        };
-        let block_index_config = crate::services::index::BlockIndexConfig {
-            auto_save: true,
-            save_interval_secs: 60,
-            max_memory_entries: 100000,
-            hot_data_ratio: 0.2,
-            gc_interval_secs: 3600,
-        };
-        let dedup_manager = Arc::new(crate::services::dedup::DedupManager::new(
-            dedup_config,
-            block_index_config,
-            root_path.to_str().unwrap(),
-        ));
-
         // 初始化优化调度器（最多2个并发任务）
         let optimization_scheduler = Arc::new(crate::OptimizationScheduler::new(2));
 
@@ -253,7 +228,6 @@ impl StorageManager {
             chunk_verifier: Arc::new(ChunkVerifier::new(chunk_root.clone())),
             orphan_cleaner: Arc::new(OrphanChunkCleaner::new(chunk_root)),
             compressor,
-            dedup_manager,
             gc_task_handle: Arc::new(RwLock::new(None)),
             gc_stop_flag: Arc::new(AtomicBool::new(false)),
             optimization_scheduler,
@@ -286,9 +260,6 @@ impl StorageManager {
         let mut wal = self.wal_manager.write().await;
         wal.init().await?;
         drop(wal); // 释放锁
-
-        // 初始化去重管理器
-        self.dedup_manager.init().await?;
 
         // 加载现有索引
         self.load_version_index().await?;
@@ -1725,10 +1696,11 @@ impl StorageManager {
             self.version_cache.invalidate(&version.version_id).await;
         }
 
-        // 3. 使用 dedup_manager 减少块引用计数（去重功能始终启用）
+        // 3. 使用 Sled 减少块引用计数
+        let metadata_db = self.get_metadata_db()?;
         for chunk_id in &chunks_to_decrement {
-            // 减少 dedup_manager 中的引用计数
-            if let Err(e) = self.dedup_manager.decrement_chunk_ref(chunk_id).await {
+            // 减少 Sled 中的引用计数
+            if let Err(e) = metadata_db.decrement_chunk_ref(chunk_id) {
                 info!("递减块 {} 引用计数失败: {}", chunk_id, e);
             }
         }
@@ -1825,20 +1797,30 @@ impl StorageManager {
     pub async fn garbage_collect_blocks(&self) -> Result<usize> {
         info!("开始垃圾回收");
 
-        // 使用 dedup_manager 的 GC 功能
-        let deleted_count = self.dedup_manager.gc().await? as usize;
+        // 从 Sled 获取所有块引用计数信息
+        let metadata_db = self.get_metadata_db()?;
+        let all_chunks = metadata_db
+            .list_all_chunks()
+            .map_err(|e| StorageError::Storage(format!("获取块引用计数失败: {}", e)))?;
 
-        // 还需要删除物理块文件
-        let all_blocks = self.dedup_manager.get_all_blocks().await;
-        for block in all_blocks {
-            if block.ref_count == 0 {
-                // 删除块文件
-                let chunk_path = self.get_chunk_path(&block.chunk_id);
+        let mut deleted_count = 0;
+
+        // 删除引用计数为0的块
+        for (chunk_id, chunk_ref) in all_chunks {
+            if chunk_ref.ref_count == 0 {
+                // 删除物理块文件
+                let chunk_path = self.get_chunk_path(&chunk_id);
                 if chunk_path.exists() {
                     if let Err(e) = fs::remove_file(&chunk_path).await {
-                        info!("删除块文件 {} 失败: {}", block.chunk_id, e);
+                        info!("删除块文件 {} 失败: {}", chunk_id, e);
                     } else {
-                        info!("删除未引用的块文件: {}", block.chunk_id);
+                        info!("删除未引用的块文件: {}", chunk_id);
+                        deleted_count += 1;
+
+                        // 从 Sled 中移除块引用记录
+                        if let Err(e) = metadata_db.remove_chunk_ref(&chunk_id) {
+                            info!("从 Sled 移除块引用记录失败: {}", e);
+                        }
                     }
                 }
             }
@@ -1942,7 +1924,6 @@ impl StorageManager {
             chunk_verifier: self.chunk_verifier.clone(),
             orphan_cleaner: self.orphan_cleaner.clone(),
             compressor: self.compressor.clone(),
-            dedup_manager: self.dedup_manager.clone(),
             gc_task_handle: Arc::new(RwLock::new(None)),
             gc_stop_flag: self.gc_stop_flag.clone(),
             optimization_scheduler: self.optimization_scheduler.clone(),

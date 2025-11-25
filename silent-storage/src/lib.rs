@@ -144,14 +144,11 @@ pub use reliability::{
 pub use core::chunker::*;
 pub use core::compression::*;
 pub use core::delta::*;
-pub use core::engine::*;
 
 // ============================================================================
-// 服务模块（去重、索引、生命周期、分层）
+// 服务模块（生命周期、分层）
 // ============================================================================
 
-pub use services::dedup::*;
-pub use services::index::*;
 pub use services::lifecycle::*;
 pub use services::tiering::*;
 

@@ -29,6 +29,9 @@ md5 = "0.8"
 # Embedded database
 sled = "0.34"
 
+# Bloom filter for fast chunk existence check
+bloomfilter = "1.0"
+
 [dev-dependencies]
 tempfile = "3"
 tokio-test = "0.4"

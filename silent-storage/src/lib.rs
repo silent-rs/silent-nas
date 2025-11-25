@@ -83,6 +83,7 @@ mod error;
 // ============================================================================
 
 pub mod bench;
+pub mod bloom;
 pub mod cache;
 pub mod core;
 pub mod metadata;

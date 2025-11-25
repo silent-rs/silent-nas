@@ -145,6 +145,8 @@ pub struct StorageManager {
     orphan_cleaner: Arc<OrphanChunkCleaner>,
     /// 压缩器
     compressor: Arc<crate::core::compression::Compressor>,
+    /// Bloom Filter（快速块存在性检测，减少文件系统调用）
+    chunk_bloom_filter: Arc<crate::bloom::ChunkBloomFilter>,
     /// GC任务句柄
     gc_task_handle: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
     /// GC任务停止标志（无锁原子操作）
@@ -212,6 +214,9 @@ impl StorageManager {
             .time_to_idle(Duration::from_secs(300))
             .build();
 
+        // 初始化 Bloom Filter（1000万块，0.1% 假阳性率，~12 MB 内存）
+        let chunk_bloom_filter = Arc::new(crate::bloom::ChunkBloomFilter::with_defaults());
+
         Self {
             root_path,
             data_root,
@@ -228,6 +233,7 @@ impl StorageManager {
             chunk_verifier: Arc::new(ChunkVerifier::new(chunk_root.clone())),
             orphan_cleaner: Arc::new(OrphanChunkCleaner::new(chunk_root)),
             compressor,
+            chunk_bloom_filter,
             gc_task_handle: Arc::new(RwLock::new(None)),
             gc_stop_flag: Arc::new(AtomicBool::new(false)),
             optimization_scheduler,
@@ -266,6 +272,10 @@ impl StorageManager {
         self.load_block_index().await?;
         self.load_chunk_ref_count().await?;
         self.load_file_index().await?;
+
+        // 重建 Bloom Filter（从现有块）
+        self.rebuild_bloom_filter().await?;
+        info!("Bloom Filter 重建完成");
 
         // 启动自动GC任务（如果启用）
         if self.config.enable_auto_gc {
@@ -418,6 +428,11 @@ impl StorageManager {
         let mut updated_chunks = Vec::with_capacity(delta_result.chunks.len());
         let metadata_db = self.get_metadata_db()?;
 
+        // 批量写入优化：分两阶段处理
+        // 阶段1：收集新块和已存在块的信息
+        let mut new_chunk_refs = Vec::new();
+        let mut existing_chunk_ids = Vec::new();
+
         for chunk in &delta_result.chunks {
             let start = chunk.offset;
             let end = start + chunk.size;
@@ -432,27 +447,23 @@ impl StorageManager {
                 .await?;
 
             if written {
-                // 块是新写入的，初始化引用计数到 Sled
+                // 块是新写入的，收集引用计数信息
                 let chunk_path = self.get_chunk_path(&chunk.chunk_id);
-                metadata_db
-                    .put_chunk_ref(
-                        &chunk.chunk_id,
-                        &ChunkRefCount {
-                            chunk_id: chunk.chunk_id.clone(),
-                            ref_count: 1,
-                            size: chunk.size as u64,
-                            path: chunk_path,
-                        },
-                    )
-                    .map_err(|e| StorageError::Storage(format!("保存块引用计数失败: {}", e)))?;
+                new_chunk_refs.push((
+                    chunk.chunk_id.clone(),
+                    ChunkRefCount {
+                        chunk_id: chunk.chunk_id.clone(),
+                        ref_count: 1,
+                        size: chunk.size as u64,
+                        path: chunk_path,
+                    },
+                ));
 
                 dedup_stats.new_chunks += 1;
                 dedup_stats.stored_size += chunk.size as u64;
             } else {
-                // 块已存在，增加引用计数
-                metadata_db
-                    .increment_chunk_ref(&chunk.chunk_id)
-                    .map_err(|e| StorageError::Storage(format!("增加块引用计数失败: {}", e)))?;
+                // 块已存在，收集块ID用于批量增加引用计数
+                existing_chunk_ids.push(chunk.chunk_id.clone());
                 dedup_stats.duplicate_chunks += 1;
             }
 
@@ -460,6 +471,19 @@ impl StorageManager {
             let mut updated_chunk = chunk.clone();
             updated_chunk.compression = compression_algo;
             updated_chunks.push(updated_chunk);
+        }
+
+        // 阶段2：批量写入元数据到 Sled（减少 I/O 和事务开销）
+        if !new_chunk_refs.is_empty() {
+            metadata_db
+                .put_chunk_refs_batch(&new_chunk_refs)
+                .map_err(|e| StorageError::Storage(format!("批量保存块引用计数失败: {}", e)))?;
+        }
+
+        if !existing_chunk_ids.is_empty() {
+            metadata_db
+                .increment_chunk_refs_batch(&existing_chunk_ids)
+                .map_err(|e| StorageError::Storage(format!("批量增加块引用计数失败: {}", e)))?;
         }
 
         dedup_stats.calculate_dedup_ratio();
@@ -964,10 +988,10 @@ impl StorageManager {
 
     /// 保存块数据（仅当块不存在时写入）
     ///
-    /// 基于文件系统的去重策略：
-    /// 1. 先检查块文件是否已存在
-    /// 2. 如果存在，直接返回 (false, 压缩算法)，跳过压缩和写入
-    /// 3. 如果不存在，执行压缩和写入，返回 (true, 压缩算法)
+    /// 三级去重检测策略：
+    /// 1. **Bloom Filter 快速检测**：O(1) 时间复杂度，内存中判断
+    /// 2. **文件系统检测**：Path::exists()，确认块是否真实存在
+    /// 3. **原子文件创建**：create_new(true)，防止并发重复写入
     ///
     /// # 返回值
     /// - `Ok((true, algorithm))`: 块是新写入的
@@ -979,16 +1003,19 @@ impl StorageManager {
     ) -> Result<(bool, crate::core::compression::CompressionAlgorithm)> {
         let chunk_path = self.get_chunk_path(chunk_id);
 
-        // 步骤 1: 快速检查文件是否已存在（避免不必要的压缩）
-        if chunk_path.exists() {
-            // 文件已存在，直接返回（跳过压缩和写入）
+        // 步骤 1: Bloom Filter 快速检测（避免不必要的文件系统调用）
+        let bloom_says_exists = self.chunk_bloom_filter.contains(chunk_id).await;
+
+        // 步骤 2: 如果 Bloom Filter 说可能存在，进一步检查文件系统
+        if bloom_says_exists && chunk_path.exists() {
+            // 文件确实存在，直接返回（跳过压缩和写入）
             let algo = if self.config.enable_compression {
                 crate::core::compression::CompressionAlgorithm::LZ4
             } else {
                 crate::core::compression::CompressionAlgorithm::None
             };
 
-            tracing::debug!("块 {} 已存在，跳过写入", chunk_id);
+            tracing::debug!("块 {} 已存在（Bloom Filter + 文件系统确认），跳过写入", chunk_id);
             return Ok((false, algo));
         }
 
@@ -1019,6 +1046,9 @@ impl StorageManager {
                 self.block_cache
                     .insert(chunk_id.to_string(), chunk_path)
                     .await;
+
+                // 更新 Bloom Filter（异步操作，不影响主流程）
+                self.chunk_bloom_filter.insert(chunk_id).await;
 
                 tracing::debug!(
                     "块 {} 写入成功，大小: {} 字节",
@@ -1404,6 +1434,38 @@ impl StorageManager {
             let count = metadata_db.chunk_ref_count();
             info!("使用 Sled 数据库存储块引用计数，当前 {} 个块", count);
         }
+
+        Ok(())
+    }
+
+    /// 重建 Bloom Filter（从现有块）
+    ///
+    /// 在系统初始化时从 Sled 数据库加载所有块 ID 并重建 Bloom Filter
+    async fn rebuild_bloom_filter(&self) -> Result<()> {
+        let metadata_db = self.get_metadata_db()?;
+
+        // 从 Sled 获取所有块 ID
+        let all_chunks = metadata_db
+            .list_all_chunks()
+            .map_err(|e| StorageError::Storage(format!("获取块列表失败: {}", e)))?;
+
+        // 提取块 ID（all_chunks 是 Vec<(String, ChunkRefCount)>）
+        let chunk_ids: Vec<String> = all_chunks.into_iter().map(|(id, _)| id).collect();
+
+        let chunk_count = chunk_ids.len();
+        info!("开始重建 Bloom Filter，共 {} 个块", chunk_count);
+
+        // 重建 Bloom Filter
+        self.chunk_bloom_filter.rebuild(chunk_ids).await;
+
+        // 获取统计信息
+        let stats = self.chunk_bloom_filter.get_stats().await;
+        info!(
+            "Bloom Filter 重建完成: {} 个块，内存占用 ~{} MB, 假阳性率 {}%",
+            chunk_count,
+            stats.estimated_memory_bytes / 1024 / 1024,
+            stats.false_positive_rate * 100.0
+        );
 
         Ok(())
     }
@@ -1924,6 +1986,7 @@ impl StorageManager {
             chunk_verifier: self.chunk_verifier.clone(),
             orphan_cleaner: self.orphan_cleaner.clone(),
             compressor: self.compressor.clone(),
+            chunk_bloom_filter: self.chunk_bloom_filter.clone(),
             gc_task_handle: Arc::new(RwLock::new(None)),
             gc_stop_flag: self.gc_stop_flag.clone(),
             optimization_scheduler: self.optimization_scheduler.clone(),

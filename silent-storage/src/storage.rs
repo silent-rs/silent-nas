@@ -445,6 +445,8 @@ impl StorageManager {
         };
 
         let mut updated_chunks = Vec::with_capacity(delta_result.chunks.len());
+        let metadata_db = self.get_metadata_db()?;
+
         for chunk in &delta_result.chunks {
             let start = chunk.offset;
             let end = start + chunk.size;
@@ -453,33 +455,35 @@ impl StorageManager {
             }
             let chunk_data = &data[start..end];
 
-            // 检查块是否已存在
-            let exists = self.dedup_manager.chunk_exists(&chunk.chunk_id).await;
-            let compression_algo = if exists {
-                // 块已存在，增加引用计数，跳过写入
-                self.dedup_manager
-                    .increment_chunk_ref(&chunk.chunk_id)
-                    .await
-                    .map_err(|e| StorageError::Storage(format!("增加块引用计数失败: {}", e)))?;
-                dedup_stats.duplicate_chunks += 1;
-                // 使用已存储块的压缩算法
-                if self.config.enable_compression {
-                    crate::core::compression::CompressionAlgorithm::LZ4
-                } else {
-                    crate::core::compression::CompressionAlgorithm::None
-                }
-            } else {
-                // 块不存在，写入磁盘
-                let algo = self.save_chunk_data(&chunk.chunk_id, chunk_data).await?;
-                let storage_path = self.get_chunk_path(&chunk.chunk_id);
-                self.dedup_manager
-                    .add_chunk(&chunk.chunk_id, chunk.size, storage_path)
-                    .await
-                    .map_err(|e| StorageError::Storage(format!("添加块到索引失败: {}", e)))?;
+            // 统一策略：尝试写入块（基于文件系统去重）
+            let (written, compression_algo) = self
+                .save_chunk_data(&chunk.chunk_id, chunk_data)
+                .await?;
+
+            if written {
+                // 块是新写入的，初始化引用计数到 Sled
+                let chunk_path = self.get_chunk_path(&chunk.chunk_id);
+                metadata_db
+                    .put_chunk_ref(
+                        &chunk.chunk_id,
+                        &ChunkRefCount {
+                            chunk_id: chunk.chunk_id.clone(),
+                            ref_count: 1,
+                            size: chunk.size as u64,
+                            path: chunk_path,
+                        },
+                    )
+                    .map_err(|e| StorageError::Storage(format!("保存块引用计数失败: {}", e)))?;
+
                 dedup_stats.new_chunks += 1;
                 dedup_stats.stored_size += chunk.size as u64;
-                algo
-            };
+            } else {
+                // 块已存在，增加引用计数
+                metadata_db
+                    .increment_chunk_ref(&chunk.chunk_id)
+                    .map_err(|e| StorageError::Storage(format!("增加块引用计数失败: {}", e)))?;
+                dedup_stats.duplicate_chunks += 1;
+            }
 
             // 更新块信息（包含压缩算法）
             let mut updated_chunk = chunk.clone();
@@ -919,22 +923,25 @@ impl StorageManager {
 
     /// 获取全局去重统计（去重功能始终启用）
     pub async fn get_deduplication_stats(&self) -> Result<crate::DeduplicationStats> {
-        // 从 DedupManager 获取所有块信息
-        let all_blocks = self.dedup_manager.get_all_blocks().await;
+        // 从 Sled 获取所有块引用计数信息
+        let metadata_db = self.get_metadata_db()?;
+        let all_chunks = metadata_db
+            .list_all_chunks()
+            .map_err(|e| StorageError::Storage(format!("获取块引用计数失败: {}", e)))?;
 
         let mut total_original_size = 0u64;
         let mut total_stored_size = 0u64;
         let mut total_ref_count = 0usize;
 
-        for block in &all_blocks {
+        for (_chunk_id, chunk_ref) in &all_chunks {
             // 原始大小 = 块大小 × 引用次数
-            total_original_size += block.size as u64 * block.ref_count as u64;
+            total_original_size += chunk_ref.size * chunk_ref.ref_count as u64;
             // 存储大小 = 块大小（只存储一次）
-            total_stored_size += block.size as u64;
-            total_ref_count += block.ref_count as usize;
+            total_stored_size += chunk_ref.size;
+            total_ref_count += chunk_ref.ref_count;
         }
 
-        let unique_chunks = all_blocks.len();
+        let unique_chunks = all_chunks.len();
         let duplicate_chunks = total_ref_count.saturating_sub(unique_chunks);
 
         let mut stats = crate::DeduplicationStats {
@@ -984,35 +991,87 @@ impl StorageManager {
         Ok(algorithm)
     }
 
-    /// 保存块数据（直接根据块内容，不依赖整体文件数据）
+    /// 保存块数据（仅当块不存在时写入）
+    ///
+    /// 基于文件系统的去重策略：
+    /// 1. 先检查块文件是否已存在
+    /// 2. 如果存在，直接返回 (false, 压缩算法)，跳过压缩和写入
+    /// 3. 如果不存在，执行压缩和写入，返回 (true, 压缩算法)
+    ///
+    /// # 返回值
+    /// - `Ok((true, algorithm))`: 块是新写入的
+    /// - `Ok((false, algorithm))`: 块已存在，跳过写入
     async fn save_chunk_data(
         &self,
         chunk_id: &str,
         chunk_data: &[u8],
-    ) -> Result<crate::core::compression::CompressionAlgorithm> {
+    ) -> Result<(bool, crate::core::compression::CompressionAlgorithm)> {
         let chunk_path = self.get_chunk_path(chunk_id);
 
-        // 创建父目录
+        // 步骤 1: 快速检查文件是否已存在（避免不必要的压缩）
+        if chunk_path.exists() {
+            // 文件已存在，直接返回（跳过压缩和写入）
+            let algo = if self.config.enable_compression {
+                crate::core::compression::CompressionAlgorithm::LZ4
+            } else {
+                crate::core::compression::CompressionAlgorithm::None
+            };
+
+            tracing::debug!("块 {} 已存在，跳过写入", chunk_id);
+            return Ok((false, algo));
+        }
+
+        // 步骤 2: 文件不存在，创建父目录
         if let Some(parent) = chunk_path.parent() {
             fs::create_dir_all(parent).await?;
         }
 
-        // 应用压缩（如果启用）
+        // 步骤 3: 应用压缩（只在需要写入时才压缩）
         let compression_result = self.compressor.compress(chunk_data)?;
         let data_to_write = &compression_result.compressed_data;
         let algorithm = compression_result.algorithm;
 
-        // 写入块数据（可能已压缩）
-        let mut file = fs::File::create(&chunk_path).await?;
-        file.write_all(data_to_write).await?;
-        file.flush().await?;
-
-        // 更新块索引 LRU 缓存
-        self.block_cache
-            .insert(chunk_id.to_string(), chunk_path)
+        // 步骤 4: 使用 create_new 独占创建文件（原子操作，防止并发重复写入）
+        let file_result = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true) // 如果文件已存在则返回错误
+            .open(&chunk_path)
             .await;
 
-        Ok(algorithm)
+        match file_result {
+            Ok(mut file) => {
+                // 文件创建成功，写入数据
+                file.write_all(data_to_write).await?;
+                file.flush().await?;
+
+                // 更新块索引 LRU 缓存
+                self.block_cache
+                    .insert(chunk_id.to_string(), chunk_path)
+                    .await;
+
+                tracing::debug!(
+                    "块 {} 写入成功，大小: {} 字节",
+                    chunk_id,
+                    data_to_write.len()
+                );
+                Ok((true, algorithm))
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                // 并发场景：另一个线程已经写入了这个块
+                let algo = if self.config.enable_compression {
+                    crate::core::compression::CompressionAlgorithm::LZ4
+                } else {
+                    crate::core::compression::CompressionAlgorithm::None
+                };
+
+                tracing::debug!("块 {} 已被其他线程写入", chunk_id);
+                Ok((false, algo))
+            }
+            Err(e) => {
+                // 其他 I/O 错误
+                Err(StorageError::Io(e))
+            }
+        }
     }
 
     /// 读取块数据
@@ -2298,6 +2357,7 @@ impl StorageManager {
 
         // 创建新的chunks向量，更新compression字段
         let mut updated_chunks = Vec::with_capacity(delta.chunks.len());
+        let metadata_db = self.get_metadata_db()?;
 
         for chunk in &delta.chunks {
             let start = chunk.offset;
@@ -2307,31 +2367,35 @@ impl StorageManager {
             }
             let chunk_data = &data[start..end];
 
-            // 去重检查（去重功能始终启用）
-            let exists = self.dedup_manager.chunk_exists(&chunk.chunk_id).await;
-            let compression_algo = if exists {
-                self.dedup_manager
-                    .increment_chunk_ref(&chunk.chunk_id)
-                    .await
-                    .map_err(|e| StorageError::Storage(format!("增加块引用计数失败: {}", e)))?;
-                dedup_stats.duplicate_chunks += 1;
-                // 对于重复的chunk，使用当前配置的压缩算法
-                if self.config.enable_compression {
-                    crate::core::compression::CompressionAlgorithm::LZ4
-                } else {
-                    crate::core::compression::CompressionAlgorithm::None
-                }
-            } else {
-                let algo = self.save_chunk_data(&chunk.chunk_id, chunk_data).await?;
-                let storage_path = self.get_chunk_path(&chunk.chunk_id);
-                self.dedup_manager
-                    .add_chunk(&chunk.chunk_id, chunk.size, storage_path)
-                    .await
-                    .map_err(|e| StorageError::Storage(format!("添加块到索引失败: {}", e)))?;
+            // 统一策略：尝试写入块（基于文件系统去重）
+            let (written, compression_algo) = self
+                .save_chunk_data(&chunk.chunk_id, chunk_data)
+                .await?;
+
+            if written {
+                // 块是新写入的，初始化引用计数到 Sled
+                let chunk_path = self.get_chunk_path(&chunk.chunk_id);
+                metadata_db
+                    .put_chunk_ref(
+                        &chunk.chunk_id,
+                        &ChunkRefCount {
+                            chunk_id: chunk.chunk_id.clone(),
+                            ref_count: 1,
+                            size: chunk.size as u64,
+                            path: chunk_path,
+                        },
+                    )
+                    .map_err(|e| StorageError::Storage(format!("保存块引用计数失败: {}", e)))?;
+
                 dedup_stats.new_chunks += 1;
                 dedup_stats.stored_size += chunk.size as u64;
-                algo
-            };
+            } else {
+                // 块已存在，增加引用计数
+                metadata_db
+                    .increment_chunk_ref(&chunk.chunk_id)
+                    .map_err(|e| StorageError::Storage(format!("增加块引用计数失败: {}", e)))?;
+                dedup_stats.duplicate_chunks += 1;
+            }
 
             // 创建更新后的ChunkInfo
             let mut updated_chunk = chunk.clone();

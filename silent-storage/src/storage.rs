@@ -784,12 +784,14 @@ impl StorageManager {
         // 读取delta以获取块信息
         let delta = self.read_delta(&version_info.file_id, version_id).await?;
 
-        // 减少每个块的引用计数
+        // 批量减少块引用计数（性能优化）
         let metadata_db = self.get_metadata_db()?;
-        for chunk in &delta.chunks {
+        let chunk_ids: Vec<String> = delta.chunks.iter().map(|c| c.chunk_id.clone()).collect();
+
+        if !chunk_ids.is_empty() {
             metadata_db
-                .decrement_chunk_ref(&chunk.chunk_id)
-                .map_err(|e| StorageError::Storage(format!("减少块引用计数失败: {}", e)))?;
+                .decrement_chunk_refs_batch(&chunk_ids)
+                .map_err(|e| StorageError::Storage(format!("批量减少块引用计数失败: {}", e)))?;
         }
 
         // 删除delta文件
@@ -1867,7 +1869,10 @@ impl StorageManager {
 
         let mut deleted_count = 0;
 
-        // 删除引用计数为0的块
+        // 批量删除引用计数为0的块（性能优化）
+        let mut chunks_to_delete = Vec::new();
+
+        // 阶段 1：收集需要删除的块并删除物理文件
         for (chunk_id, chunk_ref) in all_chunks {
             if chunk_ref.ref_count == 0 {
                 // 删除物理块文件
@@ -1878,13 +1883,16 @@ impl StorageManager {
                     } else {
                         info!("删除未引用的块文件: {}", chunk_id);
                         deleted_count += 1;
-
-                        // 从 Sled 中移除块引用记录
-                        if let Err(e) = metadata_db.remove_chunk_ref(&chunk_id) {
-                            info!("从 Sled 移除块引用记录失败: {}", e);
-                        }
+                        chunks_to_delete.push(chunk_id);
                     }
                 }
+            }
+        }
+
+        // 阶段 2：批量从 Sled 中移除块引用记录
+        if !chunks_to_delete.is_empty() {
+            if let Err(e) = metadata_db.remove_chunk_refs_batch(&chunks_to_delete) {
+                info!("批量从 Sled 移除块引用记录失败: {}", e);
             }
         }
 

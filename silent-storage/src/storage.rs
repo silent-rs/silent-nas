@@ -397,13 +397,22 @@ impl StorageManager {
 
         // 流式读取并分块（固定大小分块，保证内存恒定）
         loop {
-            let n = reader.read(&mut buffer).await.map_err(StorageError::Io)?;
-            if n == 0 {
-                break;
+            // 尝试读满整个 buffer（确保块边界一致，实现去重）
+            let mut total_read = 0;
+            while total_read < buffer.len() {
+                match reader.read(&mut buffer[total_read..]).await {
+                    Ok(0) => break, // EOF
+                    Ok(n) => total_read += n,
+                    Err(e) => return Err(StorageError::Io(e)),
+                }
             }
 
-            let chunk_data = &buffer[..n];
-            file_size += n as u64;
+            if total_read == 0 {
+                break; // 文件结束
+            }
+
+            let chunk_data = &buffer[..total_read];
+            file_size += total_read as u64;
 
             // 计算块哈希
             let chunk_id = self.calculate_hash(chunk_data);
@@ -420,13 +429,13 @@ impl StorageManager {
                     ChunkRefCount {
                         chunk_id: chunk_id.clone(),
                         ref_count: 1,
-                        size: n as u64,
+                        size: total_read as u64,
                         path: chunk_path,
                     },
                 ));
 
                 dedup_stats.new_chunks += 1;
-                dedup_stats.stored_size += n as u64;
+                dedup_stats.stored_size += total_read as u64;
             } else {
                 // 块已存在
                 existing_chunk_ids.push(chunk_id.clone());
@@ -437,13 +446,13 @@ impl StorageManager {
             chunks.push(ChunkInfo {
                 chunk_id: chunk_id.clone(),
                 offset,
-                size: n,
+                size: total_read,
                 weak_hash,
                 strong_hash: chunk_id,
                 compression: compression_algo,
             });
 
-            offset += n;
+            offset += total_read;
             dedup_stats.total_chunks += 1;
         }
 

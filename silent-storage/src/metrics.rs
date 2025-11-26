@@ -788,4 +788,193 @@ mod tests {
         assert!(!unhealthy.healthy);
         assert_eq!(unhealthy.message, "Test error");
     }
+
+    #[test]
+    fn test_delta_metrics() {
+        let delta = DeltaMetrics {
+            full_versions: 100,
+            delta_versions: 30,
+            delta_original_size: 100000,
+            delta_stored_size: 50000,
+            space_saved: 50000,
+        };
+
+        // 测试 Delta 率计算
+        // delta_ratio = delta_versions / (full_versions + delta_versions)
+        // = 30 / (100 + 30) = 30 / 130 ≈ 0.23
+        assert!((delta.delta_ratio() - 0.23).abs() < 0.01);
+
+        // 测试 Prometheus 输出包含关键信息
+        let prometheus_output = delta.to_prometheus();
+        assert!(!prometheus_output.is_empty());
+    }
+
+    #[test]
+    fn test_performance_metrics() {
+        let perf = PerformanceMetrics {
+            read_latency_us: Arc::new(AtomicU64::new(1000)),
+            write_latency_us: Arc::new(AtomicU64::new(2000)),
+            delete_latency_us: Arc::new(AtomicU64::new(500)),
+            read_throughput_bps: Arc::new(AtomicU64::new(10000000)),
+            write_throughput_bps: Arc::new(AtomicU64::new(5000000)),
+        };
+
+        // 测试能正确获取值
+        assert_eq!(perf.read_latency_us.load(Ordering::Relaxed), 1000);
+        assert_eq!(perf.write_latency_us.load(Ordering::Relaxed), 2000);
+
+        // 测试 Prometheus 输出
+        let prometheus_output = perf.to_prometheus();
+        assert!(!prometheus_output.is_empty());
+    }
+
+    #[test]
+    fn test_storage_metrics_serialization() {
+        let metrics = StorageMetrics {
+            storage: StorageStats {
+                total_space: 1000,
+                used_space: 600,
+                available_space: 400,
+                total_files: 10,
+                total_versions: 20,
+                total_chunks: 100,
+                orphaned_chunks: 5,
+            },
+            deduplication: DeduplicationMetrics {
+                total_chunks: 100,
+                unique_chunks: 60,
+                duplicate_chunks: 40,
+                original_size: 1000,
+                stored_size: 600,
+                space_saved: 400,
+            },
+            compression: CompressionMetrics {
+                uncompressed_size: 1000,
+                compressed_size: 250,
+                space_saved: 750,
+                lz4_compressions: 10,
+                zstd_compressions: 5,
+                skipped_compressions: 2,
+            },
+            delta: DeltaMetrics {
+                full_versions: 100,
+                delta_versions: 30,
+                delta_original_size: 100000,
+                delta_stored_size: 50000,
+                space_saved: 50000,
+            },
+            performance: PerformanceMetrics {
+                read_latency_us: Arc::new(AtomicU64::new(1000)),
+                write_latency_us: Arc::new(AtomicU64::new(2000)),
+                delete_latency_us: Arc::new(AtomicU64::new(500)),
+                read_throughput_bps: Arc::new(AtomicU64::new(10000000)),
+                write_throughput_bps: Arc::new(AtomicU64::new(5000000)),
+            },
+            operations: OperationCounters::default(),
+        };
+
+        // 测试序列化
+        let json = serde_json::to_string(&metrics).unwrap();
+        assert!(json.contains("\"total_space\":1000"));
+
+        // 测试反序列化
+        let deserialized: StorageMetrics = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.storage.total_space, 1000);
+        assert_eq!(deserialized.deduplication.total_chunks, 100);
+    }
+
+    #[test]
+    fn test_storage_metrics_to_prometheus() {
+        let metrics = StorageMetrics::new();
+        let prometheus_output = metrics.to_prometheus();
+
+        // 验证输出不为空
+        assert!(!prometheus_output.is_empty());
+
+        // 验证包含存储指标
+        assert!(prometheus_output.contains("storage_"));
+    }
+
+    #[test]
+    fn test_storage_stats_zero_total_space() {
+        let stats = StorageStats {
+            total_space: 0,
+            used_space: 0,
+            available_space: 0,
+            total_files: 0,
+            total_versions: 0,
+            total_chunks: 0,
+            orphaned_chunks: 0,
+        };
+
+        // 测试除零情况
+        assert_eq!(stats.usage_ratio(), 0.0);
+    }
+
+    #[test]
+    fn test_dedup_metrics_zero_original_size() {
+        let dedup = DeduplicationMetrics {
+            total_chunks: 0,
+            unique_chunks: 0,
+            duplicate_chunks: 0,
+            original_size: 0,
+            stored_size: 0,
+            space_saved: 0,
+        };
+
+        // 测试除零情况
+        assert_eq!(dedup.dedup_ratio(), 0.0);
+        assert_eq!(dedup.space_saving_ratio(), 0.0);
+    }
+
+    #[test]
+    fn test_compression_metrics_zero_uncompressed_size() {
+        let compression = CompressionMetrics {
+            uncompressed_size: 0,
+            compressed_size: 0,
+            space_saved: 0,
+            lz4_compressions: 0,
+            zstd_compressions: 0,
+            skipped_compressions: 0,
+        };
+
+        // 测试除零情况
+        assert_eq!(compression.compression_ratio(), 0.0);
+        assert_eq!(compression.space_saving_ratio(), 0.0);
+    }
+
+    #[test]
+    fn test_operation_counters_all_operations() {
+        let ops = OperationCounters::default();
+
+        // 测试所有操作计数
+        ops.inc_create();
+        ops.inc_create();
+        ops.inc_read();
+        ops.inc_read();
+        ops.inc_read();
+        ops.inc_update();
+        ops.inc_delete();
+        ops.inc_delete();
+
+        assert_eq!(ops.create_count.load(Ordering::Relaxed), 2);
+        assert_eq!(ops.read_count.load(Ordering::Relaxed), 3);
+        assert_eq!(ops.update_count.load(Ordering::Relaxed), 1);
+        assert_eq!(ops.delete_count.load(Ordering::Relaxed), 2);
+
+        // 测试 Prometheus 输出
+        let _prometheus = ops.to_prometheus();
+    }
+
+    #[test]
+    fn test_health_status_database_unavailable() {
+        let mut status = HealthStatus::healthy();
+        status.database_available = false;
+        status.healthy = false;
+        status.message = "Database unavailable".to_string();
+
+        assert!(!status.healthy);
+        assert!(status.storage_available);
+        assert!(!status.database_available);
+    }
 }

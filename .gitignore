@@ -8,3 +8,4 @@ data/
 smoke*/
 TODO.md
 !src/storage
+!silent-nas-core/src/storage

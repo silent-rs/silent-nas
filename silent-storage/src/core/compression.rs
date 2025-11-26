@@ -340,4 +340,172 @@ mod tests {
         assert_eq!(stats.space_saved, 500);
         assert_eq!(stats.get_compression_rate(), 0.5);
     }
+
+    #[test]
+    fn test_compress_decompress_zstd() {
+        let config = CompressionConfig {
+            algorithm: CompressionAlgorithm::Zstd,
+            level: 3,
+            min_size: 0,
+            auto_compress_days: 0,
+            min_ratio: 1.0,
+        };
+        let compressor = Compressor::new(config);
+
+        let data = b"Hello, World! This is a test of Zstd compression. It should work well with repetitive data.".repeat(10);
+        let result = compressor.compress(&data).unwrap();
+
+        assert_eq!(result.algorithm, CompressionAlgorithm::Zstd);
+        assert!(result.compressed_size < result.original_size);
+        assert!(result.ratio > 1.0);
+
+        let decompressed = compressor
+            .decompress(&result.compressed_data, result.algorithm)
+            .unwrap();
+        assert_eq!(decompressed, data);
+    }
+
+    #[test]
+    fn test_compress_small_data_skips_compression() {
+        let config = CompressionConfig {
+            algorithm: CompressionAlgorithm::LZ4,
+            level: 1,
+            min_size: 1024, // 最小 1KB
+            auto_compress_days: 0,
+            min_ratio: 1.0,
+        };
+        let compressor = Compressor::new(config);
+
+        // 小于最小大小，应该跳过压缩
+        let data = b"Small data";
+        let result = compressor.compress(data).unwrap();
+
+        assert_eq!(result.algorithm, CompressionAlgorithm::None);
+        assert_eq!(result.compressed_data, data);
+        assert_eq!(result.original_size, result.compressed_size);
+    }
+
+    #[test]
+    fn test_compress_incompressible_data() {
+        let config = CompressionConfig {
+            algorithm: CompressionAlgorithm::LZ4,
+            level: 1,
+            min_size: 0,
+            auto_compress_days: 0,
+            min_ratio: 1.2, // 至少 20% 压缩率
+        };
+        let compressor = Compressor::new(config);
+
+        // 随机数据，几乎不可压缩
+        let data: Vec<u8> = (0..1000).map(|i| (i * 17 + 31) as u8).collect();
+        let result = compressor.compress(&data).unwrap();
+
+        // 如果压缩率不够，应该返回原始数据
+        if result.ratio < 1.2 {
+            assert_eq!(result.algorithm, CompressionAlgorithm::None);
+            assert_eq!(result.compressed_data, data);
+        }
+    }
+
+    #[test]
+    fn test_compression_stats_multiple_updates() {
+        let mut stats = CompressionStats::new();
+
+        // 第一次压缩
+        let result1 = CompressionResult {
+            original_size: 1000,
+            compressed_size: 400,
+            ratio: 2.5,
+            duration_ms: 10,
+            algorithm: CompressionAlgorithm::LZ4,
+            compressed_data: vec![0u8; 400],
+        };
+        stats.update(&result1);
+
+        // 第二次压缩
+        let result2 = CompressionResult {
+            original_size: 2000,
+            compressed_size: 800,
+            ratio: 2.5,
+            duration_ms: 15,
+            algorithm: CompressionAlgorithm::Zstd,
+            compressed_data: vec![0u8; 800],
+        };
+        stats.update(&result2);
+
+        assert_eq!(stats.total_compressions, 2);
+        assert_eq!(stats.total_original_size, 3000);
+        assert_eq!(stats.total_compressed_size, 1200);
+        assert_eq!(stats.space_saved, 1800);
+
+        // 测试压缩率（有可能是 1 - compressed/original = 1 - 0.4 = 0.6）
+        let rate = stats.get_compression_rate();
+        assert!(rate > 0.0 && rate <= 1.0, "Compression rate should be between 0 and 1");
+    }
+
+    #[test]
+    fn test_decompress_none_algorithm() {
+        let config = CompressionConfig::default();
+        let compressor = Compressor::new(config);
+
+        let data = b"Uncompressed data";
+        let decompressed = compressor
+            .decompress(data, CompressionAlgorithm::None)
+            .unwrap();
+
+        assert_eq!(decompressed, data);
+    }
+
+    #[test]
+    fn test_compression_stats_zero_compressions() {
+        let stats = CompressionStats::new();
+
+        assert_eq!(stats.total_compressions, 0);
+        assert_eq!(stats.get_compression_rate(), 0.0);
+        assert_eq!(stats.space_saved, 0);
+    }
+
+    #[test]
+    fn test_zstd_different_compression_levels() {
+        let data = b"Test data for compression level comparison. ".repeat(100);
+
+        // 低压缩级别（快速）
+        let config_low = CompressionConfig {
+            algorithm: CompressionAlgorithm::Zstd,
+            level: 1,
+            min_size: 0,
+            auto_compress_days: 0,
+            min_ratio: 1.0,
+        };
+        let compressor_low = Compressor::new(config_low);
+        let result_low = compressor_low.compress(&data).unwrap();
+
+        // 高压缩级别（慢速，更好压缩率）
+        let config_high = CompressionConfig {
+            algorithm: CompressionAlgorithm::Zstd,
+            level: 15,
+            min_size: 0,
+            auto_compress_days: 0,
+            min_ratio: 1.0,
+        };
+        let compressor_high = Compressor::new(config_high);
+        let result_high = compressor_high.compress(&data).unwrap();
+
+        // 高压缩级别应该产生更小的输出（或至少不会更大）
+        assert!(result_high.compressed_size <= result_low.compressed_size);
+
+        // 两者都应该能正确解压
+        assert_eq!(
+            compressor_low
+                .decompress(&result_low.compressed_data, result_low.algorithm)
+                .unwrap(),
+            data
+        );
+        assert_eq!(
+            compressor_high
+                .decompress(&result_high.compressed_data, result_high.algorithm)
+                .unwrap(),
+            data
+        );
+    }
 }

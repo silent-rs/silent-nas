@@ -23,3 +23,26 @@ pub async fn get_metrics(_req: Request) -> silent::Result<Response> {
         )),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_get_metrics_success() {
+        let req = Request::empty();
+        let result = get_metrics(req).await;
+
+        assert!(result.is_ok());
+        let response = result.unwrap();
+
+        // 验证响应头
+        assert_eq!(
+            response.headers().get(http::header::CONTENT_TYPE).unwrap(),
+            "text/plain; version=0.0.4"
+        );
+
+        // 验证响应状态
+        assert!(response.status().is_success());
+    }
+}

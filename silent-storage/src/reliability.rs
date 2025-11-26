@@ -519,4 +519,362 @@ mod tests {
         assert_eq!(report.failed, 0);
         assert!(!data_dir.join(orphan_name).exists());
     }
+
+    #[test]
+    fn test_wal_operation_variants() {
+        let create_op = WalOperation::CreateVersion {
+            file_id: "file1".to_string(),
+            version_id: "v1".to_string(),
+            chunk_hashes: vec!["abc".to_string()],
+        };
+        assert!(matches!(create_op, WalOperation::CreateVersion { .. }));
+
+        let delete_version_op = WalOperation::DeleteVersion {
+            file_id: "file1".to_string(),
+            version_id: "v1".to_string(),
+        };
+        assert!(matches!(delete_version_op, WalOperation::DeleteVersion { .. }));
+
+        let delete_file_op = WalOperation::DeleteFile {
+            file_id: "file1".to_string(),
+        };
+        assert!(matches!(delete_file_op, WalOperation::DeleteFile { .. }));
+
+        let gc_op = WalOperation::GarbageCollect {
+            chunk_hashes: vec!["abc".to_string()],
+        };
+        assert!(matches!(gc_op, WalOperation::GarbageCollect { .. }));
+    }
+
+    #[test]
+    fn test_wal_entry_corrupted_checksum() {
+        let operation = WalOperation::CreateVersion {
+            file_id: "file1".to_string(),
+            version_id: "v1".to_string(),
+            chunk_hashes: vec!["abc123".to_string()],
+        };
+
+        let mut entry = WalEntry::new(1, operation);
+        assert!(entry.verify_checksum());
+
+        // 篡改校验和
+        entry.checksum = "invalid_checksum".to_string();
+        assert!(!entry.verify_checksum());
+    }
+
+    #[tokio::test]
+    async fn test_wal_manager_multiple_writes() {
+        let temp_dir = TempDir::new().unwrap();
+        let wal_path = temp_dir.path().join("test_multiple.wal");
+
+        let mut manager = WalManager::new(wal_path);
+        manager.init().await.unwrap();
+
+        // 写入多个操作
+        let op1 = WalOperation::CreateVersion {
+            file_id: "file1".to_string(),
+            version_id: "v1".to_string(),
+            chunk_hashes: vec!["abc".to_string()],
+        };
+        let op2 = WalOperation::DeleteVersion {
+            file_id: "file1".to_string(),
+            version_id: "v1".to_string(),
+        };
+        let op3 = WalOperation::GarbageCollect {
+            chunk_hashes: vec!["abc".to_string()],
+        };
+
+        manager.write(op1.clone()).await.unwrap();
+        manager.write(op2.clone()).await.unwrap();
+        manager.write(op3.clone()).await.unwrap();
+
+        let entries = manager.read_all().await.unwrap();
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].operation, op1);
+        assert_eq!(entries[1].operation, op2);
+        assert_eq!(entries[2].operation, op3);
+    }
+
+    #[tokio::test]
+    async fn test_wal_manager_clear() {
+        let temp_dir = TempDir::new().unwrap();
+        let wal_path = temp_dir.path().join("test_clear.wal");
+
+        let mut manager = WalManager::new(wal_path);
+        manager.init().await.unwrap();
+
+        // 写入操作
+        let operation = WalOperation::CreateVersion {
+            file_id: "file1".to_string(),
+            version_id: "v1".to_string(),
+            chunk_hashes: vec!["abc".to_string()],
+        };
+        manager.write(operation).await.unwrap();
+
+        // 清空
+        manager.clear().await.unwrap();
+
+        let entries = manager.read_all().await.unwrap();
+        assert_eq!(entries.len(), 0);
+        assert_eq!(manager.current_sequence, 0);
+    }
+
+    #[tokio::test]
+    async fn test_wal_manager_reinit_preserves_sequence() {
+        let temp_dir = TempDir::new().unwrap();
+        let wal_path = temp_dir.path().join("test_reinit.wal");
+
+        // 第一次初始化并写入
+        {
+            let mut manager = WalManager::new(wal_path.clone());
+            manager.init().await.unwrap();
+
+            let operation = WalOperation::CreateVersion {
+                file_id: "file1".to_string(),
+                version_id: "v1".to_string(),
+                chunk_hashes: vec!["abc".to_string()],
+            };
+            manager.write(operation).await.unwrap();
+        }
+
+        // 重新初始化，应该恢复序列号
+        let mut manager = WalManager::new(wal_path);
+        manager.init().await.unwrap();
+        assert_eq!(manager.current_sequence, 1);
+
+        // 写入新操作
+        let operation = WalOperation::DeleteFile {
+            file_id: "file1".to_string(),
+        };
+        let seq = manager.write(operation).await.unwrap();
+        assert_eq!(seq, 2);
+    }
+
+    #[tokio::test]
+    async fn test_chunk_verifier_missing_chunk() {
+        let temp_dir = TempDir::new().unwrap();
+        let chunk_root = temp_dir.path().to_path_buf();
+
+        let verifier = ChunkVerifier::new(chunk_root);
+        let valid = verifier.verify_chunk("nonexistent_hash").await.unwrap();
+        assert!(!valid);
+    }
+
+    #[tokio::test]
+    async fn test_chunk_verifier_corrupted_chunk() {
+        let temp_dir = TempDir::new().unwrap();
+        let chunk_root = temp_dir.path().to_path_buf();
+
+        // 创建测试 chunk（使用分层存储）
+        let original_data = b"test data";
+        let mut hasher = Sha256::new();
+        hasher.update(original_data);
+        let hash = hex::encode(hasher.finalize());
+
+        let prefix = &hash[..2];
+        let data_dir = chunk_root.join("data").join(prefix);
+        fs::create_dir_all(&data_dir).await.unwrap();
+
+        let chunk_path = data_dir.join(&hash);
+        // 写入不同的数据（损坏的 chunk）
+        fs::write(&chunk_path, b"corrupted data").await.unwrap();
+
+        // 验证应该失败
+        let verifier = ChunkVerifier::new(chunk_root);
+        let valid = verifier.verify_chunk(&hash).await.unwrap();
+        assert!(!valid);
+    }
+
+    #[tokio::test]
+    async fn test_chunk_verifier_batch() {
+        let temp_dir = TempDir::new().unwrap();
+        let chunk_root = temp_dir.path().to_path_buf();
+
+        // 创建有效的 chunk
+        let data1 = b"test data 1";
+        let mut hasher1 = Sha256::new();
+        hasher1.update(data1);
+        let hash1 = hex::encode(hasher1.finalize());
+
+        let prefix1 = &hash1[..2];
+        let data_dir1 = chunk_root.join("data").join(prefix1);
+        fs::create_dir_all(&data_dir1).await.unwrap();
+        fs::write(data_dir1.join(&hash1), data1).await.unwrap();
+
+        // 创建损坏的 chunk
+        let data2 = b"test data 2";
+        let mut hasher2 = Sha256::new();
+        hasher2.update(data2);
+        let hash2 = hex::encode(hasher2.finalize());
+
+        let prefix2 = &hash2[..2];
+        let data_dir2 = chunk_root.join("data").join(prefix2);
+        fs::create_dir_all(&data_dir2).await.unwrap();
+        fs::write(data_dir2.join(&hash2), b"corrupted").await.unwrap();
+
+        let verifier = ChunkVerifier::new(chunk_root);
+        let report = verifier
+            .verify_chunks(&[hash1, hash2, "missing".to_string()])
+            .await
+            .unwrap();
+
+        assert_eq!(report.total, 3);
+        assert_eq!(report.valid, 1);
+        assert_eq!(report.invalid, 1);
+        assert_eq!(report.missing, 1);
+        assert_eq!(report.corrupted_chunks.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_chunk_verifier_scan_and_verify() {
+        let temp_dir = TempDir::new().unwrap();
+        let chunk_root = temp_dir.path().to_path_buf();
+
+        // 创建有效的 chunk
+        let data = b"test data";
+        let mut hasher = Sha256::new();
+        hasher.update(data);
+        let hash = hex::encode(hasher.finalize());
+
+        let prefix = &hash[..2];
+        let data_dir = chunk_root.join("data").join(prefix);
+        fs::create_dir_all(&data_dir).await.unwrap();
+        fs::write(data_dir.join(&hash), data).await.unwrap();
+
+        let verifier = ChunkVerifier::new(chunk_root);
+        let report = verifier.scan_and_verify().await.unwrap();
+
+        assert_eq!(report.total, 1);
+        assert_eq!(report.valid, 1);
+        assert_eq!(report.invalid, 0);
+        assert_eq!(report.missing, 0);
+    }
+
+    #[tokio::test]
+    async fn test_chunk_verifier_scan_empty_directory() {
+        let temp_dir = TempDir::new().unwrap();
+        let chunk_root = temp_dir.path().to_path_buf();
+
+        let verifier = ChunkVerifier::new(chunk_root);
+        let report = verifier.scan_and_verify().await.unwrap();
+
+        assert_eq!(report.total, 0);
+        assert_eq!(report.valid, 0);
+    }
+
+    #[tokio::test]
+    async fn test_orphan_detection_empty_directory() {
+        let temp_dir = TempDir::new().unwrap();
+        let chunk_root = temp_dir.path().to_path_buf();
+
+        let referenced = HashSet::new();
+        let cleaner = OrphanChunkCleaner::new(chunk_root);
+        let orphans = cleaner.detect_orphans(&referenced).await.unwrap();
+
+        assert_eq!(orphans.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_orphan_detection_all_referenced() {
+        let temp_dir = TempDir::new().unwrap();
+        let chunk_root = temp_dir.path().to_path_buf();
+
+        // 创建分层存储目录
+        let data_dir = chunk_root.join("data").join("ab");
+        fs::create_dir_all(&data_dir).await.unwrap();
+
+        // 创建一些 chunks
+        fs::write(data_dir.join("chunk1"), b"data1").await.unwrap();
+        fs::write(data_dir.join("chunk2"), b"data2").await.unwrap();
+
+        // 所有 chunk 都被引用
+        let mut referenced = HashSet::new();
+        referenced.insert("chunk1".to_string());
+        referenced.insert("chunk2".to_string());
+
+        let cleaner = OrphanChunkCleaner::new(chunk_root);
+        let orphans = cleaner.detect_orphans(&referenced).await.unwrap();
+
+        assert_eq!(orphans.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_report_with_freed_space() {
+        let temp_dir = TempDir::new().unwrap();
+        let chunk_root = temp_dir.path().to_path_buf();
+
+        // 创建分层存储目录
+        let orphan_name = "orphan_large";
+        let prefix = &orphan_name[..2.min(orphan_name.len())];
+        let data_dir = chunk_root.join("data").join(prefix);
+        fs::create_dir_all(&data_dir).await.unwrap();
+
+        // 创建较大的孤儿 chunk
+        let large_data = vec![0u8; 10000];
+        fs::write(data_dir.join(orphan_name), &large_data)
+            .await
+            .unwrap();
+
+        let cleaner = OrphanChunkCleaner::new(chunk_root.clone());
+        let report = cleaner
+            .clean_orphans(&[orphan_name.to_string()])
+            .await
+            .unwrap();
+
+        assert_eq!(report.deleted, 1);
+        assert_eq!(report.freed_space, 10000);
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_nonexistent_chunk() {
+        let temp_dir = TempDir::new().unwrap();
+        let chunk_root = temp_dir.path().to_path_buf();
+
+        let cleaner = OrphanChunkCleaner::new(chunk_root);
+        let report = cleaner
+            .clean_orphans(&["nonexistent".to_string()])
+            .await
+            .unwrap();
+
+        assert_eq!(report.total, 1);
+        assert_eq!(report.deleted, 0);
+        assert_eq!(report.failed, 1);
+        assert_eq!(report.failed_chunks.len(), 1);
+    }
+
+    #[test]
+    fn test_chunk_verify_report_serialization() {
+        let report = ChunkVerifyReport {
+            total: 10,
+            valid: 8,
+            invalid: 1,
+            missing: 1,
+            corrupted_chunks: vec!["chunk1".to_string(), "chunk2".to_string()],
+        };
+
+        let json = serde_json::to_string(&report).unwrap();
+        let deserialized: ChunkVerifyReport = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(deserialized.total, 10);
+        assert_eq!(deserialized.valid, 8);
+        assert_eq!(deserialized.corrupted_chunks.len(), 2);
+    }
+
+    #[test]
+    fn test_cleanup_report_serialization() {
+        let report = CleanupReport {
+            total: 5,
+            deleted: 4,
+            failed: 1,
+            freed_space: 10000,
+            failed_chunks: vec!["chunk1".to_string()],
+        };
+
+        let json = serde_json::to_string(&report).unwrap();
+        let deserialized: CleanupReport = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(deserialized.total, 5);
+        assert_eq!(deserialized.deleted, 4);
+        assert_eq!(deserialized.freed_space, 10000);
+    }
 }

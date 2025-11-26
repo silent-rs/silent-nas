@@ -536,4 +536,352 @@ mod tests {
         task.mark_failed("Test error 4".to_string());
         assert!(!task.can_retry());
     }
+
+    #[test]
+    fn test_optimization_task_skipped() {
+        let mut task = OptimizationTask::new(
+            "file1".to_string(),
+            PathBuf::from("/tmp/file1"),
+            1_000_000,
+            "hash1".to_string(),
+            OptimizationStrategy::Skip,
+            0,
+        );
+
+        task.mark_skipped("Already compressed".to_string());
+        assert_eq!(task.status, crate::OptimizationStatus::Skipped);
+        assert_eq!(task.error, Some("Already compressed".to_string()));
+        assert!(task.completed_at.is_some());
+    }
+
+    #[test]
+    fn test_optimization_stats_default() {
+        let stats = OptimizationStats::default();
+        assert_eq!(stats.total_tasks, 0);
+        assert_eq!(stats.pending_tasks, 0);
+        assert_eq!(stats.running_tasks, 0);
+        assert_eq!(stats.completed_tasks, 0);
+        assert_eq!(stats.failed_tasks, 0);
+        assert_eq!(stats.skipped_tasks, 0);
+        assert_eq!(stats.space_saved, 0);
+        assert_eq!(stats.optimized_size, 0);
+    }
+
+    #[test]
+    fn test_prioritized_task_ordering() {
+        let task1 = OptimizationTask::new(
+            "file1".to_string(),
+            PathBuf::from("/tmp/file1"),
+            100_000_000, // 100MB
+            "hash1".to_string(),
+            OptimizationStrategy::Full,
+            0,
+        );
+
+        let task2 = OptimizationTask::new(
+            "file2".to_string(),
+            PathBuf::from("/tmp/file2"),
+            500_000, // 500KB
+            "hash2".to_string(),
+            OptimizationStrategy::CompressOnly,
+            0,
+        );
+
+        let pt1 = PrioritizedTask { task: task1 };
+        let pt2 = PrioritizedTask { task: task2 };
+
+        // 高优先级任务应该排在前面
+        assert!(pt1 > pt2);
+    }
+
+    #[tokio::test]
+    async fn test_scheduler_submit_and_queue_len() {
+        let scheduler = OptimizationScheduler::new(2);
+
+        let task = OptimizationTask::new(
+            "file1".to_string(),
+            PathBuf::from("/tmp/file1"),
+            1_000_000,
+            "hash1".to_string(),
+            OptimizationStrategy::Full,
+            0,
+        );
+
+        scheduler.submit_task(task).await;
+
+        assert_eq!(scheduler.queue_len().await, 1);
+
+        let stats = scheduler.get_stats().await;
+        assert_eq!(stats.total_tasks, 1);
+        assert_eq!(stats.pending_tasks, 1);
+    }
+
+    #[tokio::test]
+    async fn test_scheduler_duplicate_task() {
+        let scheduler = OptimizationScheduler::new(2);
+
+        let task1 = OptimizationTask::new(
+            "file1".to_string(),
+            PathBuf::from("/tmp/file1"),
+            1_000_000,
+            "hash1".to_string(),
+            OptimizationStrategy::Full,
+            0,
+        );
+
+        let task2 = OptimizationTask::new(
+            "file1".to_string(), // 相同 file_id
+            PathBuf::from("/tmp/file1"),
+            1_000_000,
+            "hash1".to_string(),
+            OptimizationStrategy::Full,
+            0,
+        );
+
+        scheduler.submit_task(task1).await;
+        scheduler.submit_task(task2).await; // 应该被跳过
+
+        assert_eq!(scheduler.queue_len().await, 1);
+    }
+
+    #[tokio::test]
+    async fn test_scheduler_get_next_ready_task() {
+        let scheduler = OptimizationScheduler::new(2);
+
+        let task = OptimizationTask::new(
+            "file1".to_string(),
+            PathBuf::from("/tmp/file1"),
+            1_000_000,
+            "hash1".to_string(),
+            OptimizationStrategy::Full,
+            0, // 立即执行
+        );
+
+        scheduler.submit_task(task).await;
+
+        let next_task = scheduler.get_next_ready_task().await;
+        assert!(next_task.is_some());
+        assert_eq!(next_task.unwrap().file_id, "file1");
+
+        // 队列应该为空
+        assert_eq!(scheduler.queue_len().await, 0);
+
+        // 统计应该更新
+        let stats = scheduler.get_stats().await;
+        assert_eq!(stats.pending_tasks, 0);
+        assert_eq!(stats.running_tasks, 1);
+    }
+
+    #[tokio::test]
+    async fn test_scheduler_delayed_task() {
+        let scheduler = OptimizationScheduler::new(2);
+
+        let task = OptimizationTask::new(
+            "file1".to_string(),
+            PathBuf::from("/tmp/file1"),
+            1_000_000,
+            "hash1".to_string(),
+            OptimizationStrategy::Full,
+            3600, // 1小时后执行
+        );
+
+        scheduler.submit_task(task).await;
+
+        // 任务未就绪，不应该被获取
+        let next_task = scheduler.get_next_ready_task().await;
+        assert!(next_task.is_none());
+
+        // 任务应该还在队列中
+        assert_eq!(scheduler.queue_len().await, 1);
+    }
+
+    #[tokio::test]
+    async fn test_scheduler_mark_completed() {
+        let scheduler = OptimizationScheduler::new(2);
+
+        scheduler.mark_task_completed("file1", 1000, 500).await;
+
+        let stats = scheduler.get_stats().await;
+        assert_eq!(stats.completed_tasks, 1);
+        assert_eq!(stats.space_saved, 1000);
+        assert_eq!(stats.optimized_size, 500);
+    }
+
+    #[tokio::test]
+    async fn test_scheduler_mark_failed() {
+        let scheduler = OptimizationScheduler::new(2);
+
+        scheduler.mark_task_failed("file1", "Test error").await;
+
+        let stats = scheduler.get_stats().await;
+        assert_eq!(stats.failed_tasks, 1);
+    }
+
+    #[tokio::test]
+    async fn test_scheduler_mark_skipped() {
+        let scheduler = OptimizationScheduler::new(2);
+
+        scheduler.mark_task_skipped("file1", "Already optimized").await;
+
+        let stats = scheduler.get_stats().await;
+        assert_eq!(stats.skipped_tasks, 1);
+    }
+
+    #[tokio::test]
+    async fn test_scheduler_resubmit_failed_task() {
+        let scheduler = OptimizationScheduler::new(2);
+
+        let mut task = OptimizationTask::new(
+            "file1".to_string(),
+            PathBuf::from("/tmp/file1"),
+            1_000_000,
+            "hash1".to_string(),
+            OptimizationStrategy::Full,
+            0,
+        );
+
+        task.mark_failed("Test error".to_string());
+
+        scheduler.resubmit_failed_task(task).await;
+
+        assert_eq!(scheduler.queue_len().await, 1);
+    }
+
+    #[tokio::test]
+    async fn test_scheduler_start_stop() {
+        let scheduler = OptimizationScheduler::new(2);
+
+        assert!(!scheduler.is_running().await);
+
+        scheduler.start().await;
+        assert!(scheduler.is_running().await);
+
+        scheduler.stop().await;
+        assert!(!scheduler.is_running().await);
+    }
+
+    #[tokio::test]
+    async fn test_scheduler_clear_queue() {
+        let scheduler = OptimizationScheduler::new(2);
+
+        let task1 = OptimizationTask::new(
+            "file1".to_string(),
+            PathBuf::from("/tmp/file1"),
+            1_000_000,
+            "hash1".to_string(),
+            OptimizationStrategy::Full,
+            0,
+        );
+
+        let task2 = OptimizationTask::new(
+            "file2".to_string(),
+            PathBuf::from("/tmp/file2"),
+            2_000_000,
+            "hash2".to_string(),
+            OptimizationStrategy::Full,
+            0,
+        );
+
+        scheduler.submit_task(task1).await;
+        scheduler.submit_task(task2).await;
+
+        assert_eq!(scheduler.queue_len().await, 2);
+
+        scheduler.clear_queue().await;
+
+        assert_eq!(scheduler.queue_len().await, 0);
+
+        let stats = scheduler.get_stats().await;
+        assert_eq!(stats.pending_tasks, 0);
+    }
+
+    #[tokio::test]
+    async fn test_scheduler_priority_ordering() {
+        let scheduler = OptimizationScheduler::new(2);
+
+        // 低优先级任务
+        let low_priority = OptimizationTask::new(
+            "file1".to_string(),
+            PathBuf::from("/tmp/file1"),
+            500_000, // 500KB
+            "hash1".to_string(),
+            OptimizationStrategy::CompressOnly,
+            0,
+        );
+
+        // 高优先级任务
+        let high_priority = OptimizationTask::new(
+            "file2".to_string(),
+            PathBuf::from("/tmp/file2"),
+            1_000_000_000, // 1GB
+            "hash2".to_string(),
+            OptimizationStrategy::Full,
+            0,
+        );
+
+        // 先提交低优先级，后提交高优先级
+        scheduler.submit_task(low_priority).await;
+        scheduler.submit_task(high_priority).await;
+
+        // 应该先获取高优先级任务
+        let next_task = scheduler.get_next_ready_task().await;
+        assert!(next_task.is_some());
+        assert_eq!(next_task.unwrap().file_id, "file2");
+    }
+
+    #[tokio::test]
+    async fn test_scheduler_get_pending_tasks() {
+        let scheduler = OptimizationScheduler::new(2);
+
+        let task = OptimizationTask::new(
+            "file1".to_string(),
+            PathBuf::from("/tmp/file1"),
+            1_000_000,
+            "hash1".to_string(),
+            OptimizationStrategy::Full,
+            3600, // 延迟执行
+        );
+
+        scheduler.submit_task(task).await;
+
+        let pending = scheduler.get_pending_tasks().await;
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].file_id, "file1");
+    }
+
+    #[test]
+    fn test_calculate_priority_edge_cases() {
+        // 测试边界值
+        let task_1mb = OptimizationTask::new(
+            "file1".to_string(),
+            PathBuf::from("/tmp/file1"),
+            1_048_576, // 正好 1MB
+            "hash1".to_string(),
+            OptimizationStrategy::CompressOnly,
+            0,
+        );
+        assert!(task_1mb.priority >= 1);
+
+        let task_10mb = OptimizationTask::new(
+            "file2".to_string(),
+            PathBuf::from("/tmp/file2"),
+            10_485_760, // 正好 10MB
+            "hash2".to_string(),
+            OptimizationStrategy::Full,
+            0,
+        );
+        assert!(task_10mb.priority >= 3);
+
+        // 测试 Skip 策略优先级为 0
+        let task_skip = OptimizationTask::new(
+            "file3".to_string(),
+            PathBuf::from("/tmp/file3"),
+            100_000_000,
+            "hash3".to_string(),
+            OptimizationStrategy::Skip,
+            0,
+        );
+        // Skip 策略会将优先级设为 size_priority + 0
+        assert!(task_skip.priority <= 10);
+    }
 }

@@ -13,9 +13,6 @@ async fn create_test_storage() -> (StorageManager, TempDir) {
     let config = IncrementalConfig {
         enable_compression: true,
         compression_algorithm: "lz4".to_string(),
-        min_chunk_size: 1024,  // 1KB
-        avg_chunk_size: 4096,  // 4KB
-        max_chunk_size: 16384, // 16KB
         ..Default::default()
     };
 

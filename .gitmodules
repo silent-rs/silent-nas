@@ -7,3 +7,4 @@
 [submodule "silent-crdt"]
 	path = silent-crdt
 	url = git@github.com:silent-rs/silent-crdt.git
+	branch = dev/dev_in_nas

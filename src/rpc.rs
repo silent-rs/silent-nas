@@ -1,6 +1,6 @@
 use crate::models::{EventType, FileEvent};
 use crate::notify::EventNotifier;
-use crate::storage::StorageManager;
+use crate::storage::{StorageManager, StorageManagerTrait};
 use tonic::{Request, Response, Status};
 
 // 引入生成的 protobuf 代码
@@ -140,9 +140,9 @@ impl FileService for FileServiceImpl {
         &self,
         _request: Request<ListFilesRequest>,
     ) -> std::result::Result<Response<ListFilesResponse>, Status> {
-        let files = self
-            .storage
-            .list_files()
+        use silent_nas_core::StorageManagerTrait;
+
+        let files = StorageManagerTrait::list_files(&self.storage)
             .await
             .map_err(|e| Status::internal(format!("列出文件失败: {}", e)))?;
 
@@ -275,7 +275,7 @@ mod tests {
 
     #[test]
     fn test_multiple_convert_metadata() {
-        let metadatas = vec![
+        let metadatas = [
             crate::models::FileMetadata {
                 id: "1".to_string(),
                 name: "file1.txt".to_string(),

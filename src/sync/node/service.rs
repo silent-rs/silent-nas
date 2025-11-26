@@ -1,7 +1,7 @@
 // NodeSyncService gRPC 服务端实现
 #![allow(dead_code)]
 
-use crate::storage::StorageManager;
+use crate::storage::{StorageManager, StorageManagerTrait};
 use crate::sync::crdt::SyncManager;
 use crate::sync::node::{NodeManager, NodeSyncCoordinator};
 use chrono::{DateTime, Utc};
@@ -475,16 +475,11 @@ mod tests {
     }
 
     async fn build_service() -> NodeSyncServiceImpl {
-        // 构建最小依赖：Storage、SyncManager、NodeManager、Coordinator
-        let dir = tempfile::tempdir().unwrap();
-        let storage = Arc::new(crate::storage::StorageManager::new(
-            dir.path().to_path_buf(),
-            4 * 1024 * 1024,
-        ));
-        storage.init().await.unwrap();
+        // 使用共享的测试存储初始化，避免临时目录被删除导致的问题
+        let storage = crate::storage::init_test_storage_async().await;
+        let storage = Arc::new(storage.clone());
 
-        let sync_manager =
-            crate::sync::crdt::SyncManager::new("node-local".into(), storage.clone(), None);
+        let sync_manager = crate::sync::crdt::SyncManager::new("node-local".to_string(), None);
 
         let node_manager = crate::sync::node::manager::NodeManager::new(
             crate::sync::node::manager::NodeDiscoveryConfig::default(),

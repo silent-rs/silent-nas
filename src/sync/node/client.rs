@@ -130,10 +130,11 @@ impl NodeSyncClient {
     fn backoff_delay(&self, attempt: u32) -> tokio::time::Duration {
         let base = self.config.retry_interval;
         let factor = 1u64 << attempt.min(5); // 上限 2^5 = 32
-        let capped = (base.saturating_mul(factor)).min(self.config.max_backoff_secs);
+        let delay = base.saturating_mul(factor);
         let jitter = 0.8 + (rand::random::<f64>() * 0.4); // 0.8~1.2
-        let secs = ((capped as f64) * jitter).round() as u64;
-        tokio::time::Duration::from_secs(secs.max(1))
+        let secs = ((delay as f64) * jitter).round() as u64;
+        let capped = secs.min(self.config.max_backoff_secs);
+        tokio::time::Duration::from_secs(capped.max(1))
     }
 
     /// 连接到远程节点
@@ -665,13 +666,30 @@ mod tests {
         // 不可重试
         assert!(!client.should_retry(&Status::invalid_argument("")));
 
-        // 退避：5, 10, 20, 40, 60(封顶)
-        assert_eq!(client.backoff_delay(0).as_secs(), 5);
-        assert_eq!(client.backoff_delay(1).as_secs(), 10);
-        assert_eq!(client.backoff_delay(2).as_secs(), 20);
-        assert_eq!(client.backoff_delay(3).as_secs(), 40);
-        assert_eq!(client.backoff_delay(5).as_secs(), 60);
-        assert_eq!(client.backoff_delay(6).as_secs(), 60);
+        // 退避：5, 10, 20, 40, 60(封顶)，考虑 jitter (0.8~1.2)
+        // attempt 0: base * 1 = 5, jitter range: 4~6
+        let delay0 = client.backoff_delay(0).as_secs();
+        assert!((4..=6).contains(&delay0), "delay0 = {}", delay0);
+
+        // attempt 1: base * 2 = 10, jitter range: 8~12
+        let delay1 = client.backoff_delay(1).as_secs();
+        assert!((8..=12).contains(&delay1), "delay1 = {}", delay1);
+
+        // attempt 2: base * 4 = 20, jitter range: 16~24
+        let delay2 = client.backoff_delay(2).as_secs();
+        assert!((16..=24).contains(&delay2), "delay2 = {}", delay2);
+
+        // attempt 3: base * 8 = 40, jitter range: 32~48
+        let delay3 = client.backoff_delay(3).as_secs();
+        assert!((32..=48).contains(&delay3), "delay3 = {}", delay3);
+
+        // attempt 5: base * 32 = 160 -> capped to 60, jitter range: 48~60
+        let delay5 = client.backoff_delay(5).as_secs();
+        assert!((48..=60).contains(&delay5), "delay5 = {}", delay5);
+
+        // attempt 6: same as 5 (capped), jitter range: 48~60
+        let delay6 = client.backoff_delay(6).as_secs();
+        assert!((48..=60).contains(&delay6), "delay6 = {}", delay6);
     }
 
     #[test]

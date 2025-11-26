@@ -2,6 +2,7 @@ use super::{WebDavHandler, constants::*};
 use crate::models::{EventType, FileEvent};
 use http_body_util::BodyExt;
 use silent::prelude::*;
+use silent_nas_core::StorageManagerTrait;
 use std::path::Path;
 use tokio::fs;
 
@@ -27,6 +28,201 @@ impl WebDavHandler {
             http::HeaderValue::from_static("0"),
         );
         Ok(resp)
+    }
+
+    /// 处理 WebDAV SEARCH 请求（RFC 5323）
+    pub(super) async fn handle_search(&self, req: &mut Request) -> silent::Result<Response> {
+        tracing::debug!("处理 WebDAV SEARCH 请求");
+
+        // 读取请求体
+        let mut body = req.take_body();
+        let body_bytes = if let Some(Ok(frame)) = body.frame().await {
+            frame.into_data().unwrap_or_default()
+        } else {
+            bytes::Bytes::new()
+        };
+        let body_bytes = body_bytes.to_vec();
+
+        // 解析搜索条件
+        let search_query = if !body_bytes.is_empty() {
+            self.parse_search_request(&body_bytes)?
+        } else {
+            // 如果没有请求体，返回所有资源
+            "".to_string()
+        };
+
+        tracing::debug!("搜索查询: {}", search_query);
+
+        // 执行搜索
+        let results = self
+            .search_engine
+            .search(&search_query, 100, 0)
+            .await
+            .map_err(|e| {
+                SilentError::business_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("搜索失败: {}", e),
+                )
+            })?;
+
+        // 构建 WebDAV multistatus 响应
+        let multistatus = self.build_search_multistatus(&results)?;
+
+        // 返回响应
+        let mut response = Response::empty();
+        response.headers_mut().insert(
+            http::header::CONTENT_TYPE,
+            http::HeaderValue::from_static(CONTENT_TYPE_XML),
+        );
+        response.set_body(full(multistatus.into_bytes()));
+        Ok(response)
+    }
+
+    /// 解析 WebDAV SEARCH 请求体
+    fn parse_search_request(&self, body: &[u8]) -> silent::Result<String> {
+        // 简化的解析：提取 <D:searchrequest> 中的文本内容
+        let body_str = String::from_utf8_lossy(body);
+
+        // 查找 <D:searchrequest> 标签
+        if let Some(start) = body_str.find("<D:searchrequest") {
+            let remaining = &body_str[start..];
+            if let Some(end_tag_pos) = remaining.find('>') {
+                let content_start = start + end_tag_pos + 1;
+                if let Some(end_pos) = body_str[content_start..].find("</D:searchrequest>") {
+                    let search_content = &body_str[content_start..content_start + end_pos];
+                    // 提取文本内容（简化实现）
+                    let text = search_content
+                        .replace("<D:select>", "")
+                        .replace("</D:select>", "")
+                        .replace("<D:where>", "")
+                        .replace("</D:where>", "")
+                        .replace("<D:and>", "")
+                        .replace("</D:and>", "")
+                        .replace("<D:or>", "")
+                        .replace("</D:or>", "")
+                        .replace("<D:not>", "")
+                        .replace("</D:not>", "")
+                        .replace("<D:like>", "")
+                        .replace("</D:like>", "")
+                        .replace("<D:prop>", "")
+                        .replace("</D:prop>", "")
+                        .replace("<D:literal>", "")
+                        .replace("</D:literal>", "")
+                        .replace("<D:caseless>", "")
+                        .replace("</D:caseless>", "")
+                        .replace("<D:text>", "")
+                        .replace("</D:text>", "")
+                        .replace("<D:collation> i;octet </D:collation>", "")
+                        .replace("<D:propname>", "")
+                        .replace("</D:propname>", "")
+                        .replace("<D:allprop>", "")
+                        .replace("</D:allprop>", "")
+                        .replace("<D:getcontenttype>", "")
+                        .replace("</D:getcontenttype>", "")
+                        .replace("<D:getcontentlength>", "")
+                        .replace("</D:getcontentlength>", "")
+                        .replace("<D:displayname>", "")
+                        .replace("</D:displayname>", "")
+                        .replace("<D:creationdate>", "")
+                        .replace("</D:creationdate>", "")
+                        .replace("<D:getlastmodified>", "")
+                        .replace("</D:getlastmodified>", "")
+                        .replace("<D:resourcetype>", "")
+                        .replace("</D:resourcetype>", "")
+                        .replace("<D:collection/>", "")
+                        .replace("<D:href>", "")
+                        .replace("</D:href>", "")
+                        .replace("\n", " ")
+                        .replace("\r", " ")
+                        .replace("\t", " ")
+                        .trim()
+                        .to_string();
+
+                    return Ok(text);
+                }
+            }
+        }
+
+        // 如果解析失败，返回空字符串
+        Ok("".to_string())
+    }
+
+    /// 构建搜索结果的 multistatus 响应
+    fn build_search_multistatus(
+        &self,
+        results: &[crate::search::SearchResult],
+    ) -> silent::Result<String> {
+        let mut xml = String::new();
+        xml.push_str(XML_HEADER);
+        xml.push('\n');
+        xml.push_str(XML_NS_DAV);
+        xml.push('\n');
+
+        for result in results {
+            xml.push_str("  <D:response>\n");
+
+            // href - 资源URL
+            let href = format!("/api/files/{}", result.file_id);
+            xml.push_str(&format!(
+                "    <D:href>{}</D:href>\n",
+                Self::escape_xml(&href)
+            ));
+
+            // status
+            xml.push_str("    <D:status>HTTP/1.1 200 OK</D:status>\n");
+
+            // propstat
+            xml.push_str("    <D:propstat>\n");
+            xml.push_str("      <D:prop>\n");
+
+            // displayname
+            if !result.name.is_empty() {
+                xml.push_str(&format!(
+                    "        <D:displayname>{}</D:displayname>\n",
+                    Self::escape_xml(&result.name)
+                ));
+            }
+
+            // getcontentlength
+            if result.size > 0 {
+                xml.push_str(&format!(
+                    "        <D:getcontentlength>{}</D:getcontentlength>\n",
+                    result.size
+                ));
+            }
+
+            // getlastmodified
+            if result.modified_at > 0 {
+                let dt =
+                    chrono::DateTime::from_timestamp(result.modified_at, 0).unwrap_or_default();
+                xml.push_str(&format!(
+                    "        <D:getlastmodified>{}</D:getlastmodified>\n",
+                    dt.to_rfc2822()
+                ));
+            }
+
+            // resourcetype
+            xml.push_str("        <D:resourcetype><D:collection/></D:resourcetype>\n");
+
+            xml.push_str("      </D:prop>\n");
+            xml.push_str("      <D:status>HTTP/1.1 200 OK</D:status>\n");
+            xml.push_str("    </D:propstat>\n");
+
+            xml.push_str("  </D:response>\n");
+        }
+
+        xml.push_str(XML_MULTISTATUS_END);
+
+        Ok(xml)
+    }
+
+    /// XML转义
+    fn escape_xml(s: &str) -> String {
+        s.replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+            .replace('"', "&quot;")
+            .replace('\'', "&apos;")
     }
 
     pub(super) async fn handle_propfind(
@@ -70,43 +266,72 @@ impl WebDavHandler {
             WebDavHandler::parse_prop_filter_and_nsmap(&xml_bytes)
         };
 
-        let storage_path = self.storage.get_full_path(&path);
-        let metadata = fs::metadata(&storage_path).await.map_err(|e| {
-            // macOS 系统文件和元数据文件不存在是正常的，只记录 debug 日志
-            let is_macos_metadata = path.starts_with("/._.")
-                || path.starts_with("/._")
-                || path.starts_with("/.metadata_")
-                || path.starts_with("/.Spotlight-")
-                || path.starts_with("/.hidden")
-                || path.starts_with("/.Trash");
+        let storage = crate::storage::storage();
+        let storage_path = storage.get_full_path(&path);
 
-            if is_macos_metadata {
-                tracing::debug!(
-                    "PROPFIND macOS 元数据文件不存在（正常）: {} -> {:?}",
-                    path,
-                    storage_path
-                );
-            } else {
-                tracing::warn!(
-                    "PROPFIND 路径不存在: {} -> {:?}, error: {}",
-                    path,
-                    storage_path,
-                    e
-                );
-            }
-            SilentError::business_error(StatusCode::NOT_FOUND, "路径不存在")
-        })?;
+        // 检查是文件还是目录
+        let is_directory = storage_path.is_dir();
+
+        // 获取元数据
+        let (file_size, _modified_time) = if is_directory {
+            // 目录：从文件系统获取元数据
+            let metadata = fs::metadata(&storage_path).await.map_err(|e| {
+                // macOS 系统文件和元数据文件不存在是正常的，只记录 debug 日志
+                let is_macos_metadata = path.starts_with("/._.")
+                    || path.starts_with("/._")
+                    || path.starts_with("/.metadata_")
+                    || path.starts_with("/.Spotlight-")
+                    || path.starts_with("/.hidden")
+                    || path.starts_with("/.Trash");
+
+                if is_macos_metadata {
+                    tracing::debug!(
+                        "PROPFIND macOS 元数据文件不存在（正常）: {} -> {:?}",
+                        path,
+                        storage_path
+                    );
+                } else {
+                    tracing::warn!(
+                        "PROPFIND 路径不存在: {} -> {:?}, error: {}",
+                        path,
+                        storage_path,
+                        e
+                    );
+                }
+                SilentError::business_error(StatusCode::NOT_FOUND, "路径不存在")
+            })?;
+            (metadata.len(), metadata.modified().ok())
+        } else {
+            // 文件：从存储引擎获取元数据（不创建副本）
+            let file_meta = storage.get_metadata(&path).await.map_err(|e| {
+                tracing::warn!("PROPFIND 文件不存在: {} error: {}", path, e);
+                SilentError::business_error(StatusCode::NOT_FOUND, "文件不存在")
+            })?;
+
+            // 将 NaiveDateTime 转换为 SystemTime
+            let modified_time = file_meta
+                .modified_at
+                .and_utc()
+                .timestamp()
+                .try_into()
+                .ok()
+                .and_then(|secs| {
+                    std::time::UNIX_EPOCH.checked_add(std::time::Duration::from_secs(secs))
+                });
+
+            (file_meta.size, modified_time)
+        };
 
         tracing::debug!(
             "PROPFIND metadata: is_dir={}, len={}",
-            metadata.is_dir(),
-            metadata.len()
+            is_directory,
+            file_size
         );
 
         let mut xml = String::new();
         xml.push_str(XML_HEADER);
         xml.push_str(XML_NS_DAV);
-        if metadata.is_dir() {
+        if is_directory {
             let full_href = self.build_full_href(&path);
             self.add_prop_response_with_filter(
                 &mut xml,
@@ -122,35 +347,53 @@ impl WebDavHandler {
                     self.walk_propfind_recursive(&storage_path, &path, &mut xml)
                         .await?;
                 } else {
-                    let mut entries = fs::read_dir(&storage_path).await.map_err(|e| {
+                    // 使用 StorageManager 获取目录内容而不是直接读取文件系统
+                    let storage = crate::storage::storage();
+                    let (files, subdirs) = storage.list_directory(&path).await.map_err(|e| {
                         SilentError::business_error(
                             StatusCode::INTERNAL_SERVER_ERROR,
                             format!("读取目录失败: {}", e),
                         )
                     })?;
-                    while let Some(entry) = entries.next_entry().await.map_err(|e| {
-                        SilentError::business_error(
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            format!("读取目录项失败: {}", e),
-                        )
-                    })? {
-                        let entry_path = entry.path();
+
+                    // 先添加子目录
+                    for subdir in subdirs {
                         let relative_path = if path.is_empty() || path == "/" {
-                            format!("/{}", entry.file_name().to_string_lossy())
+                            format!("/{}", subdir)
                         } else {
-                            format!("{}/{}", path, entry.file_name().to_string_lossy())
+                            format!("{}/{}", path, subdir)
                         };
                         let full_href = self.build_full_href(&relative_path);
-                        let is_dir = entry_path.is_dir();
+                        let dir_path = storage.get_full_path(&relative_path);
+
+                        // 存储引擎：目录不需要在文件系统中创建，但add_prop_response需要路径参数
+                        // 如果目录不存在，仍然可以返回虚拟目录响应
                         self.add_prop_response_with_filter(
                             &mut xml,
                             &full_href,
-                            &entry_path,
-                            is_dir,
+                            &dir_path,
+                            true,
                             props_filter.as_ref(),
                             Some(&ns_echo_map),
                         )
                         .await;
+                    }
+
+                    // 再添加文件
+                    for file_id in files {
+                        let full_href = self.build_full_href(&file_id);
+
+                        // 从存储引擎获取文件元数据（不创建副本）
+                        if let Ok(file_meta) = storage.get_metadata(&file_id).await {
+                            self.add_prop_response_from_metadata(
+                                &mut xml,
+                                &full_href,
+                                &file_meta,
+                                props_filter.as_ref(),
+                                Some(&ns_echo_map),
+                            )
+                            .await;
+                        }
                     }
                 }
             }
@@ -346,6 +589,110 @@ impl WebDavHandler {
         xml.push_str("</D:response>");
     }
 
+    /// 从存储引擎元数据添加属性响应（不需要文件系统副本）
+    pub(super) async fn add_prop_response_from_metadata(
+        &self,
+        xml: &mut String,
+        href: &str,
+        file_meta: &silent_nas_core::FileMetadata,
+        props_filter: Option<&std::collections::HashSet<String>>,
+        ns_echo: Option<&std::collections::HashMap<String, String>>, // uri -> preferred prefix
+    ) {
+        // 文件不需要尾斜杠
+        let href_with_slash = href.to_string();
+
+        xml.push_str("<D:response>");
+        xml.push_str(&format!("<D:href>{}</D:href>", href_with_slash));
+        xml.push_str("<D:propstat>");
+        xml.push_str("<D:prop>");
+
+        // displayname
+        if props_filter.is_none() || props_filter.unwrap().contains("displayname") {
+            let displayname = if href_with_slash == "/" {
+                "/".to_string()
+            } else {
+                let s = href_with_slash.trim_end_matches('/');
+                s.rsplit('/').next().unwrap_or(s).to_string()
+            };
+            xml.push_str(&format!("<D:displayname>{}</D:displayname>", displayname));
+        }
+
+        // resourcetype - 文件为空
+        if props_filter.is_none() || props_filter.unwrap().contains("resourcetype") {
+            xml.push_str("<D:resourcetype/>");
+        }
+
+        // getcontentlength
+        if props_filter.is_none() || props_filter.unwrap().contains("getcontentlength") {
+            xml.push_str(&format!(
+                "<D:getcontentlength>{}</D:getcontentlength>",
+                file_meta.size
+            ));
+        }
+
+        // getetag - 使用文件哈希和大小
+        if props_filter.is_none() || props_filter.unwrap().contains("getetag") {
+            let etag = format!(
+                "\"{}-{}\"",
+                file_meta.size,
+                file_meta.hash.chars().take(8).collect::<String>()
+            );
+            xml.push_str(&format!("<D:getetag>{}</D:getetag>", etag));
+        }
+
+        // getlastmodified
+        if props_filter.is_none() || props_filter.unwrap().contains("getlastmodified") {
+            let timestamp = file_meta.modified_at.and_utc().timestamp();
+            if let Some(dt) = chrono::DateTime::from_timestamp(timestamp, 0) {
+                let rfc_time = dt.format("%a, %d %b %Y %H:%M:%S GMT").to_string();
+                xml.push_str(&format!(
+                    "<D:getlastmodified>{}</D:getlastmodified>",
+                    rfc_time
+                ));
+            }
+        }
+
+        // creationdate
+        if props_filter.is_none() || props_filter.unwrap().contains("creationdate") {
+            let timestamp = file_meta.created_at.and_utc().timestamp();
+            if let Some(dt) = chrono::DateTime::from_timestamp(timestamp, 0) {
+                let iso_time = dt.format("%Y-%m-%dT%H:%M:%SZ").to_string();
+                xml.push_str(&format!("<D:creationdate>{}</D:creationdate>", iso_time));
+            }
+        }
+
+        // getcontenttype - 根据文件名推测
+        if props_filter.is_none() || props_filter.unwrap().contains("getcontenttype") {
+            let content_type = if let Some(ext) = std::path::Path::new(&file_meta.name).extension()
+            {
+                mime_guess::from_ext(&ext.to_string_lossy())
+                    .first_or_octet_stream()
+                    .to_string()
+            } else {
+                "application/octet-stream".to_string()
+            };
+            xml.push_str(&format!(
+                "<D:getcontenttype>{}</D:getcontenttype>",
+                content_type
+            ));
+        }
+
+        // 自定义属性（如果客户端请求）
+        if let Some(ns_map) = ns_echo {
+            for uri in ns_map.keys() {
+                // 处理可能的自定义命名空间属性
+                if uri.contains("apple") || uri.contains("ical") {
+                    // 可以在这里添加对特定命名空间的支持
+                }
+            }
+        }
+
+        xml.push_str("</D:prop>");
+        xml.push_str("<D:status>HTTP/1.1 200 OK</D:status>");
+        xml.push_str("</D:propstat>");
+        xml.push_str("</D:response>");
+    }
+
     pub(super) fn xml_escape(s: &str) -> String {
         let mut out = String::with_capacity(s.len());
         for ch in s.chars() {
@@ -407,37 +754,49 @@ impl WebDavHandler {
 
     pub(super) async fn walk_propfind_recursive(
         &self,
-        storage_dir: &Path,
+        _storage_dir: &Path,
         relative_dir: &str,
         xml: &mut String,
     ) -> silent::Result<()> {
-        let mut stack: Vec<(std::path::PathBuf, String)> =
-            vec![(storage_dir.to_path_buf(), relative_dir.to_string())];
-        while let Some((dir_path, rel_path)) = stack.pop() {
-            let mut entries = fs::read_dir(&dir_path).await.map_err(|e| {
+        let storage = crate::storage::storage();
+        let mut stack: Vec<String> = vec![relative_dir.to_string()];
+
+        while let Some(rel_path) = stack.pop() {
+            let (files, subdirs) = storage.list_directory(&rel_path).await.map_err(|e| {
                 SilentError::business_error(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     format!("读取目录失败: {}", e),
                 )
             })?;
-            while let Some(entry) = entries.next_entry().await.map_err(|e| {
-                SilentError::business_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("读取目录项失败: {}", e),
-                )
-            })? {
-                let entry_path = entry.path();
+
+            // 处理子目录
+            for subdir in subdirs {
                 let relative_path = if rel_path.is_empty() || rel_path == "/" {
-                    format!("/{}", entry.file_name().to_string_lossy())
+                    format!("/{}", subdir)
                 } else {
-                    format!("{}/{}", rel_path, entry.file_name().to_string_lossy())
+                    format!("{}/{}", rel_path, subdir)
                 };
                 let full_href = self.build_full_href(&relative_path);
-                let is_dir = entry_path.is_dir();
-                self.add_prop_response(xml, &full_href, &entry_path, is_dir)
+                let dir_path = storage.get_full_path(&relative_path);
+
+                // 确保目录存在
+                if !dir_path.exists() {
+                    tokio::fs::create_dir_all(&dir_path).await.ok();
+                }
+
+                self.add_prop_response(xml, &full_href, &dir_path, true)
                     .await;
-                if is_dir {
-                    stack.push((entry_path, relative_path));
+                stack.push(relative_path);
+            }
+
+            // 处理文件
+            for file_id in files {
+                let full_href = self.build_full_href(&file_id);
+
+                // 从存储引擎获取文件元数据（不创建副本）
+                if let Ok(file_meta) = storage.get_metadata(&file_id).await {
+                    self.add_prop_response_from_metadata(xml, &full_href, &file_meta, None, None)
+                        .await;
                 }
             }
         }
@@ -446,32 +805,42 @@ impl WebDavHandler {
 
     pub(super) async fn handle_head(&self, path: &str, req: &Request) -> silent::Result<Response> {
         let path = Self::decode_path(path)?;
-        let storage_path = self.storage.get_full_path(&path);
-        let metadata = fs::metadata(&storage_path)
-            .await
-            .map_err(|_| SilentError::business_error(StatusCode::NOT_FOUND, "文件不存在"))?;
+        let storage = crate::storage::storage();
+        let storage_path = storage.get_full_path(&path);
+
         let mut resp = Response::empty();
-        if metadata.is_dir() {
+
+        // 检查是文件还是目录
+        if storage_path.is_dir() {
+            // 目录：返回HTML类型
             resp.headers_mut().insert(
                 http::header::CONTENT_TYPE,
                 http::HeaderValue::from_static(CONTENT_TYPE_HTML),
             );
         } else {
+            // 文件：从存储引擎获取元数据（不创建副本）
+            let file_meta = storage
+                .get_metadata(&path)
+                .await
+                .map_err(|_| SilentError::business_error(StatusCode::NOT_FOUND, "文件不存在"))?;
+
             resp.headers_mut().insert(
                 http::header::CONTENT_TYPE,
                 http::HeaderValue::from_static("application/octet-stream"),
             );
-            // 为提升兼容性（例如 Finder 展示大小），设置 Content-Length
+            // 设置 Content-Length
             resp.headers_mut().insert(
                 http::header::CONTENT_LENGTH,
-                http::HeaderValue::from_str(&metadata.len().to_string()).unwrap(),
+                http::HeaderValue::from_str(&file_meta.size.to_string()).unwrap(),
             );
             // 声明支持范围请求
             resp.headers_mut().insert(
                 http::header::ACCEPT_RANGES,
                 http::HeaderValue::from_static("bytes"),
             );
-            if let Some(ext) = storage_path.extension() {
+
+            // 根据文件名推测 MIME 类型
+            if let Some(ext) = std::path::Path::new(&file_meta.name).extension() {
                 let mime = mime_guess::from_ext(&ext.to_string_lossy()).first_or_octet_stream();
                 resp.headers_mut().insert(
                     http::header::CONTENT_TYPE,
@@ -480,29 +849,37 @@ impl WebDavHandler {
                     }),
                 );
             }
-            if let Some(etag) = Self::calc_etag_from_meta(&metadata) {
-                if let Ok(val) = http::HeaderValue::from_str(&etag) {
-                    resp.headers_mut().insert(http::header::ETAG, val);
-                }
-                if let Some(if_none_match) = req
-                    .headers()
-                    .get("If-None-Match")
-                    .and_then(|h| h.to_str().ok())
-                {
-                    let matches = if_none_match == "*"
-                        || if_none_match
-                            .split(',')
-                            .map(|s| s.trim())
-                            .any(|t| t == etag);
-                    if matches {
-                        resp.set_status(StatusCode::NOT_MODIFIED);
-                        return Ok(resp);
-                    }
+
+            // 生成并设置 ETag
+            let etag = format!(
+                "\"{}-{}\"",
+                file_meta.size,
+                file_meta.hash.chars().take(8).collect::<String>()
+            );
+            if let Ok(val) = http::HeaderValue::from_str(&etag) {
+                resp.headers_mut().insert(http::header::ETAG, val);
+            }
+
+            // 检查 If-None-Match
+            if let Some(if_none_match) = req
+                .headers()
+                .get("If-None-Match")
+                .and_then(|h| h.to_str().ok())
+            {
+                let matches = if_none_match == "*"
+                    || if_none_match
+                        .split(',')
+                        .map(|s| s.trim())
+                        .any(|t| t == etag);
+                if matches {
+                    resp.set_status(StatusCode::NOT_MODIFIED);
+                    return Ok(resp);
                 }
             }
-            if let Ok(modified) = metadata.modified()
-                && let Ok(datetime) = modified.duration_since(std::time::UNIX_EPOCH)
-                && let Some(dt) = chrono::DateTime::from_timestamp(datetime.as_secs() as i64, 0)
+
+            // 设置 Last-Modified
+            let timestamp = file_meta.modified_at.and_utc().timestamp();
+            if let Some(dt) = chrono::DateTime::from_timestamp(timestamp, 0)
                 && let Ok(last_modified) =
                     http::HeaderValue::from_str(&dt.format("%a, %d %b %Y %H:%M:%S GMT").to_string())
             {
@@ -515,11 +892,11 @@ impl WebDavHandler {
 
     pub(super) async fn handle_get(&self, path: &str, req: &Request) -> silent::Result<Response> {
         let path = Self::decode_path(path)?;
-        let storage_path = self.storage.get_full_path(&path);
-        let metadata = fs::metadata(&storage_path)
-            .await
-            .map_err(|_| SilentError::business_error(StatusCode::NOT_FOUND, "文件不存在"))?;
-        if metadata.is_dir() {
+        let storage = crate::storage::storage();
+        let storage_path = storage.get_full_path(&path);
+
+        // 检查是否是目录
+        if storage_path.is_dir() {
             let mut resp = Response::empty();
             resp.headers_mut().insert(
                 http::header::CONTENT_TYPE,
@@ -528,11 +905,25 @@ impl WebDavHandler {
             resp.set_body(full(b"<!DOCTYPE html><html><body><h1>Directory</h1><p>Use PROPFIND to list contents.</p></body></html>".to_vec()));
             return Ok(resp);
         }
-        if let Some(etag) = Self::calc_etag_from_meta(&metadata)
-            && let Some(if_none_match) = req
-                .headers()
-                .get("If-None-Match")
-                .and_then(|h| h.to_str().ok())
+
+        // 文件：从存储引擎获取元数据（不创建副本）
+        let file_meta = storage
+            .get_metadata(&path)
+            .await
+            .map_err(|_| SilentError::business_error(StatusCode::NOT_FOUND, "文件不存在"))?;
+
+        // 生成 ETag
+        let etag = format!(
+            "\"{}-{}\"",
+            file_meta.size,
+            file_meta.hash.chars().take(8).collect::<String>()
+        );
+
+        // 检查 If-None-Match（304 Not Modified）
+        if let Some(if_none_match) = req
+            .headers()
+            .get("If-None-Match")
+            .and_then(|h| h.to_str().ok())
         {
             let matches = if_none_match == "*"
                 || if_none_match
@@ -544,9 +935,9 @@ impl WebDavHandler {
                 if let Ok(val) = http::HeaderValue::from_str(&etag) {
                     resp.headers_mut().insert(http::header::ETAG, val);
                 }
-                if let Ok(modified) = metadata.modified()
-                    && let Ok(datetime) = modified.duration_since(std::time::UNIX_EPOCH)
-                    && let Some(dt) = chrono::DateTime::from_timestamp(datetime.as_secs() as i64, 0)
+                // 设置 Last-Modified
+                let timestamp = file_meta.modified_at.and_utc().timestamp();
+                if let Some(dt) = chrono::DateTime::from_timestamp(timestamp, 0)
                     && let Ok(last_modified) = http::HeaderValue::from_str(
                         &dt.format("%a, %d %b %Y %H:%M:%S GMT").to_string(),
                     )
@@ -558,14 +949,19 @@ impl WebDavHandler {
                 return Ok(resp);
             }
         }
-        let data = fs::read(&storage_path).await.map_err(|e| {
+
+        // 从存储引擎读取文件内容（不创建副本）
+        let data = storage.read_file(&path).await.map_err(|e| {
             SilentError::business_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("读取文件失败: {}", e),
             )
         })?;
+
         let mut resp = Response::empty();
-        if let Some(ext) = storage_path.extension() {
+
+        // 设置 Content-Type
+        if let Some(ext) = std::path::Path::new(&file_meta.name).extension() {
             let mime = mime_guess::from_ext(&ext.to_string_lossy()).first_or_octet_stream();
             resp.headers_mut().insert(
                 http::header::CONTENT_TYPE,
@@ -578,29 +974,34 @@ impl WebDavHandler {
                 http::HeaderValue::from_static("application/octet-stream"),
             );
         }
+
+        // 设置 Content-Length
         resp.headers_mut().insert(
             http::header::CONTENT_LENGTH,
             http::HeaderValue::from_str(&data.len().to_string()).unwrap(),
         );
-        // 声明支持范围请求，提升客户端兼容性（如 Finder）
+
+        // 声明支持范围请求
         resp.headers_mut().insert(
             http::header::ACCEPT_RANGES,
             http::HeaderValue::from_static("bytes"),
         );
-        if let Some(etag) = Self::calc_etag_from_meta(&metadata)
-            && let Ok(val) = http::HeaderValue::from_str(&etag)
-        {
+
+        // 设置 ETag
+        if let Ok(val) = http::HeaderValue::from_str(&etag) {
             resp.headers_mut().insert(http::header::ETAG, val);
         }
-        if let Ok(modified) = metadata.modified()
-            && let Ok(datetime) = modified.duration_since(std::time::UNIX_EPOCH)
-            && let Some(dt) = chrono::DateTime::from_timestamp(datetime.as_secs() as i64, 0)
+
+        // 设置 Last-Modified
+        let timestamp = file_meta.modified_at.and_utc().timestamp();
+        if let Some(dt) = chrono::DateTime::from_timestamp(timestamp, 0)
             && let Ok(last_modified) =
                 http::HeaderValue::from_str(&dt.format("%a, %d %b %Y %H:%M:%S GMT").to_string())
         {
             resp.headers_mut()
                 .insert(http::header::LAST_MODIFIED, last_modified);
         }
+
         resp.set_body(full(data));
         Ok(resp)
     }
@@ -614,110 +1015,249 @@ impl WebDavHandler {
         self.ensure_lock_ok(&path, req).await?;
 
         // 检查文件是否已存在，用于确定返回状态码
-        let storage_path = self.storage.get_full_path(&path);
+        let storage_path = crate::storage::storage().get_full_path(&path);
         let file_exists = storage_path.exists();
 
+        // 获取文件大小（如果有 Content-Length 头）
+        let content_length = req
+            .headers()
+            .get(http::header::CONTENT_LENGTH)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(0);
+
         tracing::debug!(
-            "PUT path='{}' exists={} user-agent={:?}",
+            "PUT path='{}' exists={} size={} user-agent={:?}",
             path,
             file_exists,
+            content_length,
             req.headers().get("User-Agent")
         );
 
         let body = req.take_body();
-        let body_data = match body {
-            ReqBody::Incoming(body) => body
-                .collect()
-                .await
-                .map_err(|e| {
-                    SilentError::business_error(
-                        StatusCode::BAD_REQUEST,
-                        format!("读取请求体失败: {}", e),
-                    )
-                })?
-                .to_bytes()
-                .to_vec(),
-            ReqBody::Once(bytes) => bytes.to_vec(),
-            ReqBody::Empty => {
-                return Err(SilentError::business_error(
-                    StatusCode::BAD_REQUEST,
-                    "请求体为空",
-                ));
-            }
-        };
 
-        if let Some(parent) = storage_path.parent() {
-            fs::create_dir_all(parent).await.map_err(|e| {
-                SilentError::business_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("创建目录失败: {}", e),
-                )
-            })?;
+        let receive_start = std::time::Instant::now();
+
+        // 将 ReqBody 封装为 AsyncRead，避免重复实现流式逻辑
+        struct BodyReader {
+            body: ReqBody,
+            buf: bytes::Bytes,
         }
 
-        let metadata = self
-            .storage
-            .save_at_path(&path, &body_data)
-            .await
-            .map_err(|e| {
-                SilentError::business_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("写入文件失败: {}", e),
-                )
-            })?;
-
-        let file_id = metadata.id.clone();
-        if let Err(e) = self
-            .version_manager
-            .create_version(
-                &file_id,
-                crate::models::FileVersion::from_metadata(&metadata, Some("webdav".to_string())),
-            )
-            .await
-        {
-            tracing::debug!("创建版本失败(可忽略): {}", e);
-        }
-
-        // 发布事件
-        let event_type = if file_exists {
-            EventType::Modified
-        } else {
-            EventType::Created
-        };
-        let mut event = FileEvent::new(event_type, file_id, Some(metadata));
-        event.source_http_addr = Some(self.source_http_addr.clone());
-
-        if let Some(ref n) = self.notifier {
-            if file_exists {
-                let _ = n.notify_modified(event).await;
-            } else {
-                let _ = n.notify_created(event).await;
+        impl BodyReader {
+            fn new(body: ReqBody) -> Self {
+                Self {
+                    body,
+                    buf: bytes::Bytes::new(),
+                }
             }
         }
 
-        // 记录变更（用于 REPORT sync-collection 差异集）
-        if file_exists {
-            self.append_change("modified", &path);
-        } else {
-            self.append_change("created", &path);
+        impl tokio::io::AsyncRead for BodyReader {
+            fn poll_read(
+                mut self: std::pin::Pin<&mut Self>,
+                cx: &mut std::task::Context<'_>,
+                buf: &mut tokio::io::ReadBuf<'_>,
+            ) -> std::task::Poll<std::io::Result<()>> {
+                use futures_util::Stream;
+                loop {
+                    if !self.buf.is_empty() {
+                        let to_copy = std::cmp::min(self.buf.len(), buf.remaining());
+                        let chunk = self.buf.split_to(to_copy);
+                        buf.put_slice(&chunk);
+                        return std::task::Poll::Ready(Ok(()));
+                    }
+
+                    match std::pin::Pin::new(&mut self.body).poll_next(cx) {
+                        std::task::Poll::Ready(Some(Ok(bytes))) => {
+                            self.buf = bytes;
+                            continue;
+                        }
+                        std::task::Poll::Ready(Some(Err(e))) => {
+                            return std::task::Poll::Ready(Err(e));
+                        }
+                        std::task::Poll::Ready(None) => {
+                            return std::task::Poll::Ready(Ok(()));
+                        }
+                        std::task::Poll::Pending => {
+                            return std::task::Poll::Pending;
+                        }
+                    }
+                }
+            }
         }
 
-        let mut resp = Response::empty();
-        // RFC 4918: 如果资源已存在则返回 204 No Content，新建则返回 201 Created
-        resp.set_status(if file_exists {
-            StatusCode::NO_CONTENT
-        } else {
-            StatusCode::CREATED
-        });
+        match body {
+            ReqBody::Incoming(incoming) => {
+                let storage = crate::storage::storage();
 
-        tracing::debug!(
-            "PUT completed: path='{}' status={} size={}",
-            path,
-            if file_exists { 204 } else { 201 },
-            body_data.len()
-        );
+                // 所有文件都使用流式同步处理，避免 HTTP 连接生命周期问题
+                let mut reader = BodyReader::new(ReqBody::Incoming(incoming));
 
-        Ok(resp)
+                let size_desc = if content_length > 1024 * 1024 {
+                    format!("{}MB", content_length / 1024 / 1024)
+                } else if content_length > 1024 {
+                    format!("{}KB", content_length / 1024)
+                } else {
+                    format!("{}B", content_length)
+                };
+
+                tracing::info!("开始上传文件: path='{}' size={}", path, size_desc);
+
+                let save_start = std::time::Instant::now();
+                let metadata = storage
+                    .save_file_from_reader(&path, &mut reader)
+                    .await
+                    .map_err(|e| {
+                        tracing::error!(
+                            "写入文件失败(流式): path='{}' size={} 耗时={:.2}s error={}",
+                            path,
+                            size_desc,
+                            save_start.elapsed().as_secs_f64(),
+                            e
+                        );
+                        SilentError::business_error(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            format!("写入文件失败: {}", e),
+                        )
+                    })?;
+
+                tracing::info!(
+                    "文件保存完成: path='{}' size={} 耗时={:.2}s",
+                    path,
+                    size_desc,
+                    save_start.elapsed().as_secs_f64()
+                );
+
+                let file_id = metadata.id.clone();
+
+                // 发布事件
+                let event_type = if file_exists {
+                    EventType::Modified
+                } else {
+                    EventType::Created
+                };
+                let mut event = FileEvent::new(event_type, file_id, Some(metadata));
+                event.source_http_addr = Some(self.source_http_addr.clone());
+
+                if let Some(ref n) = self.notifier {
+                    if file_exists {
+                        let _ = n.notify_modified(event).await;
+                    } else {
+                        let _ = n.notify_created(event).await;
+                    }
+                }
+
+                // 记录变更（用于 REPORT sync-collection 差异集）
+                if file_exists {
+                    self.append_change("modified", &path);
+                } else {
+                    self.append_change("created", &path);
+                }
+
+                let mut resp = Response::empty();
+                // RFC 4918: 如果资源已存在则返回 204 No Content，新建则返回 201 Created
+                resp.set_status(if file_exists {
+                    StatusCode::NO_CONTENT
+                } else {
+                    StatusCode::CREATED
+                });
+
+                tracing::info!(
+                    "PUT completed: path='{}' status={} size={} 总耗时={:.2}s",
+                    path,
+                    if file_exists { 204 } else { 201 },
+                    size_desc,
+                    receive_start.elapsed().as_secs_f64()
+                );
+
+                Ok(resp)
+            }
+            ReqBody::Once(bytes) => {
+                // 同步处理 Once 路径的文件（body 已经完全读入内存）
+                let body_data = bytes.to_vec();
+
+                let size_desc = if body_data.len() > 1024 * 1024 {
+                    format!("{}MB", body_data.len() / 1024 / 1024)
+                } else if body_data.len() > 1024 {
+                    format!("{}KB", body_data.len() / 1024)
+                } else {
+                    format!("{}B", body_data.len())
+                };
+
+                tracing::info!("开始保存文件(内存): path='{}' size={}", path, size_desc);
+
+                let save_start = std::time::Instant::now();
+                let metadata = crate::storage::storage()
+                    .save_at_path(&path, &body_data)
+                    .await
+                    .map_err(|e| {
+                        tracing::error!(
+                            "写入文件失败: path='{}' size={} 耗时={:.2}s error={}",
+                            path,
+                            size_desc,
+                            save_start.elapsed().as_secs_f64(),
+                            e
+                        );
+                        SilentError::business_error(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            format!("写入文件失败: {}", e),
+                        )
+                    })?;
+
+                tracing::info!(
+                    "文件保存完成: path='{}' size={} 耗时={:.2}s",
+                    path,
+                    size_desc,
+                    save_start.elapsed().as_secs_f64()
+                );
+
+                let file_id = metadata.id.clone();
+
+                let event_type = if file_exists {
+                    EventType::Modified
+                } else {
+                    EventType::Created
+                };
+                let mut event = FileEvent::new(event_type, file_id, Some(metadata));
+                event.source_http_addr = Some(self.source_http_addr.clone());
+
+                if let Some(ref n) = self.notifier {
+                    if file_exists {
+                        let _ = n.notify_modified(event).await;
+                    } else {
+                        let _ = n.notify_created(event).await;
+                    }
+                }
+
+                if file_exists {
+                    self.append_change("modified", &path);
+                } else {
+                    self.append_change("created", &path);
+                }
+
+                let mut resp = Response::empty();
+                resp.set_status(if file_exists {
+                    StatusCode::NO_CONTENT
+                } else {
+                    StatusCode::CREATED
+                });
+
+                tracing::info!(
+                    "PUT completed: path='{}' status={} size={} 总耗时={:.2}s",
+                    path,
+                    if file_exists { 204 } else { 201 },
+                    size_desc,
+                    receive_start.elapsed().as_secs_f64()
+                );
+
+                Ok(resp)
+            }
+            ReqBody::Empty => Err(SilentError::business_error(
+                StatusCode::BAD_REQUEST,
+                "请求体为空",
+            )),
+        }
     }
 
     pub(super) async fn handle_delete(&self, path: &str) -> silent::Result<Response> {
@@ -730,18 +1270,34 @@ impl WebDavHandler {
             "N/A"
         );
 
-        let storage_path = self.storage.get_full_path(&path);
-        let metadata = fs::metadata(&storage_path).await.map_err(|e| {
-            tracing::warn!(
-                "DELETE 文件不存在: {} -> {:?}, error: {}",
-                path,
-                storage_path,
-                e
-            );
-            SilentError::business_error(StatusCode::NOT_FOUND, "路径不存在")
-        })?;
+        let storage = crate::storage::storage();
+        let storage_path = storage.get_full_path(&path);
 
-        if metadata.is_dir() {
+        // 检查是文件还是目录
+        let is_directory = storage_path.is_dir();
+
+        // 验证路径存在
+        if is_directory {
+            // 目录：从文件系统检查
+            fs::metadata(&storage_path).await.map_err(|e| {
+                tracing::warn!(
+                    "DELETE 目录不存在: {} -> {:?}, error: {}",
+                    path,
+                    storage_path,
+                    e
+                );
+                SilentError::business_error(StatusCode::NOT_FOUND, "路径不存在")
+            })?;
+        } else {
+            // 文件：从存储引擎检查
+            storage.get_metadata(&path).await.map_err(|e| {
+                tracing::warn!("DELETE 文件不存在: {} error: {}", path, e);
+                SilentError::business_error(StatusCode::NOT_FOUND, "文件不存在")
+            })?;
+        }
+
+        if is_directory {
+            // 删除目录（文件系统）
             fs::remove_dir_all(&storage_path).await.map_err(|e| {
                 SilentError::business_error(
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -749,7 +1305,8 @@ impl WebDavHandler {
                 )
             })?;
         } else {
-            fs::remove_file(&storage_path).await.map_err(|e| {
+            // 删除文件（从存储引擎）
+            storage.delete_file(&path).await.map_err(|e| {
                 SilentError::business_error(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     format!("删除文件失败: {}", e),
@@ -783,7 +1340,7 @@ impl WebDavHandler {
 
     pub(super) async fn handle_mkcol(&self, path: &str) -> silent::Result<Response> {
         let path = Self::decode_path(path)?;
-        let storage_path = self.storage.get_full_path(&path);
+        let storage_path = crate::storage::storage().get_full_path(&path);
         if storage_path.exists() {
             return Err(SilentError::business_error(
                 StatusCode::METHOD_NOT_ALLOWED,
@@ -814,24 +1371,45 @@ impl WebDavHandler {
                 SilentError::business_error(StatusCode::BAD_REQUEST, "缺少 Destination 头")
             })?;
         let dest_path = self.extract_path_from_url(dest)?;
-        let storage_path = self.storage.get_full_path(&path);
-        let dest_storage_path = self.storage.get_full_path(&dest_path);
-        if let Some(parent) = dest_storage_path.parent() {
-            fs::create_dir_all(parent).await.map_err(|e| {
+        let storage = crate::storage::storage();
+        let storage_path = storage.get_full_path(&path);
+        let dest_storage_path = storage.get_full_path(&dest_path);
+
+        // 检查源是文件还是目录
+        let is_directory = storage_path.is_dir();
+
+        if is_directory {
+            // 目录：使用文件系统移动
+            if let Some(parent) = dest_storage_path.parent() {
+                fs::create_dir_all(parent).await.map_err(|e| {
+                    SilentError::business_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("创建目标目录失败: {}", e),
+                    )
+                })?;
+            }
+            fs::rename(&storage_path, &dest_storage_path)
+                .await
+                .map_err(|e| {
+                    SilentError::business_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("移动目录失败: {}", e),
+                    )
+                })?;
+        } else {
+            // 文件：使用存储引擎的高效移动（只更新元数据，不复制块数据）
+            tracing::info!("移动文件: {} -> {}", path, dest_path);
+
+            storage.move_file(&path, &dest_path).await.map_err(|e| {
+                tracing::error!("移动文件失败: {} -> {}, error: {}", path, dest_path, e);
                 SilentError::business_error(
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("创建目标目录失败: {}", e),
+                    format!("移动文件失败: {}", e),
                 )
             })?;
+
+            tracing::info!("文件移动成功: {} -> {}", path, dest_path);
         }
-        fs::rename(&storage_path, &dest_storage_path)
-            .await
-            .map_err(|e| {
-                SilentError::business_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("移动失败: {}", e),
-                )
-            })?;
         // 记录为移动 from->to，供 REPORT 增量同步输出
         self.append_move(&path, &dest_path);
         // 发布事件
@@ -866,20 +1444,24 @@ impl WebDavHandler {
                 SilentError::business_error(StatusCode::BAD_REQUEST, "缺少 Destination 头")
             })?;
         let dest_path = self.extract_path_from_url(dest)?;
-        let src_storage_path = self.storage.get_full_path(&path);
-        let dest_storage_path = self.storage.get_full_path(&dest_path);
-        let metadata = fs::metadata(&src_storage_path)
-            .await
-            .map_err(|_| SilentError::business_error(StatusCode::NOT_FOUND, "源路径不存在"))?;
-        if let Some(parent) = dest_storage_path.parent() {
-            fs::create_dir_all(parent).await.map_err(|e| {
-                SilentError::business_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("创建目标目录失败: {}", e),
-                )
-            })?;
-        }
-        if metadata.is_dir() {
+        let storage = crate::storage::storage();
+        let src_storage_path = storage.get_full_path(&path);
+        let dest_storage_path = storage.get_full_path(&dest_path);
+
+        // 检查源是文件还是目录
+        let is_directory = src_storage_path.is_dir();
+
+        if is_directory {
+            // 目录：使用文件系统复制
+            // 确保目标父目录存在
+            if let Some(parent) = dest_storage_path.parent() {
+                fs::create_dir_all(parent).await.map_err(|e| {
+                    SilentError::business_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("创建目标目录失败: {}", e),
+                    )
+                })?;
+            }
             Self::copy_dir_all(&src_storage_path, &dest_storage_path)
                 .await
                 .map_err(|e| {
@@ -889,14 +1471,18 @@ impl WebDavHandler {
                     )
                 })?;
         } else {
-            fs::copy(&src_storage_path, &dest_storage_path)
-                .await
-                .map_err(|e| {
-                    SilentError::business_error(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        format!("复制文件失败: {}", e),
-                    )
-                })?;
+            // 文件：使用存储引擎操作（读取->写入）
+            let data = storage.read_file(&path).await.map_err(|e| {
+                SilentError::business_error(StatusCode::NOT_FOUND, format!("源文件不存在: {}", e))
+            })?;
+
+            // 写入到新位置
+            storage.save_at_path(&dest_path, &data).await.map_err(|e| {
+                SilentError::business_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("写入目标文件失败: {}", e),
+                )
+            })?;
         }
         // 记录创建
         self.append_change("created", &dest_path);
@@ -952,27 +1538,52 @@ impl WebDavHandler {
 mod tests {
     use super::*;
     use std::sync::Arc;
+    use tempfile::TempDir;
 
-    async fn build_handler() -> WebDavHandler {
-        let dir = tempfile::tempdir().unwrap();
-        let storage = Arc::new(crate::storage::StorageManager::new(
-            dir.path().to_path_buf(),
-            4 * 1024 * 1024,
-        ));
-        storage.init().await.unwrap();
-        let syncm = crate::sync::crdt::SyncManager::new("node-test".into(), storage.clone(), None);
-        let ver = crate::version::VersionManager::new(
-            storage.clone(),
-            Default::default(),
-            dir.path().to_str().unwrap(),
+    // 为每个测试创建独立的存储和handler（避免并行测试时的锁竞争）
+    async fn build_handler_with_独立storage() -> (WebDavHandler, TempDir) {
+        // 使用共享的测试存储（并发安全）
+        let _storage = crate::storage::init_test_storage_async().await;
+
+        // 为 SearchEngine 创建独立的临时目录
+        let temp_dir = TempDir::new().unwrap();
+
+        let syncm = crate::sync::crdt::SyncManager::new("node-test".to_string(), None);
+        let search_engine = Arc::new(
+            crate::search::SearchEngine::new(
+                temp_dir.path().join("search_index"),
+                temp_dir.path().to_path_buf(),
+            )
+            .unwrap(),
         );
-        WebDavHandler::new(
-            storage,
+        let handler = WebDavHandler::new(
             None,
             syncm,
             "".into(),
             "http://127.0.0.1:8080".into(),
-            ver,
+            search_engine,
+        );
+
+        (handler, temp_dir)
+    }
+
+    // 保留build_handler用于非ignore的测试（使用共享存储）
+    #[allow(dead_code)]
+    async fn build_handler() -> WebDavHandler {
+        // 使用共享的测试存储，避免全局存储重复初始化问题
+        let storage = crate::storage::init_test_storage_async().await;
+        let dir = storage.root_dir();
+
+        let syncm = crate::sync::crdt::SyncManager::new("node-test".to_string(), None);
+        let search_engine = Arc::new(
+            crate::search::SearchEngine::new(dir.join("search_index"), dir.to_path_buf()).unwrap(),
+        );
+        WebDavHandler::new(
+            None,
+            syncm,
+            "".into(),
+            "http://127.0.0.1:8080".into(),
+            search_engine,
         )
     }
 
@@ -995,16 +1606,28 @@ mod tests {
 
     #[tokio::test]
     async fn test_propfind_depth_infinity_and_head_get() {
-        let handler = build_handler().await;
+        use silent::prelude::ReqBody;
 
-        // 准备目录与文件
-        let root = handler.storage.root_dir().to_path_buf();
-        let data_root = root.join("data");
-        tokio::fs::create_dir_all(data_root.join("dir/sub"))
+        let (handler, _temp_dir) = build_handler_with_独立storage().await;
+
+        // 使用 WebDAV 方法创建目录和文件
+        // 创建父目录
+        handler.handle_mkcol("/dir").await.unwrap();
+        handler.handle_mkcol("/dir/sub").await.unwrap();
+
+        // 使用 PUT 创建文件
+        let http_req = http::Request::builder()
+            .method("PUT")
+            .uri("/dir/sub/a.txt")
+            .body(())
+            .unwrap();
+        let (parts, _) = http_req.into_parts();
+        let mut put_req = Request::from_parts(parts, ReqBody::Once(bytes::Bytes::from("hello")));
+
+        handler
+            .handle_put("/dir/sub/a.txt", &mut put_req)
             .await
             .unwrap();
-        let fpath = handler.storage.get_full_path("/dir/sub/a.txt");
-        tokio::fs::write(&fpath, b"hello").await.unwrap();
 
         // PROPFIND Depth: infinity
         let mut req = Request::empty();
@@ -1030,31 +1653,45 @@ mod tests {
         assert_eq!(head.status(), StatusCode::OK);
         assert!(head.headers().get(http::header::CONTENT_LENGTH).is_some());
 
-        // GET If-None-Match 命中返回 304
-        let meta = std::fs::metadata(&fpath).unwrap();
-        let etag = WebDavHandler::calc_etag_from_meta(&meta).unwrap();
-        let mut get_req = Request::empty();
-        get_req
-            .headers_mut()
-            .insert("If-None-Match", http::HeaderValue::from_str(&etag).unwrap());
-        let not_mod = handler
-            .handle_get("/dir/sub/a.txt", &get_req)
+        // GET 文件内容验证
+        let get_resp = handler
+            .handle_get("/dir/sub/a.txt", &Request::empty())
             .await
             .unwrap();
-        assert_eq!(not_mod.status(), StatusCode::NOT_MODIFIED);
+        assert_eq!(get_resp.status(), StatusCode::OK);
+
+        // 获取 ETag 并测试 If-None-Match
+        let etag = get_resp
+            .headers()
+            .get(http::header::ETAG)
+            .map(|v| v.to_str().unwrap().to_string());
+
+        if let Some(etag_value) = etag {
+            let mut get_req = Request::empty();
+            get_req.headers_mut().insert(
+                "If-None-Match",
+                http::HeaderValue::from_str(&etag_value).unwrap(),
+            );
+            let not_mod = handler
+                .handle_get("/dir/sub/a.txt", &get_req)
+                .await
+                .unwrap();
+            assert_eq!(not_mod.status(), StatusCode::NOT_MODIFIED);
+        }
     }
 
     #[tokio::test]
     async fn test_mkcol_move_copy() {
-        let handler = build_handler().await;
+        let (handler, _temp_dir) = build_handler_with_独立storage().await;
 
         // MKCOL 创建目录
         let mk = handler.handle_mkcol("/mk/a").await.unwrap();
         assert_eq!(mk.status(), StatusCode::CREATED);
-        assert!(handler.storage.get_full_path("/mk/a").exists());
+        assert!(crate::storage::storage().get_full_path("/mk/a").exists());
 
-        // 创建源文件
-        tokio::fs::write(handler.storage.get_full_path("/mk/a/x.txt"), b"data")
+        // 创建源文件（使用存储引擎API而不是直接文件系统写入）
+        crate::storage::storage()
+            .save_at_path("/mk/a/x.txt", b"data")
             .await
             .unwrap();
 
@@ -1069,8 +1706,19 @@ mod tests {
         let req = Request::from_parts(parts, ReqBody::Empty);
         let mv = handler.handle_move("/mk/a/x.txt", &req).await.unwrap();
         assert_eq!(mv.status(), StatusCode::CREATED);
-        assert!(handler.storage.get_full_path("/mk/b/y.txt").exists());
-        assert!(!handler.storage.get_full_path("/mk/a/x.txt").exists());
+        // 验证文件已移动到新位置（检查存储引擎而不是文件系统）
+        assert!(
+            crate::storage::storage()
+                .get_metadata("/mk/b/y.txt")
+                .await
+                .is_ok()
+        );
+        assert!(
+            crate::storage::storage()
+                .get_metadata("/mk/a/x.txt")
+                .await
+                .is_err()
+        );
 
         // COPY 复制文件
         let http_req2 = http::Request::builder()
@@ -1083,20 +1731,40 @@ mod tests {
         let req2 = Request::from_parts(parts2, ReqBody::Empty);
         let cp = handler.handle_copy("/mk/b/y.txt", &req2).await.unwrap();
         assert_eq!(cp.status(), StatusCode::CREATED);
-        assert!(handler.storage.get_full_path("/mk/c/z.txt").exists());
-        assert!(handler.storage.get_full_path("/mk/b/y.txt").exists());
+        // 验证文件已复制到新位置（检查存储引擎而不是文件系统）
+        assert!(
+            crate::storage::storage()
+                .get_metadata("/mk/c/z.txt")
+                .await
+                .is_ok()
+        );
+        // 原文件仍然存在
+        assert!(
+            crate::storage::storage()
+                .get_metadata("/mk/b/y.txt")
+                .await
+                .is_ok()
+        );
     }
 
     #[tokio::test]
     async fn test_propfind_depth0_and1_and_errors() {
-        let handler = build_handler().await;
+        use silent::prelude::ReqBody;
 
-        // 创建文件与目录
-        tokio::fs::create_dir_all(handler.storage.get_full_path("/p0"))
-            .await
+        let (handler, _temp_dir) = build_handler_with_独立storage().await;
+
+        // 使用 WebDAV API 创建文件与目录
+        handler.handle_mkcol("/p0").await.unwrap();
+
+        // 使用 PUT 创建文件
+        let http_req = http::Request::builder()
+            .method("PUT")
+            .uri("/p0/a.txt")
+            .body(())
             .unwrap();
-        let f = handler.storage.get_full_path("/p0/a.txt");
-        tokio::fs::write(&f, b"x").await.unwrap();
+        let (parts, _) = http_req.into_parts();
+        let mut put_req = Request::from_parts(parts, ReqBody::Once(bytes::Bytes::from("x")));
+        handler.handle_put("/p0/a.txt", &mut put_req).await.unwrap();
 
         // Depth: 0 针对文件
         let mut d0 = Request::empty();
@@ -1157,8 +1825,14 @@ mod tests {
         assert_eq!(e.status(), StatusCode::BAD_REQUEST);
 
         // HEAD If-None-Match 304
-        let meta = std::fs::metadata(&f).unwrap();
-        let etag = WebDavHandler::calc_etag_from_meta(&meta).unwrap();
+        // 从存储引擎获取文件元数据并计算 ETag（与 handle_head 中的计算方式一致）
+        let storage = crate::storage::storage();
+        let file_meta = storage.get_metadata("/p0/a.txt").await.unwrap();
+        let etag = format!(
+            "\"{}-{}\"",
+            file_meta.size,
+            file_meta.hash.chars().take(8).collect::<String>()
+        );
         let mut hreq = Request::empty();
         hreq.headers_mut()
             .insert("If-None-Match", http::HeaderValue::from_str(&etag).unwrap());

@@ -1,8 +1,9 @@
 use crate::notify::EventNotifier;
-use crate::storage::StorageManager;
+use crate::search::SearchEngine;
 use crate::sync::crdt::SyncManager;
 use async_trait::async_trait;
 use silent::prelude::*;
+use silent_nas_core::StorageManagerTrait;
 use std::sync::Arc;
 
 #[allow(unused_imports)]
@@ -30,14 +31,13 @@ pub(super) struct ChangeEntry {
 
 #[derive(Clone)]
 pub struct WebDavHandler {
-    pub storage: Arc<StorageManager>,
+    // pub storage: Arc<StorageManager>,
     pub notifier: Option<Arc<EventNotifier>>,
     #[allow(dead_code)]
     pub sync_manager: Arc<SyncManager>,
     pub base_path: String,
     pub source_http_addr: String,
-    #[allow(dead_code)]
-    pub version_manager: Arc<crate::version::VersionManager>,
+    pub search_engine: Arc<SearchEngine>,
     pub(super) locks: Arc<tokio::sync::RwLock<std::collections::HashMap<String, Vec<DavLock>>>>,
     pub(super) props: Arc<
         tokio::sync::RwLock<
@@ -48,20 +48,19 @@ pub struct WebDavHandler {
 
 impl WebDavHandler {
     pub fn new(
-        storage: Arc<StorageManager>,
         notifier: Option<Arc<EventNotifier>>,
         sync_manager: Arc<SyncManager>,
         base_path: String,
         source_http_addr: String,
-        version_manager: Arc<crate::version::VersionManager>,
+        search_engine: Arc<SearchEngine>,
     ) -> Self {
         let handler = Self {
-            storage,
+            // storage,
             notifier,
             sync_manager,
             base_path,
             source_http_addr,
-            version_manager,
+            search_engine,
             locks: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
             props: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         };
@@ -74,7 +73,7 @@ impl WebDavHandler {
     }
 
     pub(super) fn meta_dir(&self) -> std::path::PathBuf {
-        self.storage.root_dir().join(".webdav")
+        crate::storage::storage().root_dir().join(".webdav")
     }
     pub(super) fn locks_file(&self) -> std::path::PathBuf {
         self.meta_dir().join("locks.json")
@@ -565,7 +564,7 @@ impl WebDavHandler {
     // 辅助类型定义移动到模块级（impl 内不支持定义）
 
     fn current_etag(&self, path: &str) -> Option<String> {
-        let full = self.storage.get_full_path(path);
+        let full = crate::storage::storage().get_full_path(path);
         if let Ok(meta) = std::fs::metadata(full) {
             let len = meta.len();
             let ts = meta
@@ -851,6 +850,7 @@ impl Handler for WebDavHandler {
             "UNLOCK" => self.handle_unlock(&relative_path, &req).await,
             "VERSION-CONTROL" => self.handle_version_control(&relative_path).await,
             "REPORT" => self.handle_report(&relative_path, &mut req).await,
+            "SEARCH" => self.handle_search(&mut req).await,
             _ => Err(SilentError::business_error(
                 StatusCode::METHOD_NOT_ALLOWED,
                 "不支持的方法",
@@ -879,25 +879,20 @@ mod tests {
 
     #[tokio::test]
     async fn test_build_full_href_rules() {
-        let dir = tempfile::tempdir().unwrap();
-        let storage = Arc::new(StorageManager::new(
-            dir.path().to_path_buf(),
-            4 * 1024 * 1024,
-        ));
-        storage.init().await.unwrap();
-        let syncm = SyncManager::new("node-test".into(), storage.clone(), None);
-        let ver = crate::version::VersionManager::new(
-            storage.clone(),
-            Default::default(),
-            dir.path().to_str().unwrap(),
+        // 使用共享的测试存储
+        let storage = crate::storage::init_test_storage_async().await;
+        let dir = storage.root_dir();
+
+        let syncm = SyncManager::new("node-test".to_string(), None);
+        let search_engine = Arc::new(
+            crate::search::SearchEngine::new(dir.join("search_index"), dir.to_path_buf()).unwrap(),
         );
         let handler = WebDavHandler::new(
-            storage,
             None,
             syncm,
             "".into(),
             "http://127.0.0.1:8080".into(),
-            ver,
+            search_engine,
         );
         assert_eq!(handler.build_full_href("/"), "/");
         assert_eq!(handler.build_full_href("/a/b"), "/a/b");

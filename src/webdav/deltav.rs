@@ -3,6 +3,7 @@ use http_body_util::BodyExt;
 use quick_xml::Reader;
 use quick_xml::events::Event;
 use silent::prelude::*;
+use silent_nas_core::StorageManagerTrait;
 use tokio::fs;
 
 impl WebDavHandler {
@@ -57,7 +58,7 @@ impl WebDavHandler {
                 .get("Depth")
                 .and_then(|v| v.to_str().ok())
                 .unwrap_or("1");
-            let storage_path = self.storage.get_full_path(&path);
+            let storage_path = crate::storage::storage().get_full_path(&path);
             let mut xml = String::new();
             xml.push_str(XML_HEADER);
             xml.push_str("<D:multistatus xmlns:D=\"DAV:\">");
@@ -250,7 +251,7 @@ impl WebDavHandler {
         // 自定义过滤（silent:filter）：按 mime/时间范围/limit 过滤（Depth: 1）
         if body_str_lower.contains("silent:filter") || body_str_lower.contains("silent-filter") {
             let (mime_prefix, after, before, limit, tags) = Self::parse_filter_request(&xml_bytes);
-            let storage_path = self.storage.get_full_path(&path);
+            let storage_path = crate::storage::storage().get_full_path(&path);
             let meta = fs::metadata(&storage_path)
                 .await
                 .map_err(|_| SilentError::business_error(StatusCode::NOT_FOUND, "路径不存在"))?;
@@ -391,20 +392,23 @@ impl WebDavHandler {
 
 impl WebDavHandler {
     async fn report_versions(&self, path: &str) -> silent::Result<Response> {
-        let files = self.storage.list_files().await.map_err(|e| {
-            SilentError::business_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("列出文件失败: {}", e),
-            )
-        })?;
+        use silent_nas_core::StorageManagerTrait;
+
+        let files = StorageManagerTrait::list_files(crate::storage::storage())
+            .await
+            .map_err(|e| {
+                SilentError::business_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("列出文件失败: {}", e),
+                )
+            })?;
         let file_id = files
             .iter()
             .find(|m| m.path == path)
             .map(|m| m.id.clone())
             .unwrap_or_else(|| path.trim_start_matches('/').to_string());
-        let versions = self
-            .version_manager
-            .list_versions(&file_id)
+        let versions = crate::storage::storage()
+            .list_file_versions(&file_id)
             .await
             .map_err(|e| {
                 SilentError::business_error(

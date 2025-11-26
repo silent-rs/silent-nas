@@ -5,20 +5,15 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 /// 版本控制状态
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub enum VersioningStatus {
     /// 未启用
+    #[default]
     Disabled,
     /// 启用中
     Enabled,
     /// 已暂停
     Suspended,
-}
-
-impl Default for VersioningStatus {
-    fn default() -> Self {
-        Self::Disabled
-    }
 }
 
 impl VersioningStatus {

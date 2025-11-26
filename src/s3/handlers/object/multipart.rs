@@ -4,6 +4,7 @@ use chrono::Utc;
 use http::StatusCode;
 use sha2::{Digest, Sha256};
 use silent::prelude::*;
+use silent_nas_core::StorageManagerTrait;
 use std::collections::HashMap;
 use tracing::debug;
 

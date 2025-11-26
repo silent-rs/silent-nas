@@ -2,6 +2,7 @@ use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum NasError {
+    #[allow(dead_code)]
     #[error("文件未找到: {0}")]
     FileNotFound(String),
 
@@ -46,6 +47,13 @@ pub enum NasError {
 impl From<sled::Error> for NasError {
     fn from(err: sled::Error) -> Self {
         NasError::Storage(format!("数据库错误: {}", err))
+    }
+}
+
+// 为 silent_storage::StorageError 实现 From trait
+impl From<silent_storage::StorageError> for NasError {
+    fn from(err: silent_storage::StorageError) -> Self {
+        NasError::Storage(format!("存储错误: {}", err))
     }
 }
 

@@ -7,6 +7,7 @@ use http_body_util::BodyExt;
 use silent::SilentError;
 use silent::extractor::{Configs as CfgExtractor, Path};
 use silent::prelude::*;
+use silent_nas_core::StorageManagerTrait;
 
 /// 上传文件
 pub async fn upload_file(
@@ -37,8 +38,7 @@ pub async fn upload_file(
         }
     };
 
-    let metadata = state
-        .storage
+    let metadata = crate::storage::storage()
         .save_file(&file_id, &bytes)
         .await
         .map_err(|e| {
@@ -68,11 +68,14 @@ pub async fn upload_file(
 
 /// 下载文件
 pub async fn download_file(
-    (Path(id), CfgExtractor(state)): (Path<String>, CfgExtractor<AppState>),
+    (Path(id), CfgExtractor(_state)): (Path<String>, CfgExtractor<AppState>),
 ) -> silent::Result<Response> {
-    let data = state.storage.read_file(&id).await.map_err(|e| {
-        SilentError::business_error(StatusCode::NOT_FOUND, format!("文件不存在: {}", e))
-    })?;
+    let data = crate::storage::storage()
+        .read_file(&id)
+        .await
+        .map_err(|e| {
+            SilentError::business_error(StatusCode::NOT_FOUND, format!("文件不存在: {}", e))
+        })?;
 
     let mut resp = Response::empty();
     resp.headers_mut().insert(
@@ -87,12 +90,15 @@ pub async fn download_file(
 pub async fn delete_file(
     (Path(id), CfgExtractor(state)): (Path<String>, CfgExtractor<AppState>),
 ) -> silent::Result<serde_json::Value> {
-    state.storage.delete_file(&id).await.map_err(|e| {
-        SilentError::business_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("删除文件失败: {}", e),
-        )
-    })?;
+    crate::storage::storage()
+        .delete_file(&id)
+        .await
+        .map_err(|e| {
+            SilentError::business_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("删除文件失败: {}", e),
+            )
+        })?;
 
     // 从搜索引擎删除索引
     if let Err(e) = state.search_engine.delete_file(&id).await {
@@ -109,12 +115,17 @@ pub async fn delete_file(
 
 /// 列出文件
 pub async fn list_files(
-    CfgExtractor(state): CfgExtractor<AppState>,
+    CfgExtractor(_state): CfgExtractor<AppState>,
 ) -> silent::Result<Vec<crate::models::FileMetadata>> {
-    state.storage.list_files().await.map_err(|e| {
-        SilentError::business_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("列出文件失败: {}", e),
-        )
-    })
+    use silent_nas_core::StorageManagerTrait;
+
+    // 显式调用 trait 方法
+    StorageManagerTrait::list_files(crate::storage::storage())
+        .await
+        .map_err(|e| {
+            SilentError::business_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("列出文件失败: {}", e),
+            )
+        })
 }

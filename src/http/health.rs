@@ -3,6 +3,7 @@
 use super::state::AppState;
 use silent::extractor::Configs as CfgExtractor;
 use silent::prelude::*;
+use silent_nas_core::StorageManagerTrait;
 
 /// 健康检查 - 简单存活检查
 pub async fn health(_req: Request) -> silent::Result<&'static str> {
@@ -12,10 +13,12 @@ pub async fn health(_req: Request) -> silent::Result<&'static str> {
 /// 就绪检查 - 检查所有依赖服务
 pub async fn readiness(
     _req: Request,
-    CfgExtractor(state): CfgExtractor<AppState>,
+    CfgExtractor(_state): CfgExtractor<AppState>,
 ) -> silent::Result<serde_json::Value> {
     // 检查存储是否可用
-    let storage_ok = state.storage.list_files().await.is_ok();
+    let storage_ok = StorageManagerTrait::list_files(crate::storage::storage())
+        .await
+        .is_ok();
 
     // 检查搜索引擎是否可用（简单检查，总是返回true）
     let search_ok = true;
@@ -38,14 +41,16 @@ pub async fn health_status(
     CfgExtractor(state): CfgExtractor<AppState>,
 ) -> silent::Result<serde_json::Value> {
     // 存储状态
-    let files = state.storage.list_files().await.unwrap_or_default();
+    let files = StorageManagerTrait::list_files(crate::storage::storage())
+        .await
+        .unwrap_or_default();
     let total_size: u64 = files.iter().map(|f| f.size).sum();
 
     // 搜索引擎状态
     let search_stats = state.search_engine.get_stats();
 
-    // 版本管理状态
-    let version_stats = state.version_manager.get_stats().await;
+    // 存储统计信息
+    let storage_stats = state.storage.get_storage_stats().await.ok();
 
     // 同步状态
     let sync_states = state.sync_manager.get_all_sync_states().await;
@@ -63,10 +68,15 @@ pub async fn health_status(
             "index_size": search_stats.index_size,
             "available": true
         },
-        "version": {
-            "total_versions": version_stats.total_versions,
-            "available": true
-        },
+        "storage_stats": storage_stats.as_ref().map(|s| serde_json::json!({
+            "total_versions": s.total_versions,
+            "total_chunks": s.total_chunks,
+            "unique_chunks": s.unique_chunks,
+            "total_size": s.total_size,
+            "total_chunk_size": s.total_chunk_size,
+            "compression_ratio": s.compression_ratio,
+            "avg_chunk_size": s.avg_chunk_size,
+        })).unwrap_or_else(|| serde_json::json!({"available": false})),
         "sync": {
             "states": serde_json::to_value(&sync_states).unwrap_or_default(),
             "available": true

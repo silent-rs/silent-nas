@@ -1,0 +1,35 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cargo fmt:*)",
+      "Bash(timeout 120 cargo check:*)",
+      "Bash(timeout 60 cargo check --no-default-features)",
+      "Bash(cargo clippy:*)",
+      "Bash(cargo test:*)",
+      "Bash(timeout 60 bash -c:*)",
+      "Bash(timeout 60 cargo test --lib:*)",
+      "Bash(RUST_BACKTRACE=1 cargo test:*)",
+      "Bash(timeout 90 cargo test:*)",
+      "Bash(cargo:*)",
+      "Bash(/tmp/test_strip_v3:*)",
+      "Bash(timeout:*)",
+      "Bash(tee:*)",
+      "Bash(cat:*)",
+      "Bash(find:*)",
+      "Bash(xxd:*)",
+      "Bash(RUST_LOG=debug cargo check:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(pkill:*)",
+      "Bash(chmod:*)",
+      "Bash(RUST_BACKTRACE=1 timeout 30 cargo test:*)",
+      "Bash(cloc:*)",
+      "Bash(tree:*)",
+      "Bash(git mv:*)",
+      "Bash(git rm:*)",
+      "Bash(ls:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

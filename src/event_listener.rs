@@ -1,10 +1,10 @@
 use crate::error::Result;
 use crate::models::FileEvent;
-use crate::storage::StorageManager;
 use crate::sync::crdt::{FileSync, SyncManager};
 use crate::sync::incremental::IncrementalSyncHandler;
 use futures_util::StreamExt;
 use sha2::{Digest, Sha256};
+use silent_nas_core::StorageManagerTrait;
 use std::sync::Arc;
 use tokio::time::{Duration, sleep};
 use tracing::{debug, error, info, warn};
@@ -20,7 +20,6 @@ pub struct EventListener {
     sync_manager: Arc<SyncManager>,
     nats_client: async_nats::Client,
     topic_prefix: String,
-    storage: Arc<StorageManager>,
     inc_sync_handler: Arc<IncrementalSyncHandler>,
     // 拉取/退避配置
     http_connect_timeout: u64,
@@ -37,7 +36,6 @@ impl EventListener {
         sync_manager: Arc<SyncManager>,
         nats_client: async_nats::Client,
         topic_prefix: String,
-        storage: StorageManager,
         chunk_size: usize,
         http_connect_timeout: u64,
         http_request_timeout: u64,
@@ -45,15 +43,12 @@ impl EventListener {
         fetch_base_backoff: u64,
         fetch_max_backoff: u64,
     ) -> Self {
-        let storage_arc = Arc::new(storage);
-        let inc_sync_handler =
-            Arc::new(IncrementalSyncHandler::new(storage_arc.clone(), chunk_size));
+        let inc_sync_handler = Arc::new(IncrementalSyncHandler::new(chunk_size));
 
         Self {
             sync_manager,
             nats_client,
             topic_prefix,
-            storage: storage_arc,
             inc_sync_handler,
             http_connect_timeout,
             http_request_timeout,
@@ -132,7 +127,10 @@ impl EventListener {
                             self.sync_manager
                                 .set_last_source(&event.file_id, &source_http)
                                 .await;
-                            let need_fetch = match self.storage.get_metadata(&event.file_id).await {
+                            let need_fetch = match crate::storage::storage()
+                                .get_metadata(&event.file_id)
+                                .await
+                            {
                                 Ok(local_meta) => {
                                     local_meta.hash != expected_hash
                                         || local_meta.size != expected_size
@@ -151,21 +149,22 @@ impl EventListener {
                                     Ok(data) => {
                                         let actual = format!("{:x}", Sha256::digest(&data));
                                         if actual == expected_hash {
-                                            let save_res = if let Some(meta) =
-                                                event.metadata.as_ref()
-                                            {
-                                                if !meta.path.is_empty() {
-                                                    self.storage
-                                                        .save_at_path(&meta.path, &data)
-                                                        .await
+                                            let save_res =
+                                                if let Some(meta) = event.metadata.as_ref() {
+                                                    if !meta.path.is_empty() {
+                                                        crate::storage::storage()
+                                                            .save_at_path(&meta.path, &data)
+                                                            .await
+                                                    } else {
+                                                        crate::storage::storage()
+                                                            .save_file(&event.file_id, &data)
+                                                            .await
+                                                    }
                                                 } else {
-                                                    self.storage
+                                                    crate::storage::storage()
                                                         .save_file(&event.file_id, &data)
                                                         .await
-                                                }
-                                            } else {
-                                                self.storage.save_file(&event.file_id, &data).await
-                                            };
+                                                };
                                             match save_res {
                                                 Ok(_) => {
                                                     crate::metrics::record_sync_operation(
@@ -232,13 +231,13 @@ impl EventListener {
                                                             event.metadata.as_ref()
                                                         {
                                                             if !meta.path.is_empty() {
-                                                                self.storage
+                                                                crate::storage::storage()
                                                                     .save_at_path(
                                                                         &meta.path, &bytes,
                                                                     )
                                                                     .await
                                                             } else {
-                                                                self.storage
+                                                                crate::storage::storage()
                                                                     .save_file(
                                                                         &event.file_id,
                                                                         &bytes,
@@ -246,7 +245,7 @@ impl EventListener {
                                                                     .await
                                                             }
                                                         } else {
-                                                            self.storage
+                                                            crate::storage::storage()
                                                                 .save_file(&event.file_id, &bytes)
                                                                 .await
                                                         };
@@ -324,36 +323,15 @@ impl EventListener {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::StorageManager;
     use std::path::PathBuf;
     use tempfile::TempDir;
 
     // 注意：由于EventListener依赖NATS客户端，完整的功能测试需要集成测试环境
     // 这里只测试可以独立测试的部分
 
-    #[tokio::test]
-    async fn test_event_listener_dependencies() {
-        // 测试EventListener的依赖项可以正确创建
-        let temp_dir = TempDir::new().unwrap();
-        let storage = StorageManager::new(PathBuf::from(temp_dir.path()), 64 * 1024);
-        storage.init().await.unwrap();
-
-        // 创建NATS客户端需要真实的NATS服务器
-        // 这里只验证存储管理器可以正常工作
-        let test_data = b"test content";
-        let file_id = storage.save_file("test", test_data).await.unwrap();
-        assert!(!file_id.id.is_empty());
-
-        // 验证增量同步处理器可以创建
-        let storage_arc = Arc::new(storage);
-        let handler = IncrementalSyncHandler::new(storage_arc, 64 * 1024);
-
-        // 验证处理器可以正常工作
-        let sig = handler
-            .calculate_local_signature(&file_id.id)
-            .await
-            .unwrap();
-        assert_eq!(sig.file_size, test_data.len() as u64);
-    }
+    // 已删除冗余测试: test_event_listener_dependencies 和 test_incremental_sync_handler
+    // 这些功能已在 sync::incremental::handler 模块中充分测试
 
     #[test]
     fn test_module_imports() {
@@ -365,16 +343,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_event_listener_creation() {
-        // 测试可以创建EventListener（不启动）
-        let temp_dir = TempDir::new().unwrap();
-        let storage = StorageManager::new(PathBuf::from(temp_dir.path()), 64 * 1024);
-        let storage_arc = Arc::new(storage);
+        // 测试可以创建 EventListener（不启动）
+        // 使用共享的测试存储初始化，避免临时目录被删除导致的问题
+        let _storage = crate::storage::init_test_storage_async().await;
 
-        let _sync_manager = Arc::new(SyncManager::new(
-            "test-node".to_string(),
-            storage_arc.clone(),
-            None,
-        ));
+        let _sync_manager = Arc::new(SyncManager::new("test-node".to_string(), None));
 
         // 创建模拟的NATS客户端需要真实服务器，这里只是验证类型
         // 实际的EventListener创建需要集成测试环境
@@ -412,11 +385,16 @@ mod tests {
         assert!(parsed.metadata.is_some());
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_storage_operations() {
         // 测试存储操作的基本功能
         let temp_dir = TempDir::new().unwrap();
-        let storage = StorageManager::new(PathBuf::from(temp_dir.path()), 64 * 1024);
+        let config = crate::storage::IncrementalConfig {
+            enable_compression: false,
+            ..crate::storage::IncrementalConfig::default()
+        };
+
+        let storage = StorageManager::new(PathBuf::from(temp_dir.path()), 64 * 1024, config);
         storage.init().await.unwrap();
 
         // 测试保存文件
@@ -432,31 +410,6 @@ mod tests {
         let meta = storage.get_metadata(&metadata.id).await.unwrap();
         assert_eq!(meta.size, test_data.len() as u64);
         assert!(!meta.hash.is_empty());
-    }
-
-    #[tokio::test]
-    async fn test_incremental_sync_handler() {
-        // 测试增量同步处理器的基本功能
-        let temp_dir = TempDir::new().unwrap();
-        let storage = StorageManager::new(PathBuf::from(temp_dir.path()), 64 * 1024);
-        storage.init().await.unwrap();
-        let storage_arc = Arc::new(storage);
-
-        let handler = IncrementalSyncHandler::new(storage_arc.clone(), 4096);
-
-        // 创建测试文件
-        let test_data = b"test content for incremental sync";
-        let metadata = storage_arc.save_file("inc-test", test_data).await.unwrap();
-
-        // 计算签名
-        let signature = handler
-            .calculate_local_signature(&metadata.id)
-            .await
-            .unwrap();
-
-        assert_eq!(signature.file_size, test_data.len() as u64);
-        assert!(!signature.chunks.is_empty());
-        assert_eq!(signature.chunk_size, 4096);
     }
 
     #[test]

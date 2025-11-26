@@ -4,7 +4,7 @@
 use crate::error::Result;
 use crate::models::{EventType, FileEvent, FileMetadata};
 use crate::notify::EventNotifier;
-use crate::storage::StorageManager;
+use crate::storage::{self, StorageManagerTrait};
 use chrono::NaiveDateTime;
 use serde::{Deserialize, Serialize};
 use silent_crdt::crdt::{LWWRegister, VectorClock};
@@ -92,8 +92,6 @@ impl FileSync {
 pub struct SyncManager {
     /// 节点 ID
     node_id: String,
-    /// 存储管理器
-    storage: Arc<StorageManager>,
     /// 事件通知器（可选，单节点模式下为 None）
     notifier: Option<Arc<EventNotifier>>,
     /// 文件同步状态缓存
@@ -105,15 +103,10 @@ pub struct SyncManager {
 }
 
 impl SyncManager {
-    pub fn new(
-        node_id: String,
-        storage: Arc<StorageManager>,
-        notifier: Option<Arc<EventNotifier>>,
-    ) -> Arc<Self> {
+    pub fn new(node_id: String, notifier: Option<Arc<EventNotifier>>) -> Arc<Self> {
         let (tx, _rx) = broadcast::channel(1024);
         Arc::new(Self {
             node_id,
-            storage,
             notifier,
             sync_states: Arc::new(RwLock::new(HashMap::new())),
             last_sources: Arc::new(RwLock::new(HashMap::new())),
@@ -229,10 +222,12 @@ impl SyncManager {
 
     /// 应用合并后的状态到存储
     async fn apply_merged_state(&self, state: &FileSync) -> Result<()> {
+        let storage = storage::storage();
+
         if state.is_deleted() {
             // 文件已被删除
-            if self.storage.get_metadata(&state.file_id).await.is_ok() {
-                self.storage.delete_file(&state.file_id).await?;
+            if storage.get_metadata(&state.file_id).await.is_ok() {
+                storage.delete_file(&state.file_id).await?;
                 info!("应用删除: {}", state.file_id);
             }
         } else if let Some(metadata) = state.get_metadata() {

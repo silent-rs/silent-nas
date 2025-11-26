@@ -3,7 +3,6 @@ use crate::s3::auth::S3Auth;
 use crate::s3::service::S3Service;
 use crate::s3::versioning::VersioningManager;
 use crate::storage::StorageManager;
-use crate::version::VersionManager;
 use http::Method;
 use http::StatusCode;
 use silent::prelude::*;
@@ -17,7 +16,6 @@ pub fn create_s3_routes(
     auth: Option<S3Auth>,
     source_http_addr: String,
     versioning_manager: Arc<VersioningManager>,
-    version_manager: Arc<VersionManager>,
 ) -> Route {
     let service = Arc::new(S3Service::new(
         storage,
@@ -25,7 +23,6 @@ pub fn create_s3_routes(
         auth,
         source_http_addr,
         versioning_manager,
-        version_manager,
     ));
 
     // Bucket操作 - 合并GET和HEAD

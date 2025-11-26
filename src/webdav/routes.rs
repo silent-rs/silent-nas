@@ -27,23 +27,22 @@ fn register_webdav_methods(route: Route, handler: Arc<WebDavHandler>) -> Route {
             handler.clone(),
         )
         .insert_handler(Method::from_bytes(METHOD_REPORT).unwrap(), handler.clone())
+        .insert_handler(Method::from_bytes(METHOD_SEARCH).unwrap(), handler.clone())
         .insert_handler(Method::from_bytes(METHOD_UNLOCK).unwrap(), handler)
 }
 
 pub fn create_webdav_routes(
-    storage: Arc<crate::storage::StorageManager>,
     notifier: Option<Arc<crate::notify::EventNotifier>>,
     sync_manager: Arc<crate::sync::crdt::SyncManager>,
     source_http_addr: String,
-    version_manager: Arc<crate::version::VersionManager>,
+    search_engine: Arc<crate::search::SearchEngine>,
 ) -> Route {
     let handler = Arc::new(WebDavHandler::new(
-        storage,
         notifier,
         sync_manager,
         "".to_string(),
         source_http_addr,
-        version_manager,
+        search_engine,
     ));
     let root_route = register_webdav_methods(Route::new(""), handler.clone());
     let path_route = register_webdav_methods(Route::new("<path:**>"), handler);

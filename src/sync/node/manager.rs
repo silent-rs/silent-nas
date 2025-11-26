@@ -6,6 +6,7 @@ use crate::sync::crdt::SyncManager;
 use chrono::{Local, NaiveDateTime};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
+use silent_nas_core::StorageManagerTrait;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -745,7 +746,7 @@ impl NodeSyncCoordinator {
                             "读取文件内容(按ID): file_id={}, addr={}",
                             file_id, node_address
                         );
-                        storage.read_file(&file_id).await
+                        storage.read_file(&file_id).await.map_err(Into::into)
                     };
 
                     match content_res {
@@ -1210,9 +1211,10 @@ mod tests {
         let storage = Arc::new(crate::storage::StorageManager::new(
             dir.path().to_path_buf(),
             4 * 1024 * 1024,
+            crate::storage::IncrementalConfig::default(),
         ));
         storage.init().await.unwrap();
-        let syncm = SyncManager::new("node-test".into(), storage.clone(), None);
+        let syncm = SyncManager::new("node-test".to_string(), None);
         let nm = NodeManager::new(NodeDiscoveryConfig::default(), syncm.clone());
         let coord = NodeSyncCoordinator::new(SyncConfig::default(), nm, syncm, storage);
         coord

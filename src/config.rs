@@ -31,6 +31,36 @@ pub struct ServerConfig {
 pub struct StorageConfig {
     pub root_path: PathBuf,
     pub chunk_size: usize,
+    /// 启用压缩
+    #[serde(default = "StorageConfig::default_enable_compression")]
+    pub enable_compression: bool,
+    /// 压缩算法 (lz4, zstd)
+    #[serde(default = "StorageConfig::default_compression_algorithm")]
+    pub compression_algorithm: String,
+    /// 启用自动GC
+    #[serde(default = "StorageConfig::default_enable_auto_gc")]
+    pub enable_auto_gc: bool,
+    /// GC触发间隔（秒）
+    #[serde(default = "StorageConfig::default_gc_interval_secs")]
+    pub gc_interval_secs: u64,
+}
+
+impl StorageConfig {
+    fn default_enable_compression() -> bool {
+        true
+    }
+
+    fn default_compression_algorithm() -> String {
+        "lz4".to_string()
+    }
+
+    fn default_enable_auto_gc() -> bool {
+        true
+    }
+
+    fn default_gc_interval_secs() -> u64 {
+        3600 // 默认每小时执行一次GC
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -217,6 +247,10 @@ impl Default for Config {
             storage: StorageConfig {
                 root_path: PathBuf::from("./storage"),
                 chunk_size: 4 * 1024 * 1024, // 4MB
+                enable_compression: true,
+                compression_algorithm: "lz4".to_string(),
+                enable_auto_gc: true,
+                gc_interval_secs: 3600,
             },
             nats: NatsConfig {
                 url: "nats://127.0.0.1:4222".to_string(),
@@ -473,10 +507,18 @@ mod tests {
         let storage = StorageConfig {
             root_path: PathBuf::from("/tmp/storage"),
             chunk_size: 8 * 1024 * 1024,
+            enable_compression: true,
+            compression_algorithm: "zstd".to_string(),
+            enable_auto_gc: true,
+            gc_interval_secs: 7200,
         };
 
         assert_eq!(storage.root_path, PathBuf::from("/tmp/storage"));
         assert_eq!(storage.chunk_size, 8 * 1024 * 1024);
+        assert!(storage.enable_compression);
+        assert_eq!(storage.compression_algorithm, "zstd");
+        assert!(storage.enable_auto_gc);
+        assert_eq!(storage.gc_interval_secs, 7200);
     }
 
     #[test]

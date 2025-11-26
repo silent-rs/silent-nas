@@ -25,9 +25,7 @@ s3_port = 9000
 [storage]
 root_path = "./storage"
 chunk_size = 4194304  # 4MB
-max_file_size = 10737418240  # 10GB
-enable_compression = false
-enable_deduplication = false
+version = "v1"        # 存储引擎版本
 
 [nats]
 url = "nats://127.0.0.1:4222"
@@ -105,17 +103,34 @@ http_port = 8888    # 修改 HTTP 端口
 | 配置项 | 类型 | 默认值 | 说明 |
 |--------|------|--------|------|
 | `root_path` | string | "./storage" | 存储根目录 |
-| `chunk_size` | integer | 4194304 | 文件块大小（字节），4MB |
-| `max_file_size` | integer | 10737418240 | 最大文件大小，10GB |
-| `enable_compression` | boolean | false | 启用压缩（未来支持） |
-| `enable_deduplication` | boolean | false | 启用去重（未来支持） |
+| `chunk_size` | integer | 4194304 | 文件块大小(字节),4MB |
+| `version` | string | "v1" | 存储引擎版本,"v1"或"v2" |
+
+#### 存储引擎版本选择
+
+Silent-NAS 支持两种存储引擎:
+
+**V1 引擎** (推荐用于生产环境):
+- ✅ 简单可靠的文件存储
+- ✅ 经过充分测试
+- ✅ 支持所有功能(HTTP/gRPC/WebDAV/S3/QUIC)
+- ❌ 无重复数据删除
+- ❌ 无压缩功能
+
+**V2 引擎** (实验性,暂不支持):
+- ✅ 内容寻址存储(Content-Addressed Storage)
+- ✅ 自动重复数据删除(节省 50%+ 存储空间)
+- ✅ 可选压缩(LZ4/Zstd,节省额外 30-70% 空间)
+- ✅ 智能增量同步(只传输变化的数据块)
+- ⚠️  需要可变引用(&mut self),与当前架构不兼容
+- ❌ 暂不支持,配置为 "v2" 会返回错误
 
 **示例**:
 ```toml
 [storage]
 root_path = "/mnt/nas/storage"  # 使用独立磁盘
-chunk_size = 8388608            # 8MB 块大小（大文件优化）
-max_file_size = 53687091200     # 50GB 最大文件
+chunk_size = 8388608            # 8MB 块大小(大文件优化)
+version = "v1"                  # 使用 V1 引擎(默认)
 ```
 
 ### [nats] - 消息服务配置

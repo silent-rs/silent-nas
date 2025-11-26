@@ -3125,31 +3125,43 @@ impl S3CompatibleStorageTrait for StorageManager {
             return Ok(objects);
         }
 
-        // 递归扫描目录
-        fn collect_files(
-            dir: &std::path::Path,
-            base: &std::path::Path,
-            prefix: &str,
-            objects: &mut Vec<String>,
-        ) -> std::io::Result<()> {
-            for entry in std::fs::read_dir(dir)? {
-                let entry = entry?;
-                let path = entry.path();
-                if path.is_file() {
-                    if let Ok(relative) = path.strip_prefix(base) {
-                        let key = relative.to_string_lossy().to_string();
-                        if key.starts_with(prefix) {
-                            objects.push(key);
+        // 异步递归扫描目录
+        fn collect_files<'a>(
+            dir: PathBuf,
+            base: PathBuf,
+            prefix: String,
+            objects: &'a mut Vec<String>,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = std::io::Result<()>> + Send + 'a>,
+        > {
+            Box::pin(async move {
+                let mut entries = tokio::fs::read_dir(&dir).await?;
+                while let Some(entry) = entries.next_entry().await? {
+                    let path = entry.path();
+                    let file_type = entry.file_type().await?;
+
+                    if file_type.is_file() {
+                        if let Ok(relative) = path.strip_prefix(&base) {
+                            let key = relative.to_string_lossy().to_string();
+                            if key.starts_with(&prefix) {
+                                objects.push(key);
+                            }
                         }
+                    } else if file_type.is_dir() {
+                        collect_files(path, base.clone(), prefix.clone(), objects).await?;
                     }
-                } else if path.is_dir() {
-                    collect_files(&path, base, prefix, objects)?;
                 }
-            }
-            Ok(())
+                Ok(())
+            })
         }
 
-        collect_files(&bucket_path, &bucket_path, prefix, &mut objects)?;
+        collect_files(
+            bucket_path.clone(),
+            bucket_path,
+            prefix.to_string(),
+            &mut objects,
+        )
+        .await?;
 
         Ok(objects)
     }

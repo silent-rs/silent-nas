@@ -3,6 +3,7 @@ mod deltav;
 mod files;
 pub mod handler;
 pub mod instant_upload;
+mod integration_tests;
 mod locks;
 pub mod memory_monitor;
 mod props;

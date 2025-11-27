@@ -1,6 +1,6 @@
 [package]
 name = "silent-storage"
-version = "0.1.0"
+version = "0.7.0"
 edition = "2024"
 authors = ["Hubert Shelley <hubertshelley@163.com>"]
 description = "Advanced storage system with deduplication, incremental storage, and tiering for Silent NAS"

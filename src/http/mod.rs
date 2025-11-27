@@ -14,6 +14,7 @@ mod search;
 mod state;
 mod storage_v2_metrics;
 mod sync;
+mod upload_sessions;
 mod versions;
 
 pub use auth_middleware::{AuthHook, OptionalAuthHook};
@@ -101,6 +102,25 @@ pub async fn start_http_server(
     // 创建 Storage V2 指标状态
     let storage_v2_metrics = Arc::new(StorageV2MetricsState::new());
 
+    // 创建上传会话管理器
+    let upload_sessions = {
+        use crate::webdav::upload_session::UploadSessionManager;
+
+        // 使用临时目录存储上传会话
+        let temp_dir = std::env::temp_dir().join("silent-nas-uploads");
+        #[allow(clippy::collapsible_if)]
+        if !temp_dir.exists() {
+            if let Err(e) = std::fs::create_dir_all(&temp_dir) {
+                tracing::warn!("创建上传临时目录失败: {} - {}", temp_dir.display(), e);
+            }
+        }
+
+        Some(Arc::new(UploadSessionManager::new(
+            temp_dir, 24, // 24小时过期
+            10, // 最大10个并发上传
+        )))
+    };
+
     // 创建应用状态
     let app_state = AppState {
         storage,
@@ -112,6 +132,7 @@ pub async fn start_http_server(
         audit_logger,
         auth_manager,
         storage_v2_metrics: storage_v2_metrics.clone(),
+        upload_sessions,
     };
 
     // 定期提交索引
@@ -294,6 +315,23 @@ pub async fn start_http_server(
                 Route::new("audit/stats")
                     .hook(auth_hook.clone())
                     .get(audit_api::get_audit_stats),
+            )
+            // 上传会话管理 - 需要认证
+            .append(
+                Route::new("upload/sessions")
+                    .hook(auth_hook.clone())
+                    .get(upload_sessions::list_sessions),
+            )
+            .append(
+                Route::new("upload/sessions/<session_id>")
+                    .hook(auth_hook.clone())
+                    .get(upload_sessions::get_session)
+                    .delete(upload_sessions::cancel_session),
+            )
+            .append(
+                Route::new("upload/sessions/<session_id>/pause")
+                    .hook(auth_hook.clone())
+                    .post(upload_sessions::pause_session),
             );
 
         info!("🔒 认证功能已启用 - API端点已受保护");
@@ -345,7 +383,17 @@ pub async fn start_http_server(
                     .get(storage_v2_metrics::get_storage_v2_metrics_json),
             )
             .append(Route::new("audit/logs").get(audit_api::get_audit_logs))
-            .append(Route::new("audit/stats").get(audit_api::get_audit_stats));
+            .append(Route::new("audit/stats").get(audit_api::get_audit_stats))
+            .append(Route::new("upload/sessions").get(upload_sessions::list_sessions))
+            .append(
+                Route::new("upload/sessions/<session_id>")
+                    .get(upload_sessions::get_session)
+                    .delete(upload_sessions::cancel_session),
+            )
+            .append(
+                Route::new("upload/sessions/<session_id>/pause")
+                    .post(upload_sessions::pause_session),
+            );
 
         info!("⚠️  认证功能未启用 - API端点无保护");
     }
@@ -427,6 +475,7 @@ mod tests {
             audit_logger: None,
             auth_manager: None,
             storage_v2_metrics,
+            upload_sessions: None,
         };
 
         (app_state, temp_dir)

@@ -8,6 +8,7 @@ pub mod memory_monitor;
 mod props;
 mod routes;
 pub mod types;
+mod upload_enhanced;
 pub mod upload_session;
 
 pub use handler::WebDavHandler;

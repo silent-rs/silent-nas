@@ -174,6 +174,77 @@ lazy_static! {
         "Current number of active connections"
     )
     .unwrap();
+
+    // ============ 上传会话指标 ============
+    /// 上传会话总数
+    pub static ref UPLOAD_SESSIONS_TOTAL: IntCounterVec = register_int_counter_vec!(
+        "upload_sessions_total",
+        "Total number of upload sessions",
+        &["status"] // created, completed, failed, cancelled
+    )
+    .unwrap();
+
+    /// 当前活跃上传会话数
+    pub static ref UPLOAD_SESSIONS_ACTIVE: IntGauge = register_int_gauge!(
+        "upload_sessions_active",
+        "Current number of active upload sessions"
+    )
+    .unwrap();
+
+    /// 上传会话时延（秒）
+    pub static ref UPLOAD_SESSION_DURATION_SECONDS: HistogramVec = register_histogram_vec!(
+        "upload_session_duration_seconds",
+        "Upload session duration in seconds",
+        &["status"], // completed, failed, cancelled
+        vec![1.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0, 1800.0, 3600.0]
+    )
+    .unwrap();
+
+    /// 上传会话字节数
+    pub static ref UPLOAD_SESSION_BYTES: IntCounterVec = register_int_counter_vec!(
+        "upload_session_bytes_total",
+        "Total bytes uploaded in sessions",
+        &["status"] // completed, failed, cancelled
+    )
+    .unwrap();
+
+    /// 当前上传会话总大小（字节）
+    pub static ref UPLOAD_SESSIONS_SIZE_BYTES: IntGauge = register_int_gauge!(
+        "upload_sessions_size_bytes",
+        "Total size of all active upload sessions in bytes"
+    )
+    .unwrap();
+
+    /// 上传会话内存使用（字节）
+    pub static ref UPLOAD_SESSIONS_MEMORY_BYTES: IntGauge = register_int_gauge!(
+        "upload_sessions_memory_bytes",
+        "Total memory used by upload sessions in bytes"
+    )
+    .unwrap();
+
+    /// 过期会话清理总数
+    pub static ref UPLOAD_SESSIONS_EXPIRED_TOTAL: IntCounterVec = register_int_counter_vec!(
+        "upload_sessions_expired_total",
+        "Total number of expired sessions cleaned up",
+        &[]
+    )
+    .unwrap();
+
+    /// 秒传成功总数
+    pub static ref UPLOAD_INSTANT_SUCCESS_TOTAL: IntCounterVec = register_int_counter_vec!(
+        "upload_instant_success_total",
+        "Total number of successful instant uploads",
+        &[]
+    )
+    .unwrap();
+
+    /// 秒传节省字节数
+    pub static ref UPLOAD_INSTANT_BYTES_SAVED: IntCounterVec = register_int_counter_vec!(
+        "upload_instant_bytes_saved_total",
+        "Total bytes saved by instant upload",
+        &[]
+    )
+    .unwrap();
 }
 
 /// 导出 Prometheus metrics
@@ -263,6 +334,74 @@ pub fn record_sync_retry(stage: &str) {
 /// 更新失败补偿队列长度
 pub fn set_sync_fail_queue_length(len: i64) {
     SYNC_FAIL_QUEUE_LENGTH.set(len);
+}
+
+/// 记录上传会话创建
+pub fn record_upload_session_created() {
+    UPLOAD_SESSIONS_TOTAL.with_label_values(&["created"]).inc();
+    UPLOAD_SESSIONS_ACTIVE.inc();
+}
+
+/// 记录上传会话完成
+pub fn record_upload_session_completed(duration: f64, bytes: u64) {
+    UPLOAD_SESSIONS_TOTAL
+        .with_label_values(&["completed"])
+        .inc();
+    UPLOAD_SESSIONS_ACTIVE.dec();
+    UPLOAD_SESSION_DURATION_SECONDS
+        .with_label_values(&["completed"])
+        .observe(duration);
+    UPLOAD_SESSION_BYTES
+        .with_label_values(&["completed"])
+        .inc_by(bytes);
+}
+
+/// 记录上传会话失败
+pub fn record_upload_session_failed(duration: f64, bytes: u64) {
+    UPLOAD_SESSIONS_TOTAL.with_label_values(&["failed"]).inc();
+    UPLOAD_SESSIONS_ACTIVE.dec();
+    UPLOAD_SESSION_DURATION_SECONDS
+        .with_label_values(&["failed"])
+        .observe(duration);
+    UPLOAD_SESSION_BYTES
+        .with_label_values(&["failed"])
+        .inc_by(bytes);
+}
+
+/// 记录上传会话取消
+pub fn record_upload_session_cancelled(duration: f64, bytes: u64) {
+    UPLOAD_SESSIONS_TOTAL
+        .with_label_values(&["cancelled"])
+        .inc();
+    UPLOAD_SESSIONS_ACTIVE.dec();
+    UPLOAD_SESSION_DURATION_SECONDS
+        .with_label_values(&["cancelled"])
+        .observe(duration);
+    UPLOAD_SESSION_BYTES
+        .with_label_values(&["cancelled"])
+        .inc_by(bytes);
+}
+
+/// 更新上传会话统计
+pub fn update_upload_session_stats(active_count: i64, total_size_bytes: i64, memory_bytes: i64) {
+    UPLOAD_SESSIONS_ACTIVE.set(active_count);
+    UPLOAD_SESSIONS_SIZE_BYTES.set(total_size_bytes);
+    UPLOAD_SESSIONS_MEMORY_BYTES.set(memory_bytes);
+}
+
+/// 记录过期会话清理
+pub fn record_upload_sessions_expired(count: u64) {
+    UPLOAD_SESSIONS_EXPIRED_TOTAL
+        .with_label_values(&[])
+        .inc_by(count);
+}
+
+/// 记录秒传成功
+pub fn record_instant_upload_success(bytes_saved: u64) {
+    UPLOAD_INSTANT_SUCCESS_TOTAL.with_label_values(&[]).inc();
+    UPLOAD_INSTANT_BYTES_SAVED
+        .with_label_values(&[])
+        .inc_by(bytes_saved);
 }
 
 #[cfg(test)]

@@ -147,6 +147,21 @@ pub async fn start_http_server(
         }
     });
 
+    // 定期清理过期上传会话
+    if let Some(sessions_mgr) = app_state.upload_sessions.clone() {
+        tokio::spawn(async move {
+            use tokio::time::{Duration, interval};
+            let mut timer = interval(Duration::from_secs(3600)); // 每小时清理一次
+            loop {
+                timer.tick().await;
+                let cleaned = sessions_mgr.cleanup_expired_sessions().await;
+                if cleaned > 0 {
+                    tracing::info!("清理了 {} 个过期上传会话", cleaned);
+                }
+            }
+        });
+    }
+
     // 构建路由
     let mut api_route = Route::new("api")
         .append(

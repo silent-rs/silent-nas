@@ -44,6 +44,15 @@ pub struct WebDavHandler {
             std::collections::HashMap<String, std::collections::HashMap<String, String>>,
         >,
     >,
+    /// 上传会话管理器 (支持断点续传)
+    #[allow(dead_code)]
+    pub(super) upload_sessions: Arc<super::upload_session::UploadSessionManager>,
+    /// 内存监控器 (限制内存使用)
+    #[allow(dead_code)]
+    pub(super) memory_monitor: Arc<super::memory_monitor::MemoryMonitor>,
+    /// 秒传管理器 (基于哈希快速上传)
+    #[allow(dead_code)]
+    pub(super) instant_upload: Arc<super::instant_upload::InstantUploadManager>,
 }
 
 impl WebDavHandler {
@@ -54,6 +63,12 @@ impl WebDavHandler {
         source_http_addr: String,
         search_engine: Arc<SearchEngine>,
     ) -> Self {
+        // 创建临时文件目录
+        let temp_dir = crate::storage::storage()
+            .root_dir()
+            .join(".webdav")
+            .join("upload_temp");
+
         let handler = Self {
             // storage,
             notifier,
@@ -63,6 +78,15 @@ impl WebDavHandler {
             search_engine,
             locks: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
             props: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+            upload_sessions: Arc::new(super::upload_session::UploadSessionManager::new(
+                temp_dir, 24, // 24小时过期
+                10, // 最多10个并发上传
+            )),
+            memory_monitor: Arc::new(super::memory_monitor::MemoryMonitor::new(
+                100, // 100MB 限制
+                80,  // 80% 警告阈值
+            )),
+            instant_upload: Arc::new(super::instant_upload::InstantUploadManager::new()),
         };
         handler.load_persistent_state();
         handler

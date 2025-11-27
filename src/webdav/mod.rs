@@ -2,10 +2,13 @@ pub mod constants;
 mod deltav;
 mod files;
 pub mod handler;
+pub mod instant_upload;
 mod locks;
+pub mod memory_monitor;
 mod props;
 mod routes;
 pub mod types;
+pub mod upload_session;
 
 pub use handler::WebDavHandler;
 pub use routes::create_webdav_routes;

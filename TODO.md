@@ -4,7 +4,7 @@
 
 **当前版本**: v0.7.0 ✅ 已完成（存储优化功能完整，性能测试通过）
 
-**下一版本**: v0.7.1 🔄 进行中（WebDAV优化与监控完善）
+**下一版本**: v0.7.1 ✅ 开发完成（WebDAV优化与监控完善，待发布）
 
 **上一版本**: v0.6.0 ✅ 已完成（分布式功能与协议完善）
 
@@ -26,7 +26,7 @@
 - ✅ 性能指标监控（内存、吞吐量、进度）
 - ✅ 压力测试工具集成（webdav_stress_test.sh + webdav_benchmark.sh）
 - ✅ 性能测试文档（webdav-performance-testing.md）
-- 🔄 实时监控面板（Grafana dashboard，待完成）
+- ✅ 实时监控面板（Grafana dashboard + 使用指南）
 
 **Phase 3: 文档与发布** ✅ 已完成（2025-11-28）
 - ✅ WebDAV大文件上传使用指南 (webdav-large-file-upload-guide.md)
@@ -100,7 +100,7 @@ WebDAV大文件流式上传优化与监控完善：实现HTTP层流式读取、�
 - [x] 流式上传性能指标（内存使用、吞吐量、进度跟踪）
 - [x] 实时性能监控面板（Grafana dashboard，grafana-dashboard-webdav.json + 使用指南）
 
-#### 2.3 性能调优 🔄
+#### 2.3 性能调优 ✅
 - [x] 缓存策略优化（基于现有三级缓存）
 - [x] 并发控制调整（内存监控 + 会话并发限制）
 - [x] 资源使用优化（内存控制 < 100MB）

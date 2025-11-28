@@ -10,6 +10,7 @@ use crate::storage::StorageManager;
 use crate::sync::crdt::SyncManager;
 #[cfg(not(test))]
 use crate::sync::incremental::IncrementalSyncHandler;
+use crate::webdav::upload_session::UploadSessionManager;
 use serde::Deserialize;
 use std::sync::Arc;
 
@@ -31,6 +32,7 @@ pub struct AppState {
     pub audit_logger: Option<Arc<AuditLogger>>,
     pub auth_manager: Option<Arc<AuthManager>>,
     pub storage_v2_metrics: Arc<StorageV2MetricsState>,
+    pub upload_sessions: Option<Arc<UploadSessionManager>>,
 }
 
 /// 搜索查询参数

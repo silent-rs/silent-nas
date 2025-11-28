@@ -1039,13 +1039,13 @@ impl WebDavHandler {
         let receive_start = std::time::Instant::now();
 
         // 将 ReqBody 封装为 AsyncRead，避免重复实现流式逻辑
-        struct BodyReader {
+        pub(super) struct BodyReader {
             body: ReqBody,
             buf: bytes::Bytes,
         }
 
         impl BodyReader {
-            fn new(body: ReqBody) -> Self {
+            pub(super) fn new(body: ReqBody) -> Self {
                 Self {
                     body,
                     buf: bytes::Bytes::new(),

@@ -6,6 +6,7 @@ pub mod instant_upload;
 mod integration_tests;
 mod locks;
 pub mod memory_monitor;
+mod performance_tests;
 mod props;
 mod routes;
 pub mod types;

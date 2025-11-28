@@ -9,3 +9,7 @@ smoke*/
 !src/storage
 !silent-nas-core/src/storage
 .claude
+server.log
+scripts/benchmark-results/
+concurrent_test_results.txt
+stress_test_results.txt

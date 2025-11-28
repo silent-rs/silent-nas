@@ -27,7 +27,10 @@
       "Bash(tree:*)",
       "Bash(git mv:*)",
       "Bash(git rm:*)",
-      "Bash(ls:*)"
+      "Bash(ls:*)",
+      "Bash(lsof:*)",
+      "Bash(curl:*)",
+      "Bash(WEBDAV_HOST=http://localhost:8081 ./webdav_benchmark.sh:*)"
     ],
     "deny": [],
     "ask": []

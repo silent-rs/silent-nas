@@ -24,8 +24,9 @@
 - ✅ 自动化性能测试（已集成到 cargo test）
 - ✅ 多种负载模型（1GB、并发、2GB、会话、索引）
 - ✅ 性能指标监控（内存、吞吐量、进度）
-- 🔄 压力测试工具集成（待完成）
-- 🔄 实时监控面板（待完成）
+- ✅ 压力测试工具集成（webdav_stress_test.sh + webdav_benchmark.sh）
+- ✅ 性能测试文档（webdav-performance-testing.md）
+- 🔄 实时监控面板（Grafana dashboard，待完成）
 
 **Phase 3: 文档与发布** 🔜 待开始
 
@@ -85,7 +86,7 @@ WebDAV大文件流式上传优化与监控完善：实现HTTP层流式读取、�
 #### 2.1 基准测试套件 ✅
 - [x] 自动化测试脚本开发（performance_tests.rs，6个性能测试）
 - [x] 多种负载模型设计（1GB单文件、并发上传、2GB超大文件、会话管理、索引查询）
-- [ ] 压力测试工具集成（外部工具，如 wrk、ab）
+- [x] 压力测试工具集成（webdav_stress_test.sh + webdav_benchmark.sh）
 - [x] 性能回归检测机制（通过 cargo test 自动运行）
 
 #### 2.2 监控指标增强 🔄

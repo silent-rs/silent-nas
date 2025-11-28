@@ -138,6 +138,291 @@ curl -X POST \
   http://localhost:8080/api/files/01JE7X.../versions/v1/restore
 ```
 
+### 上传会话管理 API
+
+Silent-NAS v0.7.1 引入了上传会话管理 API，支持大文件的断点续传和秒传功能。
+
+#### 创建上传会话
+
+创建一个新的上传会话用于大文件上传：
+
+```bash
+POST /api/upload-sessions
+
+# 请求体
+{
+  "file_path": "/uploads/large-file.iso",
+  "total_size": 1073741824
+}
+
+# 示例
+curl -X POST \
+  -u admin:admin123 \
+  -H "Content-Type: application/json" \
+  -d '{
+    "file_path": "/uploads/large-file.iso",
+    "total_size": 1073741824
+  }' \
+  http://localhost:8000/api/upload-sessions
+
+# 响应
+{
+  "session_id": "01JDK8PQRS2EXAMPLE",
+  "file_path": "/uploads/large-file.iso",
+  "total_size": 1073741824,
+  "uploaded_size": 0,
+  "status": "Initializing",
+  "progress_percent": 0.0,
+  "memory_usage": 0,
+  "created_at": "2025-11-28T10:30:00",
+  "updated_at": "2025-11-28T10:30:00",
+  "expires_at": "2025-11-30T10:30:00"
+}
+```
+
+**参数说明**:
+- `file_path`: 上传文件的目标路径
+- `total_size`: 文件总大小（字节）
+
+**响应字段**:
+- `session_id`: 会话唯一标识符
+- `status`: 会话状态（Initializing, Uploading, Paused, Completed, Failed, Cancelled）
+- `progress_percent`: 上传进度百分比
+- `memory_usage`: 当前内存使用量（字节）
+- `expires_at`: 会话过期时间（默认24小时）
+
+#### 查询上传会话
+
+获取指定会话的详细信息：
+
+```bash
+GET /api/upload-sessions/{session_id}
+
+# 示例
+curl -X GET \
+  -u admin:admin123 \
+  http://localhost:8000/api/upload-sessions/01JDK8PQRS2EXAMPLE
+
+# 响应
+{
+  "session_id": "01JDK8PQRS2EXAMPLE",
+  "file_path": "/uploads/large-file.iso",
+  "total_size": 1073741824,
+  "uploaded_size": 268435456,
+  "status": "Uploading",
+  "progress_percent": 25.0,
+  "memory_usage": 8388608,
+  "created_at": "2025-11-28T10:30:00",
+  "updated_at": "2025-11-28T10:35:00",
+  "expires_at": "2025-11-30T10:30:00"
+}
+```
+
+#### 列出所有上传会话
+
+获取当前用户的所有上传会话：
+
+```bash
+GET /api/upload-sessions
+
+# 示例
+curl -X GET \
+  -u admin:admin123 \
+  http://localhost:8000/api/upload-sessions
+
+# 响应
+{
+  "sessions": [
+    {
+      "session_id": "01JDK8PQRS2EXAMPLE",
+      "file_path": "/uploads/large-file.iso",
+      "total_size": 1073741824,
+      "uploaded_size": 268435456,
+      "status": "Uploading",
+      "progress_percent": 25.0,
+      "created_at": "2025-11-28T10:30:00",
+      "expires_at": "2025-11-30T10:30:00"
+    },
+    {
+      "session_id": "01JDK9ABCD3EXAMPLE",
+      "file_path": "/uploads/another-file.bin",
+      "total_size": 524288000,
+      "uploaded_size": 524288000,
+      "status": "Completed",
+      "progress_percent": 100.0,
+      "created_at": "2025-11-28T09:00:00",
+      "expires_at": "2025-11-30T09:00:00"
+    }
+  ],
+  "total": 2
+}
+```
+
+#### 更新上传会话
+
+更新会话状态（如暂停、恢复）：
+
+```bash
+PUT /api/upload-sessions/{session_id}
+
+# 请求体
+{
+  "status": "Paused"
+}
+
+# 示例（暂停上传）
+curl -X PUT \
+  -u admin:admin123 \
+  -H "Content-Type: application/json" \
+  -d '{"status": "Paused"}' \
+  http://localhost:8000/api/upload-sessions/01JDK8PQRS2EXAMPLE
+
+# 示例（恢复上传）
+curl -X PUT \
+  -u admin:admin123 \
+  -H "Content-Type: application/json" \
+  -d '{"status": "Uploading"}' \
+  http://localhost:8000/api/upload-sessions/01JDK8PQRS2EXAMPLE
+
+# 响应
+{
+  "session_id": "01JDK8PQRS2EXAMPLE",
+  "file_path": "/uploads/large-file.iso",
+  "status": "Paused",
+  "message": "Session status updated successfully"
+}
+```
+
+**支持的状态转换**:
+- `Uploading` → `Paused`: 暂停上传
+- `Paused` → `Uploading`: 恢复上传
+- `Failed` → `Uploading`: 重试上传
+
+#### 删除上传会话
+
+删除指定的上传会话：
+
+```bash
+DELETE /api/upload-sessions/{session_id}
+
+# 示例
+curl -X DELETE \
+  -u admin:admin123 \
+  http://localhost:8000/api/upload-sessions/01JDK8PQRS2EXAMPLE
+
+# 响应
+{
+  "session_id": "01JDK8PQRS2EXAMPLE",
+  "message": "Session deleted successfully"
+}
+```
+
+#### 断点续传示例
+
+完整的断点续传工作流程：
+
+```bash
+# 1. 创建会话
+SESSION_ID=$(curl -s -X POST \
+  -u admin:admin123 \
+  -H "Content-Type: application/json" \
+  -d '{"file_path":"/uploads/large.iso","total_size":1073741824}' \
+  http://localhost:8000/api/upload-sessions \
+  | jq -r '.session_id')
+
+echo "Session ID: $SESSION_ID"
+
+# 2. 分块上传文件
+# 第一块 (0-8MB)
+curl -X PUT \
+  -u admin:admin123 \
+  -H "Content-Type: application/octet-stream" \
+  -H "X-Upload-Session-Id: $SESSION_ID" \
+  -H "Content-Range: bytes 0-8388607/1073741824" \
+  --data-binary @large.iso.part1 \
+  http://localhost:8000/uploads/large.iso
+
+# 第二块 (8MB-16MB)
+curl -X PUT \
+  -u admin:admin123 \
+  -H "Content-Type: application/octet-stream" \
+  -H "X-Upload-Session-Id: $SESSION_ID" \
+  -H "Content-Range: bytes 8388608-16777215/1073741824" \
+  --data-binary @large.iso.part2 \
+  http://localhost:8000/uploads/large.iso
+
+# 3. 查询进度
+curl -s -X GET \
+  -u admin:admin123 \
+  http://localhost:8000/api/upload-sessions/$SESSION_ID \
+  | jq '.progress_percent'
+
+# 4. 如果中断，从断点继续
+UPLOADED_SIZE=$(curl -s -X GET \
+  -u admin:admin123 \
+  http://localhost:8000/api/upload-sessions/$SESSION_ID \
+  | jq -r '.uploaded_size')
+
+# 从断点继续上传
+curl -X PUT \
+  -u admin:admin123 \
+  -H "Content-Type: application/octet-stream" \
+  -H "X-Upload-Session-Id: $SESSION_ID" \
+  -H "Content-Range: bytes ${UPLOADED_SIZE}-*/1073741824" \
+  --data-binary @large.iso.remaining \
+  http://localhost:8000/uploads/large.iso
+
+# 5. 完成后删除会话
+curl -X DELETE \
+  -u admin:admin123 \
+  http://localhost:8000/api/upload-sessions/$SESSION_ID
+```
+
+#### 秒传功能
+
+通过文件哈希检测重复文件，实现秒传：
+
+```bash
+# 1. 计算文件哈希
+FILE_HASH=$(shasum -a 256 large-file.iso | awk '{print $1}')
+FILE_SIZE=$(stat -f%z large-file.iso)
+
+# 2. 带哈希信息上传
+curl -X PUT \
+  -u admin:admin123 \
+  -H "Content-Type: application/octet-stream" \
+  -H "X-File-Hash: $FILE_HASH" \
+  -H "X-File-Size: $FILE_SIZE" \
+  --data-binary @large-file.iso \
+  http://localhost:8000/uploads/large-file-copy.iso
+
+# 如果文件已存在，响应头会包含：
+# HTTP/1.1 201 Created
+# X-Instant-Upload: true
+# Content-Length: 0
+```
+
+**秒传条件**:
+- 文件哈希完全匹配
+- 文件大小一致
+- 服务器已存储该文件
+
+#### 会话状态说明
+
+| 状态 | 描述 | 可续传 |
+|------|------|--------|
+| Initializing | 会话初始化中 | 否 |
+| Uploading | 上传进行中 | 否 |
+| Paused | 上传已暂停 | 是 |
+| Completed | 上传已完成 | 否 |
+| Failed | 上传失败 | 是 |
+| Cancelled | 上传已取消 | 否 |
+
+**可续传条件**:
+- 状态为 `Paused` 或 `Failed`
+- 已上传大小 > 0
+- 会话未过期
+
 ### 认证 API
 
 #### 登录

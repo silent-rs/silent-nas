@@ -2,6 +2,7 @@
 //!
 //! 提供 REST API 服务，使用中间件和萃取器模式
 
+mod admin;
 mod admin_handlers;
 mod audit_api;
 mod auth_handlers;
@@ -185,6 +186,23 @@ pub async fn start_http_server(
 
         // 管理员API - 需要管理员权限
         api_route = api_route
+            // 仪表盘 API
+            .append(
+                Route::new("admin/dashboard/overview")
+                    .hook(admin_hook.clone())
+                    .get(admin::get_overview),
+            )
+            .append(
+                Route::new("admin/dashboard/metrics")
+                    .hook(admin_hook.clone())
+                    .get(admin::get_metrics),
+            )
+            .append(
+                Route::new("admin/dashboard/activities")
+                    .hook(admin_hook.clone())
+                    .get(admin::get_activities),
+            )
+            // 用户管理 API
             .append(
                 Route::new("admin/users")
                     .hook(admin_hook.clone())

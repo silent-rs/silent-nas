@@ -30,7 +30,8 @@
       "Bash(ls:*)",
       "Bash(lsof:*)",
       "Bash(curl:*)",
-      "Bash(WEBDAV_HOST=http://localhost:8081 ./webdav_benchmark.sh:*)"
+      "Bash(WEBDAV_HOST=http://localhost:8081 ./webdav_benchmark.sh:*)",
+      "Bash(git checkout:*)"
     ],
     "deny": [],
     "ask": []

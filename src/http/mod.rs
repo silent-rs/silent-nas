@@ -13,6 +13,7 @@ mod incremental_sync;
 mod metrics_api;
 mod search;
 mod state;
+mod static_files;
 mod storage_v2_metrics;
 mod sync;
 mod upload_sessions;
@@ -371,6 +372,11 @@ pub async fn start_http_server(
     } else {
         // 未启用认证，使用原始路由（无保护）
         api_route = api_route
+            // 仪表盘 API
+            .append(Route::new("admin/dashboard/overview").get(admin::get_overview))
+            .append(Route::new("admin/dashboard/metrics").get(admin::get_metrics))
+            .append(Route::new("admin/dashboard/activities").get(admin::get_activities))
+            // 文件操作
             .append(
                 Route::new("files")
                     .post(files::upload_file)
@@ -435,10 +441,14 @@ pub async fn start_http_server(
         .hook(state_injector(app_state))
         .append(api_route)
         // 暴露根路径 /metrics（便于 Prometheus 默认抓取路径），与 /api/metrics 并存
-        .append(Route::new("metrics").get(metrics_api::get_metrics));
+        .append(Route::new("metrics").get(metrics_api::get_metrics))
+        // 管理端前端静态文件服务
+        .append(Route::new("admin").get(static_files::serve_static_file))
+        .append(Route::new("admin/<**>").get(static_files::serve_static_file));
 
     info!("HTTP 服务器启动: {}", addr);
     info!("  - REST API: http://{}/api", addr);
+    info!("  - 管理控制台: http://{}/admin", addr);
 
     Server::new()
         .bind(addr.parse().expect("无效的 HTTP 地址"))

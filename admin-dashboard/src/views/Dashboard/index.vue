@@ -6,7 +6,7 @@
     </div>
 
     <div class="dashboard-content">
-      <el-row :gutter="20">
+      <el-row :gutter="20" v-loading="loading">
         <el-col :span="6">
           <el-card shadow="hover">
             <template #header>
@@ -15,8 +15,8 @@
                 <span>文件总数</span>
               </div>
             </template>
-            <div class="stat-value">--</div>
-            <div class="stat-label">暂无数据</div>
+            <div class="stat-value">{{ overview?.file_count ?? '--' }}</div>
+            <div class="stat-label">个文件</div>
           </el-card>
         </el-col>
 
@@ -28,8 +28,8 @@
                 <span>用户总数</span>
               </div>
             </template>
-            <div class="stat-value">--</div>
-            <div class="stat-label">暂无数据</div>
+            <div class="stat-value">{{ overview?.user_count ?? '--' }}</div>
+            <div class="stat-label">个用户</div>
           </el-card>
         </el-col>
 
@@ -41,8 +41,19 @@
                 <span>存储使用</span>
               </div>
             </template>
-            <div class="stat-value">--</div>
-            <div class="stat-label">暂无数据</div>
+            <div class="stat-value">
+              {{ overview?.storage ? formatBytes(overview.storage.used_bytes) : '--' }}
+            </div>
+            <div class="stat-label">
+              已用 / 总计 {{ overview?.storage ? formatBytes(overview.storage.total_bytes) : '--' }}
+              <div v-if="overview?.storage" style="margin-top: 4px">
+                <el-progress
+                  :percentage="overview.storage.usage_percent * 100"
+                  :stroke-width="6"
+                  :show-text="false"
+                />
+              </div>
+            </div>
           </el-card>
         </el-col>
 
@@ -54,8 +65,8 @@
                 <span>在线节点</span>
               </div>
             </template>
-            <div class="stat-value">--</div>
-            <div class="stat-label">暂无数据</div>
+            <div class="stat-value">{{ overview?.online_nodes ?? '--' }}</div>
+            <div class="stat-label">个节点在线</div>
           </el-card>
         </el-col>
       </el-row>
@@ -80,12 +91,40 @@
 </template>
 
 <script setup lang="ts">
+import { ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useAuthStore } from '@/store/modules/auth'
+import { getSystemOverview } from '@/api/dashboard'
+import type { SystemOverview } from '@/types/dashboard'
 
 const router = useRouter()
 const authStore = useAuthStore()
+
+const loading = ref(true)
+const overview = ref<SystemOverview | null>(null)
+
+// 格式化字节数为可读格式
+const formatBytes = (bytes: number): string => {
+  if (bytes === 0) return '0 B'
+  const k = 1024
+  const sizes = ['B', 'KB', 'MB', 'GB', 'TB']
+  const i = Math.floor(Math.log(bytes) / Math.log(k))
+  return Math.round(bytes / Math.pow(k, i) * 100) / 100 + ' ' + sizes[i]
+}
+
+// 加载系统概览数据
+const loadOverview = async () => {
+  try {
+    loading.value = true
+    overview.value = await getSystemOverview()
+  } catch (error) {
+    console.error('Failed to load overview:', error)
+    ElMessage.error('加载系统数据失败')
+  } finally {
+    loading.value = false
+  }
+}
 
 const handleLogout = async () => {
   try {
@@ -102,6 +141,11 @@ const handleLogout = async () => {
     // 用户取消操作
   }
 }
+
+// 组件挂载时加载数据
+onMounted(() => {
+  loadOverview()
+})
 </script>
 
 <style scoped lang="scss">

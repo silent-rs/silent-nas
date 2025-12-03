@@ -12,9 +12,10 @@ export const useAuthStore = defineStore('auth', () => {
   async function login(loginForm: LoginForm) {
     try {
       const res = await loginApi(loginForm)
-      token.value = res.token
+      token.value = res.access_token
       user.value = res.user
-      localStorage.setItem('token', res.token)
+      localStorage.setItem('token', res.access_token)
+      localStorage.setItem('refresh_token', res.refresh_token)
       return true
     } catch (error) {
       console.error('Login failed:', error)

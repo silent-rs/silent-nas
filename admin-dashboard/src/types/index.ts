@@ -11,9 +11,9 @@ export type UserRole = typeof UserRole[keyof typeof UserRole]
 export interface User {
   id: string
   username: string
-  email?: string
+  email: string
   role: UserRole
-  status?: string
+  status: string
   created_at: number
 }
 

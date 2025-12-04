@@ -1,14 +1,10 @@
 <template>
   <div class="dashboard-container">
-    <div class="dashboard-header">
-      <h1>欢迎使用 Silent-NAS 管理控制台</h1>
-      <p v-if="authStore.user">当前用户：{{ authStore.user.username }}（{{ authStore.user.role }}）</p>
-    </div>
 
     <div class="dashboard-content">
       <el-row :gutter="20" v-loading="loading">
         <el-col :span="6">
-          <el-card shadow="hover">
+          <el-card shadow="hover" class="clickable-card" @click="showFileExplorer">
             <template #header>
               <div class="card-header">
                 <el-icon><Folder /></el-icon>
@@ -16,7 +12,7 @@
               </div>
             </template>
             <div class="stat-value">{{ overview?.file_count ?? '--' }}</div>
-            <div class="stat-label">个文件</div>
+            <div class="stat-label">个文件 (点击查看)</div>
           </el-card>
         </el-col>
 
@@ -37,7 +33,7 @@
           <el-card shadow="hover">
             <template #header>
               <div class="card-header">
-                <el-icon><HardDrive /></el-icon>
+                <el-icon><Odometer /></el-icon>
                 <span>存储使用</span>
               </div>
             </template>
@@ -81,28 +77,32 @@
               </div>
             </template>
             <div class="actions">
-              <el-button type="primary" @click="handleLogout">退出登录</el-button>
+              <el-button type="primary" @click="() => router.push('/users')">用户管理</el-button>
             </div>
           </el-card>
         </el-col>
       </el-row>
     </div>
+
+    <!-- 文件浏览器对话框 -->
+    <FileExplorer v-model="fileExplorerVisible" @refresh="loadOverview" />
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
-import { ElMessage, ElMessageBox } from 'element-plus'
-import { useAuthStore } from '@/store/modules/auth'
+import { ElMessage } from 'element-plus'
+import { User, Folder, Odometer, Link, Operation } from '@element-plus/icons-vue'
 import { getSystemOverview } from '@/api/dashboard'
 import type { SystemOverview } from '@/types/dashboard'
+import FileExplorer from '@/components/FileExplorer.vue'
 
 const router = useRouter()
-const authStore = useAuthStore()
 
 const loading = ref(true)
 const overview = ref<SystemOverview | null>(null)
+const fileExplorerVisible = ref(false)
 
 // 格式化字节数为可读格式
 const formatBytes = (bytes: number): string => {
@@ -126,20 +126,9 @@ const loadOverview = async () => {
   }
 }
 
-const handleLogout = async () => {
-  try {
-    await ElMessageBox.confirm('确定要退出登录吗？', '提示', {
-      confirmButtonText: '确定',
-      cancelButtonText: '取消',
-      type: 'warning',
-    })
-
-    await authStore.logout()
-    ElMessage.success('已退出登录')
-    router.push('/login')
-  } catch (error) {
-    // 用户取消操作
-  }
+// 显示文件浏览器
+const showFileExplorer = () => {
+  fileExplorerVisible.value = true
 }
 
 // 组件挂载时加载数据
@@ -150,28 +139,20 @@ onMounted(() => {
 
 <style scoped lang="scss">
 .dashboard-container {
-  padding: 24px;
   height: 100%;
-  overflow-y: auto;
-}
-
-.dashboard-header {
-  margin-bottom: 24px;
-
-  h1 {
-    font-size: 24px;
-    font-weight: 600;
-    color: #303133;
-    margin-bottom: 8px;
-  }
-
-  p {
-    font-size: 14px;
-    color: #909399;
-  }
 }
 
 .dashboard-content {
+  .clickable-card {
+    cursor: pointer;
+    transition: transform 0.2s, box-shadow 0.2s;
+
+    &:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+    }
+  }
+
   .card-header {
     display: flex;
     align-items: center;

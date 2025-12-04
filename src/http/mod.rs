@@ -207,7 +207,8 @@ pub async fn start_http_server(
             .append(
                 Route::new("admin/users")
                     .hook(admin_hook.clone())
-                    .get(admin_handlers::list_users),
+                    .get(admin_handlers::list_users)
+                    .post(admin_handlers::create_user),
             )
             .append(
                 Route::new("admin/users/<id>")
@@ -217,9 +218,14 @@ pub async fn start_http_server(
                     .delete(admin_handlers::delete_user),
             )
             .append(
-                Route::new("admin/users/<id>/reset-password")
+                Route::new("admin/users/<id>/password")
                     .hook(admin_hook.clone())
-                    .post(admin_handlers::reset_password),
+                    .put(admin_handlers::reset_password),
+            )
+            .append(
+                Route::new("admin/users/<id>/status")
+                    .hook(admin_hook.clone())
+                    .put(admin_handlers::update_user_status),
             );
 
         // 文件操作 - 需要认证

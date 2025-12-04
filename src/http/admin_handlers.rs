@@ -222,13 +222,6 @@ pub struct ResetPasswordRequest {
     pub new_password: String,
 }
 
-/// 用户列表响应
-#[derive(Debug, Serialize)]
-pub struct UserListResponse {
-    pub users: Vec<UserInfo>,
-    pub total: usize,
-}
-
 /// 成功响应
 #[derive(Serialize)]
 struct SuccessResponse {
@@ -254,15 +247,9 @@ pub async fn list_users(
         )
     })?;
 
-    let total = users.len();
     let user_infos: Vec<UserInfo> = users.into_iter().map(UserInfo::from).collect();
 
-    let response = UserListResponse {
-        users: user_infos,
-        total,
-    };
-
-    Ok(serde_json::to_value(&response).unwrap())
+    Ok(serde_json::to_value(&user_infos).unwrap())
 }
 
 /// 获取指定用户信息
@@ -516,6 +503,209 @@ pub async fn delete_user(
         message: "用户删除成功".to_string(),
     })
     .unwrap())
+}
+
+/// 创建用户请求
+#[derive(Debug, Deserialize, Validate)]
+pub struct CreateUserRequest {
+    /// 用户名
+    #[validate(length(min = 3, max = 32, message = "用户名长度必须在3-32个字符之间"))]
+    pub username: String,
+    /// 密码
+    #[validate(length(min = 8, max = 72, message = "密码长度必须在8-72个字符之间"))]
+    pub password: String,
+    /// 邮箱
+    #[validate(email(message = "邮箱格式不正确"))]
+    pub email: String,
+    /// 角色
+    pub role: UserRole,
+}
+
+/// 创建用户
+///
+/// POST /api/admin/users
+/// 需要管理员权限
+pub async fn create_user(
+    mut req: Request,
+    CfgExtractor(state): CfgExtractor<AppState>,
+) -> silent::Result<serde_json::Value> {
+    // 解析请求体
+    let body = req.take_body();
+    let bytes = match body {
+        ReqBody::Incoming(body) => body.collect().await?.to_bytes().to_vec(),
+        ReqBody::Once(bytes) => bytes.to_vec(),
+        ReqBody::Empty => {
+            return Err(SilentError::business_error(
+                StatusCode::BAD_REQUEST,
+                "请求体为空",
+            ));
+        }
+    };
+
+    let create_req: CreateUserRequest = serde_json::from_slice(&bytes)
+        .map_err(|e| SilentError::business_error(StatusCode::BAD_REQUEST, e.to_string()))?;
+
+    // 验证请求
+    create_req
+        .validate()
+        .map_err(|e| SilentError::business_error(StatusCode::BAD_REQUEST, e.to_string()))?;
+
+    let auth_manager = state.auth_manager.as_ref().ok_or_else(|| {
+        SilentError::business_error(StatusCode::SERVICE_UNAVAILABLE, "认证系统未初始化")
+    })?;
+
+    // 使用register创建用户
+    use crate::auth::RegisterRequest;
+    let register_req = RegisterRequest {
+        username: create_req.username.clone(),
+        password: create_req.password,
+        email: create_req.email,
+    };
+
+    let user_info = auth_manager.register(register_req).map_err(|e| match e {
+        NasError::Auth(msg) => SilentError::business_error(StatusCode::BAD_REQUEST, msg),
+        _ => SilentError::business_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    })?;
+
+    // 如果指定的角色不是默认角色,需要更新角色
+    if create_req.role != UserRole::User {
+        auth_manager
+            .update_user_role(&user_info.id, create_req.role)
+            .map_err(|e| {
+                SilentError::business_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("更新用户角色失败: {}", e),
+                )
+            })?;
+    }
+
+    // 获取最终的用户信息
+    let user = auth_manager
+        .get_user_by_id(&user_info.id)
+        .await
+        .map_err(|e| {
+            SilentError::business_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("获取用户失败: {}", e),
+            )
+        })?
+        .ok_or_else(|| SilentError::business_error(StatusCode::NOT_FOUND, "用户不存在"))?;
+
+    // 记录审计日志
+    if let Some(audit_logger) = &state.audit_logger {
+        use crate::audit::{AuditAction, AuditEvent};
+
+        let event = AuditEvent::new(AuditAction::ConfigChange, Some(user_info.id.clone()))
+            .with_user("admin".to_string())
+            .with_metadata(serde_json::json!({
+                "action": "create_user",
+                "username": create_req.username,
+                "role": format!("{}", create_req.role),
+                "details": format!("创建用户: {}", create_req.username)
+            }));
+        let _ = audit_logger.log(event).await;
+    }
+
+    Ok(serde_json::to_value(UserInfo::from(user)).unwrap())
+}
+
+/// 更新用户状态请求
+#[derive(Debug, Deserialize, Validate)]
+pub struct UpdateUserStatusRequest {
+    /// 新状态
+    pub status: UserStatus,
+}
+
+/// 更新用户状态
+///
+/// PUT /api/admin/users/:id/status
+/// 需要管理员权限
+pub async fn update_user_status(
+    mut req: Request,
+    CfgExtractor(state): CfgExtractor<AppState>,
+) -> silent::Result<serde_json::Value> {
+    let user_id = req
+        .params()
+        .get("id")
+        .ok_or_else(|| SilentError::business_error(StatusCode::BAD_REQUEST, "缺少用户ID参数"))?
+        .to_string();
+
+    // 解析请求体
+    let body = req.take_body();
+    let bytes = match body {
+        ReqBody::Incoming(body) => body.collect().await?.to_bytes().to_vec(),
+        ReqBody::Once(bytes) => bytes.to_vec(),
+        ReqBody::Empty => {
+            return Err(SilentError::business_error(
+                StatusCode::BAD_REQUEST,
+                "请求体为空",
+            ));
+        }
+    };
+
+    let status_req: UpdateUserStatusRequest = serde_json::from_slice(&bytes)
+        .map_err(|e| SilentError::business_error(StatusCode::BAD_REQUEST, e.to_string()))?;
+
+    // 验证请求
+    status_req
+        .validate()
+        .map_err(|e| SilentError::business_error(StatusCode::BAD_REQUEST, e.to_string()))?;
+
+    let auth_manager = state.auth_manager.as_ref().ok_or_else(|| {
+        SilentError::business_error(StatusCode::SERVICE_UNAVAILABLE, "认证系统未初始化")
+    })?;
+
+    // 获取用户
+    let user = auth_manager
+        .get_user_by_id(&user_id)
+        .await
+        .map_err(|e| {
+            SilentError::business_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("获取用户失败: {}", e),
+            )
+        })?
+        .ok_or_else(|| SilentError::business_error(StatusCode::NOT_FOUND, "用户不存在"))?;
+
+    let old_status = user.status;
+
+    // 更新状态
+    auth_manager
+        .update_user_status(&user_id, status_req.status)
+        .map_err(|e| {
+            SilentError::business_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("更新用户状态失败: {}", e),
+            )
+        })?;
+
+    // 记录审计日志
+    if let Some(audit_logger) = &state.audit_logger {
+        use crate::audit::{AuditAction, AuditEvent};
+
+        let event = AuditEvent::new(AuditAction::ConfigChange, Some(user_id.clone()))
+            .with_user("admin".to_string())
+            .with_metadata(serde_json::json!({
+                "action": "update_user_status",
+                "username": user.username,
+                "details": format!("状态: {} -> {}", old_status, status_req.status)
+            }));
+        let _ = audit_logger.log(event).await;
+    }
+
+    // 获取更新后的用户信息
+    let updated_user = auth_manager
+        .get_user_by_id(&user_id)
+        .await
+        .map_err(|e| {
+            SilentError::business_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("获取用户失败: {}", e),
+            )
+        })?
+        .ok_or_else(|| SilentError::business_error(StatusCode::NOT_FOUND, "用户不存在"))?;
+
+    Ok(serde_json::to_value(UserInfo::from(updated_user)).unwrap())
 }
 
 /// 手动触发垃圾回收

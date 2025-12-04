@@ -10,14 +10,23 @@ const routes: RouteRecordRaw[] = [
   },
   {
     path: '/',
+    component: () => import('@/layouts/MainLayout.vue'),
     redirect: '/dashboard',
     meta: { requiresAuth: true },
-  },
-  {
-    path: '/dashboard',
-    name: 'Dashboard',
-    component: () => import('@/views/Dashboard/index.vue'),
-    meta: { requiresAuth: true },
+    children: [
+      {
+        path: 'dashboard',
+        name: 'Dashboard',
+        component: () => import('@/views/Dashboard/index.vue'),
+        meta: { requiresAuth: true },
+      },
+      {
+        path: 'users',
+        name: 'Users',
+        component: () => import('@/views/Users/index.vue'),
+        meta: { requiresAuth: true, requiredRole: 'Admin' },
+      },
+    ],
   },
 ]
 

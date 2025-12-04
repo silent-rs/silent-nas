@@ -8,14 +8,17 @@ pub mod jwt;
 pub mod models;
 pub mod password;
 pub mod rate_limit;
+pub mod s3_keys_storage;
 pub mod storage;
 pub mod token_blacklist;
 
 pub use jwt::JwtConfig;
 pub use models::{
-    ChangePasswordRequest, LoginRequest, LoginResponse, RegisterRequest, User, UserInfo, UserRole,
-    UserStatus,
+    ChangePasswordRequest, CreateS3KeyRequest, CreateS3KeyResponse, LoginRequest, LoginResponse,
+    RegisterRequest, S3AccessKey, S3AccessKeyInfo, S3KeyStatus, UpdateS3KeyRequest, User, UserInfo,
+    UserRole, UserStatus,
 };
+pub use s3_keys_storage::S3KeyStorage;
 
 use crate::error::{NasError, Result};
 use chrono::{Local, TimeZone};
@@ -31,6 +34,7 @@ use validator::Validate;
 #[derive(Clone)]
 pub struct AuthManager {
     pub(crate) storage: Arc<UserStorage>,
+    pub(crate) s3_keys_storage: Arc<S3KeyStorage>,
     jwt_config: Arc<RwLock<JwtConfig>>,
     rate_limiter: Option<Arc<RateLimiter>>,
     token_blacklist: Option<Arc<TokenBlacklist>>,
@@ -46,6 +50,10 @@ impl AuthManager {
             .as_ref()
             .parent()
             .ok_or_else(|| NasError::Config("无效的数据库路径".to_string()))?;
+
+        // 创建 S3 密钥存储
+        let s3_keys_path = db_dir.join("s3_keys.db");
+        let s3_keys_storage = S3KeyStorage::new(s3_keys_path)?;
 
         // 创建限流器
         let rate_limiter = {
@@ -73,6 +81,7 @@ impl AuthManager {
 
         Ok(Self {
             storage: Arc::new(storage),
+            s3_keys_storage: Arc::new(s3_keys_storage),
             jwt_config: Arc::new(RwLock::new(jwt_config)),
             rate_limiter,
             token_blacklist,
@@ -407,6 +416,186 @@ impl AuthManager {
     /// 检查权限
     pub fn check_permission(&self, user: &User, required_role: UserRole) -> bool {
         user.role >= required_role
+    }
+
+    // ==================== S3 密钥管理方法 ====================
+
+    /// 生成随机的 S3 访问密钥
+    fn generate_access_key() -> String {
+        use rand::Rng;
+        const CHARSET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+        let mut rng = rand::thread_rng();
+
+        let key: String = (0..20)
+            .map(|_| {
+                let idx = rng.gen_range(0..CHARSET.len());
+                CHARSET[idx] as char
+            })
+            .collect();
+
+        format!("AKIA{}", key)
+    }
+
+    /// 生成随机的 S3 密钥密钥
+    fn generate_secret_key() -> String {
+        use rand::Rng;
+        const CHARSET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut rng = rand::thread_rng();
+
+        (0..40)
+            .map(|_| {
+                let idx = rng.gen_range(0..CHARSET.len());
+                CHARSET[idx] as char
+            })
+            .collect()
+    }
+
+    /// 创建 S3 访问密钥
+    pub async fn create_s3_key(
+        &self,
+        user_id: &str,
+        req: CreateS3KeyRequest,
+    ) -> Result<CreateS3KeyResponse> {
+        // 验证请求
+        req.validate()
+            .map_err(|e| NasError::Auth(format!("验证失败: {}", e)))?;
+
+        // 验证用户是否存在
+        let _user = self
+            .storage
+            .get_user_by_id(user_id)?
+            .ok_or_else(|| NasError::Auth("用户不存在".to_string()))?;
+
+        // 生成密钥
+        let access_key = Self::generate_access_key();
+        let secret_key = Self::generate_secret_key();
+
+        // 创建密钥记录
+        let key_id = scru128::new_string();
+        let key = S3AccessKey {
+            id: key_id.clone(),
+            user_id: user_id.to_string(),
+            access_key: access_key.clone(),
+            secret_key: secret_key.clone(),
+            description: req.description.clone(),
+            status: S3KeyStatus::Active,
+            created_at: Local::now(),
+            last_used_at: None,
+        };
+
+        let created_at = key.created_at;
+        self.s3_keys_storage.create_key(key)?;
+
+        Ok(CreateS3KeyResponse {
+            id: key_id,
+            access_key,
+            secret_key,
+            description: req.description,
+            status: S3KeyStatus::Active,
+            created_at,
+        })
+    }
+
+    /// 获取用户的所有 S3 密钥
+    pub async fn list_s3_keys(&self, user_id: &str) -> Result<Vec<S3AccessKeyInfo>> {
+        let keys = self.s3_keys_storage.get_keys_by_user_id(user_id)?;
+        Ok(keys.into_iter().map(|k| k.into()).collect())
+    }
+
+    /// 获取所有 S3 密钥（仅管理员）
+    pub async fn list_all_s3_keys(&self) -> Result<Vec<S3AccessKeyInfo>> {
+        let keys = self.s3_keys_storage.list_all_keys()?;
+        Ok(keys.into_iter().map(|k| k.into()).collect())
+    }
+
+    /// 根据 ID 获取 S3 密钥
+    pub async fn get_s3_key(&self, key_id: &str) -> Result<Option<S3AccessKeyInfo>> {
+        Ok(self
+            .s3_keys_storage
+            .get_key_by_id(key_id)?
+            .map(|k| k.into()))
+    }
+
+    /// 更新 S3 密钥
+    pub async fn update_s3_key(
+        &self,
+        user_id: &str,
+        key_id: &str,
+        req: UpdateS3KeyRequest,
+    ) -> Result<S3AccessKeyInfo> {
+        // 验证请求
+        req.validate()
+            .map_err(|e| NasError::Auth(format!("验证失败: {}", e)))?;
+
+        // 获取密钥
+        let mut key = self
+            .s3_keys_storage
+            .get_key_by_id(key_id)?
+            .ok_or_else(|| NasError::Auth("S3 密钥不存在".to_string()))?;
+
+        // 验证所有权
+        if key.user_id != user_id {
+            return Err(NasError::Auth("无权操作此密钥".to_string()));
+        }
+
+        // 更新字段
+        if let Some(description) = req.description {
+            key.description = description;
+        }
+        if let Some(status) = req.status {
+            key.status = status;
+        }
+
+        let updated = self.s3_keys_storage.update_key(key)?;
+        Ok(updated.into())
+    }
+
+    /// 删除 S3 密钥
+    pub async fn delete_s3_key(&self, user_id: &str, key_id: &str) -> Result<()> {
+        // 获取密钥
+        let key = self
+            .s3_keys_storage
+            .get_key_by_id(key_id)?
+            .ok_or_else(|| NasError::Auth("S3 密钥不存在".to_string()))?;
+
+        // 验证所有权
+        if key.user_id != user_id {
+            return Err(NasError::Auth("无权操作此密钥".to_string()));
+        }
+
+        self.s3_keys_storage.delete_key(key_id)
+    }
+
+    /// 管理员删除任意 S3 密钥
+    pub async fn admin_delete_s3_key(&self, key_id: &str) -> Result<()> {
+        self.s3_keys_storage.delete_key(key_id)
+    }
+
+    /// 验证 S3 访问密钥
+    pub async fn verify_s3_key(&self, access_key: &str, secret_key: &str) -> Result<S3AccessKey> {
+        let key = self
+            .s3_keys_storage
+            .get_key_by_access_key(access_key)?
+            .ok_or_else(|| NasError::Auth("无效的访问密钥".to_string()))?;
+
+        // 验证密钥状态
+        if key.status != S3KeyStatus::Active {
+            return Err(NasError::Auth("密钥已被禁用".to_string()));
+        }
+
+        // 验证密钥密钥
+        if key.secret_key != secret_key {
+            return Err(NasError::Auth("无效的密钥密钥".to_string()));
+        }
+
+        // 更新最后使用时间（异步执行，不阻塞验证）
+        let storage = self.s3_keys_storage.clone();
+        let key_id = key.id.clone();
+        tokio::spawn(async move {
+            let _ = storage.update_last_used(&key_id);
+        });
+
+        Ok(key)
     }
 }
 

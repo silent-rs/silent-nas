@@ -198,6 +198,144 @@ pub struct Claims {
     pub jti: String,
 }
 
+/// S3 访问密钥模型
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct S3AccessKey {
+    /// 密钥ID
+    pub id: String,
+    /// 所属用户ID
+    pub user_id: String,
+    /// 访问密钥（Access Key ID）
+    pub access_key: String,
+    /// 密钥密钥（Secret Access Key）- 注意：只在创建时返回，存储时需要加密
+    pub secret_key: String,
+    /// 密钥描述
+    pub description: String,
+    /// 密钥状态
+    pub status: S3KeyStatus,
+    /// 创建时间
+    #[serde(with = "datetime_local_serde")]
+    pub created_at: DateTime<Local>,
+    /// 最后使用时间（可选）
+    #[serde(
+        with = "datetime_local_serde_option",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
+    pub last_used_at: Option<DateTime<Local>>,
+}
+
+/// S3 密钥状态
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum S3KeyStatus {
+    /// 活跃
+    Active,
+    /// 已禁用
+    Disabled,
+}
+
+impl std::fmt::Display for S3KeyStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            S3KeyStatus::Active => write!(f, "Active"),
+            S3KeyStatus::Disabled => write!(f, "Disabled"),
+        }
+    }
+}
+
+/// S3 密钥信息（公开，不包含 secret_key）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct S3AccessKeyInfo {
+    pub id: String,
+    pub user_id: String,
+    pub access_key: String,
+    pub description: String,
+    pub status: S3KeyStatus,
+    #[serde(with = "datetime_local_serde")]
+    pub created_at: DateTime<Local>,
+    #[serde(
+        with = "datetime_local_serde_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub last_used_at: Option<DateTime<Local>>,
+}
+
+impl From<S3AccessKey> for S3AccessKeyInfo {
+    fn from(key: S3AccessKey) -> Self {
+        Self {
+            id: key.id,
+            user_id: key.user_id,
+            access_key: key.access_key,
+            description: key.description,
+            status: key.status,
+            created_at: key.created_at,
+            last_used_at: key.last_used_at,
+        }
+    }
+}
+
+/// 创建 S3 密钥请求
+#[derive(Debug, Deserialize, Validate)]
+pub struct CreateS3KeyRequest {
+    /// 密钥描述
+    #[validate(length(max = 200, message = "描述长度不能超过200个字符"))]
+    pub description: String,
+}
+
+/// 创建 S3 密钥响应（包含完整的 secret_key，只在创建时返回）
+#[derive(Debug, Serialize)]
+pub struct CreateS3KeyResponse {
+    pub id: String,
+    pub access_key: String,
+    pub secret_key: String,
+    pub description: String,
+    pub status: S3KeyStatus,
+    #[serde(with = "datetime_local_serde")]
+    pub created_at: DateTime<Local>,
+}
+
+/// 更新 S3 密钥请求
+#[derive(Debug, Deserialize, Validate)]
+pub struct UpdateS3KeyRequest {
+    /// 密钥描述
+    #[validate(length(max = 200, message = "描述长度不能超过200个字符"))]
+    pub description: Option<String>,
+    /// 密钥状态
+    pub status: Option<S3KeyStatus>,
+}
+
+// 可选时间的序列化器
+mod datetime_local_serde_option {
+    use super::*;
+
+    pub fn serialize<S>(dt: &Option<DateTime<Local>>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match dt {
+            Some(dt) => serializer.serialize_i64(dt.timestamp()),
+            None => serializer.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<DateTime<Local>>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let opt: Option<i64> = Option::deserialize(deserializer)?;
+        match opt {
+            Some(timestamp) => {
+                let dt = Local
+                    .timestamp_opt(timestamp, 0)
+                    .single()
+                    .ok_or_else(|| serde::de::Error::custom("无效的时间戳"))?;
+                Ok(Some(dt))
+            }
+            None => Ok(None),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

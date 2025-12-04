@@ -42,7 +42,10 @@
       "Bash(env -u http_proxy -u https_proxy curl -s -X POST http://127.0.0.1:8080/api/auth/login )",
       "Bash(TOKEN=\"eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIwM2Y1Ym1iNzFmbjltNXg0bGI2dTdid2F2IiwidXNlcm5hbWUiOiJhZG1pbiIsInJvbGUiOiJBZG1pbiIsImlhdCI6MTc2NDc0NjE3OCwiZXhwIjoxNzY0NzQ5Nzc4LCJqdGkiOiIwM2Y1Ym1zNTQ5am1ueWduZDZ3czZuOGl4In0.WGmhqXq1CeUkhwdfgFrZPoNqrmT7QvukwfxxB0AWJhM\" env -u http_proxy -u https_proxy curl -s http://127.0.0.1:8080/api/admin/dashboard/overview -H \"Authorization: Bearer $TOKEN\")",
       "Bash(env -u http_proxy -u https_proxy curl -s 'http://127.0.0.1:8080/api/admin/dashboard/overview' -H 'Authorization: Bearer eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIwM2Y1Ym1iNzFmbjltNXg0bGI2dTdid2F2IiwidXNlcm5hbWUiOiJhZG1pbiIsInJvbGUiOiJBZG1pbiIsImlhdCI6MTc2NDc0NjE3OCwiZXhwIjoxNzY0NzQ5Nzc4LCJqdGkiOiIwM2Y1Ym1zNTQ5am1ueWduZDZ3czZuOGl4In0.WGmhqXq1CeUkhwdfgFrZPoNqrmT7QvukwfxxB0AWJhM')",
-      "Bash(env -u http_proxy -u https_proxy curl -s -I http://127.0.0.1:8080/admin)"
+      "Bash(env -u http_proxy -u https_proxy curl -s -I http://127.0.0.1:8080/admin)",
+      "Bash(env -u http_proxy -u https_proxy curl -s -X POST http://127.0.0.1:8080/api/auth/login -H \"Content-Type: application/json\" -d '{\"\"username\"\":\"\"admin\"\",\"\"password\"\":\"\"admin123\"\"}')",
+      "Bash(xargs kill -9)",
+      "Bash(git restore:*)"
     ],
     "deny": [],
     "ask": []

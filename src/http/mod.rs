@@ -226,6 +226,25 @@ pub async fn start_http_server(
                 Route::new("admin/users/<id>/status")
                     .hook(admin_hook.clone())
                     .put(admin_handlers::update_user_status),
+            )
+            // S3 密钥管理 API
+            .append(
+                Route::new("admin/s3-keys")
+                    .hook(auth_hook.clone())
+                    .get(admin_handlers::list_s3_keys)
+                    .post(admin_handlers::create_s3_key),
+            )
+            .append(
+                Route::new("admin/s3-keys/all")
+                    .hook(admin_hook.clone())
+                    .get(admin_handlers::list_all_s3_keys),
+            )
+            .append(
+                Route::new("admin/s3-keys/<id>")
+                    .hook(auth_hook.clone())
+                    .get(admin_handlers::get_s3_key)
+                    .put(admin_handlers::update_s3_key)
+                    .delete(admin_handlers::delete_s3_key),
             );
 
         // 文件操作 - 需要认证

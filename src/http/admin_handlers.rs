@@ -771,6 +771,214 @@ pub async fn get_gc_status(
     Ok(serde_json::to_value(&response).unwrap())
 }
 
+// ==================== S3 密钥管理 API ====================
+
+/// POST /api/admin/s3-keys
+/// 创建 S3 访问密钥
+pub async fn create_s3_key(
+    mut req: Request,
+    CfgExtractor(state): CfgExtractor<AppState>,
+) -> silent::Result<serde_json::Value> {
+    let auth_manager = state.auth_manager.as_ref().ok_or_else(|| {
+        SilentError::business_error(StatusCode::SERVICE_UNAVAILABLE, "认证系统未初始化")
+    })?;
+
+    // 从请求配置中获取用户信息
+    let configs = req.configs();
+    let user = configs
+        .get::<crate::auth::User>()
+        .ok_or_else(|| SilentError::business_error(StatusCode::UNAUTHORIZED, "未找到用户信息"))?;
+    let user_id = user.id.clone();
+
+    let body = req.take_body();
+    let bytes = match body {
+        ReqBody::Incoming(body) => body.collect().await?.to_bytes().to_vec(),
+        ReqBody::Once(bytes) => bytes.to_vec(),
+        ReqBody::Empty => {
+            return Err(SilentError::business_error(
+                StatusCode::BAD_REQUEST,
+                "请求体为空",
+            ));
+        }
+    };
+
+    let create_req: crate::auth::CreateS3KeyRequest = serde_json::from_slice(&bytes)
+        .map_err(|e| SilentError::business_error(StatusCode::BAD_REQUEST, e.to_string()))?;
+
+    let response = auth_manager
+        .create_s3_key(&user_id, create_req)
+        .await
+        .map_err(|e| match e {
+            NasError::Auth(msg) => SilentError::business_error(StatusCode::BAD_REQUEST, msg),
+            _ => SilentError::business_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        })?;
+
+    info!("用户 {} 创建了 S3 密钥", user_id);
+
+    Ok(serde_json::to_value(response).unwrap())
+}
+
+/// GET /api/admin/s3-keys
+/// 获取当前用户的所有 S3 密钥
+pub async fn list_s3_keys(
+    req: Request,
+    CfgExtractor(state): CfgExtractor<AppState>,
+) -> silent::Result<serde_json::Value> {
+    let auth_manager = state.auth_manager.as_ref().ok_or_else(|| {
+        SilentError::business_error(StatusCode::SERVICE_UNAVAILABLE, "认证系统未初始化")
+    })?;
+
+    let configs = req.configs();
+    let user = configs
+        .get::<crate::auth::User>()
+        .ok_or_else(|| SilentError::business_error(StatusCode::UNAUTHORIZED, "未找到用户信息"))?;
+    let user_id = &user.id;
+
+    let keys = auth_manager.list_s3_keys(user_id).await.map_err(|e| {
+        SilentError::business_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("获取 S3 密钥列表失败: {}", e),
+        )
+    })?;
+
+    Ok(serde_json::to_value(&keys).unwrap())
+}
+
+/// GET /api/admin/s3-keys/all
+/// 获取所有用户的 S3 密钥（仅管理员）
+pub async fn list_all_s3_keys(
+    _req: Request,
+    CfgExtractor(state): CfgExtractor<AppState>,
+) -> silent::Result<serde_json::Value> {
+    let auth_manager = state.auth_manager.as_ref().ok_or_else(|| {
+        SilentError::business_error(StatusCode::SERVICE_UNAVAILABLE, "认证系统未初始化")
+    })?;
+
+    let keys = auth_manager.list_all_s3_keys().await.map_err(|e| {
+        SilentError::business_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("获取所有 S3 密钥失败: {}", e),
+        )
+    })?;
+
+    Ok(serde_json::to_value(&keys).unwrap())
+}
+
+/// GET /api/admin/s3-keys/:id
+/// 获取指定 S3 密钥
+pub async fn get_s3_key(
+    mut req: Request,
+    CfgExtractor(state): CfgExtractor<AppState>,
+) -> silent::Result<serde_json::Value> {
+    let auth_manager = state.auth_manager.as_ref().ok_or_else(|| {
+        SilentError::business_error(StatusCode::SERVICE_UNAVAILABLE, "认证系统未初始化")
+    })?;
+
+    let key_id = req
+        .params()
+        .get("id")
+        .ok_or_else(|| SilentError::business_error(StatusCode::BAD_REQUEST, "缺少密钥 ID"))?
+        .to_string();
+
+    let key = auth_manager
+        .get_s3_key(&key_id)
+        .await
+        .map_err(|e| {
+            SilentError::business_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("获取 S3 密钥失败: {}", e),
+            )
+        })?
+        .ok_or_else(|| SilentError::business_error(StatusCode::NOT_FOUND, "S3 密钥不存在"))?;
+
+    Ok(serde_json::to_value(key).unwrap())
+}
+
+/// PUT /api/admin/s3-keys/:id
+/// 更新 S3 密钥
+pub async fn update_s3_key(
+    mut req: Request,
+    CfgExtractor(state): CfgExtractor<AppState>,
+) -> silent::Result<serde_json::Value> {
+    let auth_manager = state.auth_manager.as_ref().ok_or_else(|| {
+        SilentError::business_error(StatusCode::SERVICE_UNAVAILABLE, "认证系统未初始化")
+    })?;
+
+    let configs = req.configs();
+    let user = configs
+        .get::<crate::auth::User>()
+        .ok_or_else(|| SilentError::business_error(StatusCode::UNAUTHORIZED, "未找到用户信息"))?;
+    let user_id = user.id.clone();
+
+    let key_id = req
+        .params()
+        .get("id")
+        .ok_or_else(|| SilentError::business_error(StatusCode::BAD_REQUEST, "缺少密钥 ID"))?
+        .to_string();
+
+    let body = req.take_body();
+    let bytes = match body {
+        ReqBody::Incoming(body) => body.collect().await?.to_bytes().to_vec(),
+        ReqBody::Once(bytes) => bytes.to_vec(),
+        ReqBody::Empty => {
+            return Err(SilentError::business_error(
+                StatusCode::BAD_REQUEST,
+                "请求体为空",
+            ));
+        }
+    };
+
+    let update_req: crate::auth::UpdateS3KeyRequest = serde_json::from_slice(&bytes)
+        .map_err(|e| SilentError::business_error(StatusCode::BAD_REQUEST, e.to_string()))?;
+
+    let updated = auth_manager
+        .update_s3_key(&user_id, &key_id, update_req)
+        .await
+        .map_err(|e| match e {
+            NasError::Auth(msg) => SilentError::business_error(StatusCode::FORBIDDEN, msg),
+            _ => SilentError::business_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        })?;
+
+    info!("用户 {} 更新了 S3 密钥 {}", user_id, key_id);
+
+    Ok(serde_json::to_value(updated).unwrap())
+}
+
+/// DELETE /api/admin/s3-keys/:id
+/// 删除 S3 密钥
+pub async fn delete_s3_key(
+    mut req: Request,
+    CfgExtractor(state): CfgExtractor<AppState>,
+) -> silent::Result<serde_json::Value> {
+    let auth_manager = state.auth_manager.as_ref().ok_or_else(|| {
+        SilentError::business_error(StatusCode::SERVICE_UNAVAILABLE, "认证系统未初始化")
+    })?;
+
+    let configs = req.configs();
+    let user = configs
+        .get::<crate::auth::User>()
+        .ok_or_else(|| SilentError::business_error(StatusCode::UNAUTHORIZED, "未找到用户信息"))?;
+    let user_id = user.id.clone();
+
+    let key_id = req
+        .params()
+        .get("id")
+        .ok_or_else(|| SilentError::business_error(StatusCode::BAD_REQUEST, "缺少密钥 ID"))?
+        .to_string();
+
+    auth_manager
+        .delete_s3_key(&user_id, &key_id)
+        .await
+        .map_err(|e| match e {
+            NasError::Auth(msg) => SilentError::business_error(StatusCode::FORBIDDEN, msg),
+            _ => SilentError::business_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        })?;
+
+    info!("用户 {} 删除了 S3 密钥 {}", user_id, key_id);
+
+    Ok(serde_json::json!({ "message": "S3 密钥已删除" }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

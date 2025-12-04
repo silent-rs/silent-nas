@@ -14,6 +14,10 @@
             <el-icon><User /></el-icon>
             <span>用户管理</span>
           </el-menu-item>
+          <el-menu-item index="/s3-keys">
+            <el-icon><Key /></el-icon>
+            <span>S3密钥</span>
+          </el-menu-item>
         </el-menu>
         <div class="user-info" v-if="authStore.user">
           <span>{{ authStore.user.username }}（{{ authStore.user.role }}）</span>
@@ -31,7 +35,7 @@
 import { computed } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { House, User } from '@element-plus/icons-vue'
+import { House, User, Key } from '@element-plus/icons-vue'
 import { useAuthStore } from '@/store/modules/auth'
 
 const router = useRouter()

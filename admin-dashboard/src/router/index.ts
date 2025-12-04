@@ -26,6 +26,12 @@ const routes: RouteRecordRaw[] = [
         component: () => import('@/views/Users/index.vue'),
         meta: { requiresAuth: true, requiredRole: 'Admin' },
       },
+      {
+        path: 's3-keys',
+        name: 'S3Keys',
+        component: () => import('@/views/S3Keys/index.vue'),
+        meta: { requiresAuth: true },
+      },
     ],
   },
 ]
